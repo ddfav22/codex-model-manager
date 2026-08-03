@@ -31,6 +31,24 @@ function findCodexExecutable(root) {
   return ''
 }
 
+function resolveTestCodexExecutable() {
+  const explicitPath = String(process.env.CODEX_MM_TEST_CODEX_PATH || '').trim()
+  const packagePath = path.join(
+    __dirname,
+    '..',
+    'node_modules',
+    '@openai',
+    'codex-win32-x64',
+    'vendor',
+    'x86_64-pc-windows-msvc',
+    'bin',
+    'codex.exe'
+  )
+  const desktopPath = findCodexExecutable(path.join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin'))
+
+  return [explicitPath, packagePath, desktopPath].find(candidate => candidate && fs.existsSync(candidate)) || ''
+}
+
 function listen(server) {
   return new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -228,11 +246,11 @@ async function main() {
       }
     }
   }
-  const codexPath = findCodexExecutable(path.join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin'))
+  const codexPath = resolveTestCodexExecutable()
   const modelCatalogPath = path.join(os.tmpdir(), 'codex-mm-wire-model-catalog.json')
   const wireCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-wire-home-'))
 
-  if (!codexPath) throw new Error('没有找到 ChatGPT 客户端附带的 codex.exe')
+  if (!codexPath) throw new Error('没有找到 wire 测试所需的 Codex CLI，请执行 npm ci 后重试')
 
   const wireOptions = {
     codexHome: wireCodexHome,
