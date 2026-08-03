@@ -68,6 +68,7 @@ async function main() {
   const projectRoot = path.resolve(__dirname, '..')
   const installerIncludeRelative = String(packageMetadata.build?.nsis?.include || '')
   const installerIncludePath = path.resolve(projectRoot, installerIncludeRelative)
+  const installerBuildScript = String(packageMetadata.scripts?.['dist:installer'] || '')
 
   assert.ok(installerIncludeRelative, 'NSIS include path must be configured')
   assert.ok(
@@ -78,6 +79,11 @@ async function main() {
     fs.statSync(installerIncludePath).isFile(),
     true,
     'NSIS include source must be tracked and present'
+  )
+  assert.match(
+    installerBuildScript,
+    /--publish\s+never(?:\s|$)/,
+    'installer build must not auto-publish before release validation completes'
   )
 
   const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-legacy-'))

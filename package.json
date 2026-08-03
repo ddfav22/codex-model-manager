@@ -19,7 +19,7 @@
     "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:NODE_ENV='development'; $env:NEXT_DEV_SERVER_URL='http://localhost:3000'; electron .\"",
     "build": "node electron/build-next.js",
     "dist": "npm run build && electron-builder --win --dir --config.win.signAndEditExecutable=false && npm run assemble:clean-release && npm run test:clean-release",
-    "dist:installer": "npm run build && electron-builder --win nsis --config.win.signAndEditExecutable=false",
+    "dist:installer": "npm run build && electron-builder --win nsis --config.win.signAndEditExecutable=false --publish never",
     "dist:portable": "npm run build && electron-builder --win portable --config.win.signAndEditExecutable=false",
     "pack": "npm run build && electron-builder --win --dir --config.win.signAndEditExecutable=false",
     "start": "electron .",
