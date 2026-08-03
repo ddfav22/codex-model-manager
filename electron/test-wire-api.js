@@ -1873,7 +1873,7 @@ async function main() {
           content: [
             {
               type: 'input_text',
-              text: '<environment_context><cwd>D:\\AI</cwd><shell>powershell</shell></environment_context>'
+              text: '<environment_context><cwd>C:\\TestWorkspace</cwd><shell>powershell</shell></environment_context>'
             }
           ]
         }

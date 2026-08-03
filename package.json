@@ -102,6 +102,7 @@
       "out/**/*",
       "electron/**/*",
       "!electron/build-next.js",
+      "!electron/assets/installer.nsh",
       "!electron/test-*.js",
       "node_modules/eventsource-parser/**/*",
       "node_modules/smol-toml/**/*",
@@ -128,7 +129,7 @@
       "shortcutName": "ChatGPT Model Manager",
       "deleteAppDataOnUninstall": false,
       "packElevateHelper": false,
-      "include": "build/installer.nsh",
+      "include": "electron/assets/installer.nsh",
       "artifactName": "ChatGPT-Model-Manager-Setup-${version}-${arch}.${ext}"
     }
   }

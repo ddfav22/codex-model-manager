@@ -3,6 +3,7 @@ const fs = require('fs')
 const net = require('net')
 const os = require('os')
 const path = require('path')
+const packageMetadata = require('../package.json')
 
 const manager = require('./codexManager')
 const { adaptResponsesRequest, normalizeResponsesToolItemIds, runWithAbortTimeout } = require('./protocolProxy')
@@ -64,10 +65,25 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  const projectRoot = path.resolve(__dirname, '..')
+  const installerIncludeRelative = String(packageMetadata.build?.nsis?.include || '')
+  const installerIncludePath = path.resolve(projectRoot, installerIncludeRelative)
+
+  assert.ok(installerIncludeRelative, 'NSIS include path must be configured')
+  assert.ok(
+    installerIncludePath.startsWith(`${projectRoot}${path.sep}`),
+    'NSIS include path must stay inside the project'
+  )
+  assert.strictEqual(
+    fs.statSync(installerIncludePath).isFile(),
+    true,
+    'NSIS include source must be tracked and present'
+  )
+
   const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-legacy-'))
   const markerPath = path.join(legacyRoot, 'manager-executable.json')
-  const currentExecutable = 'D:\\AI\\ChatGPT-Model-Manager-1.2.32-complete\\ChatGPT Model Manager.exe'
-  const previousExecutable = 'D:\\AI\\ChatGPT-Model-Manager-1.2.31-complete\\ChatGPT Model Manager.exe'
+  const currentExecutable = 'C:\\Programs\\ChatGPT-Model-Manager-1.2.32-complete\\ChatGPT Model Manager.exe'
+  const previousExecutable = 'C:\\Programs\\ChatGPT-Model-Manager-1.2.31-complete\\ChatGPT Model Manager.exe'
 
   try {
     assert.deepStrictEqual(
@@ -576,7 +592,9 @@ async function main() {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: '<environment_context><cwd>D:\\AI</cwd></environment_context>' }]
+        content: [
+          { type: 'input_text', text: '<environment_context><cwd>C:\\TestWorkspace</cwd></environment_context>' }
+        ]
       }
     ]),
     true
