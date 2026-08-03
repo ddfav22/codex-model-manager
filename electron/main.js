@@ -42,6 +42,7 @@ const runtimeLogPath = configureRuntimeLogger({
 const updateRepository = process.env.CODEX_MM_UPDATE_REPOSITORY || repositoryFromPackageMetadata(packageMetadata)
 const appUpdater = createAppUpdater({
   currentVersion: app.getVersion(),
+  currentExecutablePath: process.execPath,
   repository: updateRepository,
   updatesRoot: portableStorage.updates,
   enabled: app.isPackaged && process.env.CODEX_MM_DISABLE_UPDATE_CHECK !== '1',

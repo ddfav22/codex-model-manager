@@ -62,6 +62,31 @@ function releaseAssetUrlAllowed(urlValue, repository) {
   }
 }
 
+function resolveInstallDirectory(currentExecutablePath) {
+  const executablePath = path.resolve(String(currentExecutablePath || ''))
+  const installDirectory = path.dirname(executablePath)
+
+  if (!currentExecutablePath || installDirectory === path.parse(installDirectory).root) {
+    throw new Error('无法确定当前程序目录，已取消更新。')
+  }
+  if (/[\0\r\n"]/u.test(installDirectory)) throw new Error('当前程序目录格式无效，已取消更新。')
+
+  return installDirectory
+}
+
+function updateInstallerArguments(installDirectory) {
+  const resolvedDirectory = path.resolve(String(installDirectory || ''))
+
+  if (!path.isAbsolute(resolvedDirectory) || resolvedDirectory === path.parse(resolvedDirectory).root) {
+    throw new Error('更新安装目录无效。')
+  }
+  if (/[\0\r\n"]/u.test(resolvedDirectory)) throw new Error('更新安装目录格式无效。')
+
+  // NSIS requires /D to be the final argument. --updated waits for the old
+  // process and preserves data; --force-run starts the newly installed build.
+  return ['/S', '/currentuser', '--updated', '--force-run', '--keep-shortcuts', `/D=${resolvedDirectory}`]
+}
+
 function headerValue(headers, name) {
   if (!headers) return ''
   if (typeof headers.get === 'function') return headers.get(name) || ''
@@ -99,6 +124,7 @@ function createAppUpdater(options = {}) {
   const logEvent = typeof options.logEvent === 'function' ? options.logEvent : () => {}
   const logError = typeof options.logError === 'function' ? options.logError : () => {}
   const onBeforeInstall = typeof options.onBeforeInstall === 'function' ? options.onBeforeInstall : () => {}
+  const installDirectory = resolveInstallDirectory(options.currentExecutablePath || process.execPath)
   const enabled = options.enabled !== false && Boolean(repository) && typeof fetchFn === 'function'
   let activeCheck = null
   let readyInstallerPath = ''
@@ -361,10 +387,10 @@ function createAppUpdater(options = {}) {
       throw new Error('更新包再次校验失败，已拒绝安装。')
     }
 
-    publishState({ stage: 'installing', message: `正在安装新版本 ${state.latestVersion}` })
+    publishState({ stage: 'installing', message: `正在退出程序并安装新版本 ${state.latestVersion}` })
 
     try {
-      const child = spawnFn(readyInstallerPath, ['/S'], {
+      const child = spawnFn(readyInstallerPath, updateInstallerArguments(installDirectory), {
         detached: true,
         stdio: 'ignore',
         windowsHide: true
@@ -393,7 +419,11 @@ function createAppUpdater(options = {}) {
         child.once('error', onError)
       })
       child.unref?.()
-      logEvent('info', 'update.install.start', { latestVersion: state.latestVersion })
+      logEvent('info', 'update.install.start', {
+        latestVersion: state.latestVersion,
+        target: 'current-executable-directory',
+        restartAfterInstall: true
+      })
       onBeforeInstall()
 
       return { ok: true, latestVersion: state.latestVersion }
@@ -427,5 +457,7 @@ module.exports = {
   parseSha256Digest,
   releaseAssetUrlAllowed,
   repositoryFromPackageMetadata,
+  resolveInstallDirectory,
+  updateInstallerArguments,
   sha256File
 }

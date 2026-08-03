@@ -12,7 +12,9 @@ const {
   createAppUpdater,
   normalizeVersion,
   releaseAssetUrlAllowed,
-  repositoryFromPackageMetadata
+  repositoryFromPackageMetadata,
+  resolveInstallDirectory,
+  updateInstallerArguments
 } = require('./features/appUpdater')
 
 const repository = 'example/codex-model-manager'
@@ -44,7 +46,21 @@ async function main() {
     repository
   )
   assert.strictEqual(repositoryFromPackageMetadata(packageMetadata), productionRepository)
-  assert.deepStrictEqual(normalizeVersion(packageMetadata.version), [1, 2, 57])
+  assert.deepStrictEqual(normalizeVersion(packageMetadata.version), [1, 2, 58])
+  const installedExecutable = path.join('C:\\', 'portable app', 'ChatGPT Model Manager.exe')
+  const installDirectory = path.dirname(installedExecutable)
+
+  assert.strictEqual(resolveInstallDirectory(installedExecutable), installDirectory)
+  assert.deepStrictEqual(updateInstallerArguments(installDirectory), [
+    '/S',
+    '/currentuser',
+    '--updated',
+    '--force-run',
+    '--keep-shortcuts',
+    `/D=${installDirectory}`
+  ])
+  assert.throws(() => resolveInstallDirectory('C:\\app.exe'), /无法确定当前程序目录/)
+  assert.throws(() => updateInstallerArguments('C:\\'), /安装目录无效/)
   assert.strictEqual(
     releaseAssetUrlAllowed(
       'https://github.com/example/codex-model-manager/releases/download/v1.2.53/update.exe',
@@ -64,6 +80,7 @@ async function main() {
   let beforeInstallCalls = 0
   const updater = createAppUpdater({
     currentVersion: '1.2.52',
+    currentExecutablePath: path.join(tempRoot, 'installed', 'ChatGPT Model Manager.exe'),
     repository,
     updatesRoot: tempRoot,
     onState: state => states.push(state),
@@ -130,7 +147,14 @@ async function main() {
   assert.deepStrictEqual(installResult, { ok: true, latestVersion: '1.2.53' })
   assert.strictEqual(spawnCalls.length, 1)
   assert.strictEqual(spawnCalls[0].file, path.join(tempRoot, installerName))
-  assert.deepStrictEqual(spawnCalls[0].args, ['/S'])
+  assert.deepStrictEqual(spawnCalls[0].args, [
+    '/S',
+    '/currentuser',
+    '--updated',
+    '--force-run',
+    '--keep-shortcuts',
+    `/D=${path.join(tempRoot, 'installed')}`
+  ])
   assert.strictEqual(spawnCalls[0].options.detached, true)
   assert.strictEqual(spawnCalls[0].unrefCalled, true)
   assert.strictEqual(beforeInstallCalls, 1)

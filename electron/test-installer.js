@@ -1,9 +1,11 @@
 const assert = require('assert')
+const crypto = require('crypto')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
-const { execFileSync } = require('child_process')
+const { execFileSync, spawn } = require('child_process')
 const packageMetadata = require('../package.json')
+const { createAppUpdater } = require('./features/appUpdater')
 
 const productExecutable = 'ChatGPT Model Manager.exe'
 const updaterCacheDirectory = path.join(process.env.LOCALAPPDATA || '', `${packageMetadata.name}-updater`)
@@ -96,7 +98,129 @@ function packagedUiSmoke(installDirectory, port) {
   })
 }
 
-function main() {
+function previousPatchVersion(version) {
+  const parts = String(version).split('.').map(Number)
+
+  assert.strictEqual(parts.length, 3, '测试版本号格式无效')
+  assert.ok(parts[2] > 0, '测试版本必须有可递减的修订号')
+
+  return `${parts[0]}.${parts[1]}.${parts[2] - 1}`
+}
+
+function readLogEvents(logPath) {
+  if (!fs.existsSync(logPath)) return []
+
+  return fs
+    .readFileSync(logPath, 'utf8')
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .flatMap(line => {
+      try {
+        return [JSON.parse(line)]
+      } catch {
+        return []
+      }
+    })
+}
+
+function stopProcessTree(pid) {
+  try {
+    execFileSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore'
+    })
+  } catch {
+    // The process may have exited after logging startup; that is already safe.
+  }
+}
+
+async function selfUpdate(installerPath, installDirectory, markerPath) {
+  const installedExecutable = path.join(installDirectory, productExecutable)
+  const updatesRoot = path.join(installDirectory, 'data', 'updates')
+  const cachedInstaller = path.join(updatesRoot, path.basename(installerPath))
+  const obsoleteProgramFile = path.join(installDirectory, 'obsolete-program-file.txt')
+  const logPath = path.join(installDirectory, 'data', 'logs', 'manager.log')
+  const installerBytes = fs.statSync(installerPath).size
+  const installerDigest = crypto.createHash('sha256').update(fs.readFileSync(installerPath)).digest('hex')
+  const startedAt = Date.now()
+  let beforeInstallCalls = 0
+
+  fs.mkdirSync(updatesRoot, { recursive: true })
+  fs.copyFileSync(installerPath, cachedInstaller)
+  fs.writeFileSync(obsoleteProgramFile, 'must be removed by the in-place update', 'utf8')
+  process.env.CODEX_MM_DISABLE_UPDATE_CHECK = '1'
+
+  const updater = createAppUpdater({
+    currentVersion: previousPatchVersion(packageMetadata.version),
+    currentExecutablePath: installedExecutable,
+    repository: 'ddfav22/codex-model-manager',
+    updatesRoot,
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          tag_name: `v${packageMetadata.version}`,
+          draft: false,
+          prerelease: false,
+          html_url: `https://github.com/ddfav22/codex-model-manager/releases/tag/v${packageMetadata.version}`,
+          body: 'installer self-update regression',
+          assets: [
+            {
+              name: path.basename(installerPath),
+              browser_download_url: `https://github.com/ddfav22/codex-model-manager/releases/download/v${packageMetadata.version}/${path.basename(installerPath)}`,
+              size: installerBytes,
+              digest: `sha256:${installerDigest}`
+            }
+          ]
+        }
+      }
+    }),
+    spawnFn: spawn,
+    onBeforeInstall: () => {
+      beforeInstallCalls += 1
+    }
+  })
+  const ready = await updater.check({ manual: true, autoDownload: true })
+
+  assert.strictEqual(ready.stage, 'ready', '本地更新包应进入可安装状态')
+  assert.deepStrictEqual(await updater.install(), { ok: true, latestVersion: packageMetadata.version })
+  assert.strictEqual(beforeInstallCalls, 1, '启动安装器后必须触发主程序退出回调')
+  assert.ok(
+    waitFor(() => !fs.existsSync(obsoleteProgramFile), 120000),
+    '自更新没有覆盖当前程序目录，旧程序文件仍然存在'
+  )
+  assert.ok(fs.existsSync(markerPath), '自更新必须保留 data 用户数据')
+  assert.ok(
+    waitFor(
+      () =>
+        readLogEvents(logPath).some(
+          event =>
+            event.event === 'process.start' &&
+            event.details?.version === packageMetadata.version &&
+            Date.parse(event.timestamp) >= startedAt
+        ),
+      120000
+    ),
+    '自更新完成后没有启动新版本程序'
+  )
+
+  const restarted = readLogEvents(logPath)
+    .filter(
+      event =>
+        event.event === 'process.start' &&
+        event.details?.version === packageMetadata.version &&
+        Date.parse(event.timestamp) >= startedAt
+    )
+    .at(-1)
+
+  assert.ok(Number.isInteger(restarted?.pid), '更新后启动日志缺少进程 ID')
+  assert.strictEqual(path.resolve(restarted.details.executable), path.resolve(installedExecutable))
+  stopProcessTree(restarted.pid)
+  sleep(2000)
+}
+
+async function main() {
   assert.strictEqual(process.platform, 'win32', '安装器回归测试仅支持 Windows')
 
   const installerPath = path.resolve(
@@ -127,6 +251,7 @@ function main() {
       { version: packageMetadata.version },
       '重装必须保留原有客户端 data'
     )
+    await selfUpdate(installerPath, installDirectory, markerPath)
     packagedUiSmoke(installDirectory, 9352)
 
     uninstall(installDirectory)
@@ -162,4 +287,7 @@ function main() {
   if (testFailure) throw testFailure
 }
 
-main()
+main().catch(error => {
+  console.error(error)
+  process.exitCode = 1
+})

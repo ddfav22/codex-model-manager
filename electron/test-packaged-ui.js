@@ -348,6 +348,13 @@ async function main() {
         issues: status.diagnostics.issues
       }
     })()`)
+    if ((quick.installed || full.installed) && !pageText.includes('Codex 客户端已安装')) {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        pageText = await cdp.evaluate('document.body?.textContent || ""')
+        if (pageText.includes('Codex 客户端已安装')) break
+        await sleep(100)
+      }
+    }
     const packageManagement = await cdp.evaluate(`(async () => {
       const status = await window.codexManager.getStatus(false)
       return {
