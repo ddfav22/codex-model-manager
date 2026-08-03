@@ -20,6 +20,7 @@ const {
   installTomlFilesFromZip,
   safePackageName
 } = require('./features/packageArchive')
+const { GLOBAL_STATE_FILENAME, syncDesktopProjectsFromSessions } = require('./features/codexDesktopProjects')
 const {
   REASONING_DESCRIPTIONS,
   aggregateModelTests,
@@ -39,6 +40,7 @@ const APP_STATE_DIRNAME = 'codex-model-manager'
 const CHANNELS_FILENAME = 'channels.json'
 const NEWAPI_FILENAME = 'newapi.json'
 const NEWAPI_CHANNEL_DISPLAY_NAME = 'NewAPI 渠道'
+const DEFAULT_NEWAPI_BASE_URL = 'https://ainiubi.org'
 const INITIAL_BACKUP_FILENAME = 'initial-backup.json'
 const MODELS_CACHE_FILENAME = 'models_cache.json'
 const NATIVE_MODELS_FILENAME = 'native-models.json'
@@ -123,6 +125,7 @@ function getPaths(overrides = {}) {
     channelsPath: overrides.channelsPath || path.join(stateDir, CHANNELS_FILENAME),
     newApiPath: overrides.newApiPath || path.join(stateDir, NEWAPI_FILENAME),
     initialBackupMetaPath: overrides.initialBackupMetaPath || path.join(stateDir, INITIAL_BACKUP_FILENAME),
+    globalStatePath: overrides.globalStatePath || path.join(codexHome, GLOBAL_STATE_FILENAME),
     sessionsPath: overrides.sessionsPath || path.join(codexHome, 'sessions'),
     archivedSessionsPath: overrides.archivedSessionsPath || path.join(codexHome, 'archived_sessions'),
     importedSessionsPath: overrides.importedSessionsPath || path.join(codexHome, 'sessions', IMPORTED_SESSIONS_DIRNAME),
@@ -207,7 +210,7 @@ function decryptRememberedSecret(state) {
 
 function publicNewApiState(state) {
   return {
-    baseUrl: state?.baseUrl || '',
+    baseUrl: state?.baseUrl || DEFAULT_NEWAPI_BASE_URL,
     relayBaseUrl: state?.relayBaseUrl || '',
     username: state?.username || '',
     lastSyncedAt: state?.lastSyncedAt || '',
@@ -1845,7 +1848,7 @@ async function listNewApiKeyModels(relayBaseUrl, apiKey, userHeader) {
 async function syncNewApi(input, options = {}) {
   const paths = getPaths(options)
   const existingState = parseJsonFile(paths.newApiPath, {})
-  const requestedBaseUrl = newApiRootFromInput(input.baseUrl || existingState.baseUrl)
+  const requestedBaseUrl = newApiRootFromInput(input.baseUrl || existingState.baseUrl || DEFAULT_NEWAPI_BASE_URL)
   const platformStates = { ...(existingState.platforms || {}) }
   const legacyPlatformKey = existingState.baseUrl ? normalizeBaseUrl(newApiRootFromInput(existingState.baseUrl)) : ''
 
@@ -3786,6 +3789,15 @@ function ensureProjectsFromSessions(paths, options = {}) {
   return { addedProjectCount: missing.length, addedProjects: missing }
 }
 
+function syncDesktopProjects(paths, options = {}) {
+  const sessions = listSessions(paths).filter(session => session.location !== 'archived')
+
+  return syncDesktopProjectsFromSessions(paths.globalStatePath, sessions, {
+    backupDir: path.join(paths.stateDir, 'backups'),
+    ...options.desktopProjectOptions
+  })
+}
+
 function buildDiagnostics(paths, configExists, configError, codexTargets, codexInstallationEvidence) {
   const codexHomeExists = fs.existsSync(paths.codexHome)
   const codexInstalled = codexTargets.length > 0 || codexInstallationEvidence?.found === true
@@ -4232,12 +4244,20 @@ async function activateRelay(id, modelOrOptions = {}, maybeOptions = {}) {
       // Preserve activation when a diagnostic progress callback fails.
     }
   }
+  const externalAfterStop = options.restartOptions?.afterStop
   const restart =
     options.restartCodex === true
       ? restartCodex({
           dryRun: options.dryRunRestart,
           ...(options.restartOptions || {}),
-          onProgress: restartProgress
+          onProgress: restartProgress,
+          afterStop: () => {
+            const trustedProjects = ensureProjectsFromSessions(getPaths(options), options)
+            const desktopProjects = syncDesktopProjects(getPaths(options), options)
+            const externalResult = typeof externalAfterStop === 'function' ? externalAfterStop() : null
+
+            return { trustedProjects, desktopProjects, externalResult }
+          }
         })
       : manualCodexRestartResult()
   const restartMs = Date.now() - restartStartedAt
@@ -4264,7 +4284,8 @@ async function activateRelay(id, modelOrOptions = {}, maybeOptions = {}) {
       totalMs: Date.now() - activationStartedAt
     },
     conversationIndexRepairBefore: null,
-    conversationIndexRepair
+    conversationIndexRepair,
+    projectSync: restart?.afterStopResult || null
   }
 }
 
@@ -6304,6 +6325,27 @@ function restartCodex(options = {}) {
     }
   }
 
+  let afterStopResult = null
+
+  if (typeof options.afterStop === 'function') {
+    reportActivationProgress(options, 'syncing-projects', 72, '正在同步历史任务与 Projects')
+
+    try {
+      afterStopResult = options.afterStop()
+    } catch (error) {
+      reportActivationProgress(options, 'project-sync-failed', 94, 'Projects 同步失败，已取消启动以保护数据', 'error')
+
+      return {
+        ok: false,
+        target,
+        targets,
+        appId,
+        afterStopResult: null,
+        error: `Codex 已关闭，但 Projects 同步失败：${error instanceof Error ? error.message : String(error)}`
+      }
+    }
+  }
+
   const launchTarget = options.launchTarget || launchCodexTarget
   const waitForClient = options.waitForClient || waitForCodexClient
 
@@ -6327,7 +6369,7 @@ function restartCodex(options = {}) {
       )
       if (waitForClient()) {
         reportActivationProgress(options, 'client-ready', 94, '已检测到 Codex 进程')
-        return { ok: true, target, targets, appId }
+        return { ok: true, target, targets, appId, afterStopResult }
       }
 
       lastError = new Error('系统应用入口已调用，但没有检测到 ChatGPT 进程')
@@ -6337,7 +6379,7 @@ function restartCodex(options = {}) {
   }
 
   reportActivationProgress(options, 'launch-failed', 94, '没有检测到 Codex 进程，需要手动启动', 'warning')
-  return { ok: false, target, targets, appId, error: restartErrorMessage(lastError) }
+  return { ok: false, target, targets, appId, afterStopResult, error: restartErrorMessage(lastError) }
 }
 
 async function verifyLocalAgentExecution(options = {}) {
@@ -6457,6 +6499,7 @@ module.exports = {
     codexTargetRank,
     captureBundledModelCatalog,
     ensureProjectsFromSessions,
+    syncDesktopProjects,
     normalizeSessionForDesktop,
     preferredCodexTarget,
     repairGeneratedCodexFiles,

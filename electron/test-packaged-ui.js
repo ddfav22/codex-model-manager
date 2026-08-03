@@ -427,6 +427,9 @@ async function main() {
       const buttons = dialog
         ? Array.from(dialog.querySelectorAll('button')).map(element => String(element.textContent || '').trim())
         : []
+      const newApiAddressValues = dialog
+        ? Array.from(dialog.querySelectorAll('input')).map(element => String(element.value || '').trim())
+        : []
       clickButton('取消')
 
       return {
@@ -435,6 +438,7 @@ async function main() {
         dialogFound: Boolean(dialog),
         loginAndSyncCount: buttons.filter(text => text === '登录并同步').length,
         completeCount: buttons.filter(text => text === '完成').length,
+        defaultAddressFound: newApiAddressValues.includes('https://ainiubi.org'),
         buttons
       }
     })()`)
@@ -652,6 +656,7 @@ async function main() {
       result.onlineLoginDialog?.dialogFound === true,
       result.onlineLoginDialog?.loginAndSyncCount === 1,
       result.onlineLoginDialog?.completeCount === 0,
+      result.onlineLoginDialog?.defaultAddressFound === true,
       result.conversationTransferUi?.conversationOpened === true,
       result.conversationTransferUi?.pathControlCount >= 2,
       result.conversationTransferUi?.pathInitiallyHidden === true,

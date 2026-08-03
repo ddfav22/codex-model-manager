@@ -293,6 +293,77 @@ async function main() {
   fs.writeFileSync(archivedSessionPath, sessionText.replace('test-session', 'archived-test-session'), 'utf8')
   fs.writeFileSync(externalSessionPath, sessionText, 'utf8')
 
+  const globalStatePath = manager.getPaths(options).globalStatePath
+
+  fs.writeFileSync(
+    globalStatePath,
+    `${JSON.stringify(
+      {
+        'local-projects': {
+          'existing-project': {
+            id: 'existing-project',
+            name: 'Existing',
+            rootPaths: [externalDir],
+            createdAt: 1,
+            updatedAt: 1
+          }
+        },
+        'project-order': ['existing-project'],
+        'thread-project-assignments': {},
+        'projectless-thread-ids': ['test-session', 'unrelated-thread'],
+        'thread-workspace-root-hints': {
+          'test-session': projectDir,
+          'unrelated-thread': externalDir
+        },
+        'unrelated-setting': { preserved: true }
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  )
+  const desktopProjectSync = manager._internal.syncDesktopProjects(manager.getPaths(options), {
+    desktopProjectOptions: {
+      now: Date.parse('2026-08-03T00:00:00.000Z'),
+      randomUUID: () => 'new-local-project'
+    }
+  })
+  const desktopProjectState = JSON.parse(fs.readFileSync(globalStatePath, 'utf8'))
+
+  assert.strictEqual(desktopProjectSync.changed, true)
+  assert.strictEqual(desktopProjectSync.addedProjectCount, 1)
+  assert.strictEqual(desktopProjectSync.assignedThreadCount, 2)
+  assert.ok(fs.existsSync(desktopProjectSync.backupPath))
+  assert.deepStrictEqual(desktopProjectState['local-projects']['new-local-project'].rootPaths, [projectDir])
+  assert.strictEqual(desktopProjectState['thread-project-assignments']['test-session'].projectId, 'new-local-project')
+  assert.strictEqual(
+    desktopProjectState['thread-project-assignments']['large-test-session'].projectId,
+    'new-local-project'
+  )
+  assert.deepStrictEqual(desktopProjectState['projectless-thread-ids'], ['unrelated-thread'])
+  assert.deepStrictEqual(desktopProjectState['thread-workspace-root-hints'], {
+    'unrelated-thread': externalDir
+  })
+  assert.deepStrictEqual(desktopProjectState['unrelated-setting'], { preserved: true })
+  assert.strictEqual(
+    manager._internal.syncDesktopProjects(manager.getPaths(options), {
+      desktopProjectOptions: { randomUUID: () => 'must-not-be-used' }
+    }).changed,
+    false
+  )
+  const malformedGlobalStatePath = path.join(tempRoot, 'malformed-global-state.json')
+
+  fs.writeFileSync(malformedGlobalStatePath, '[]\n', 'utf8')
+  assert.throws(
+    () =>
+      manager._internal.syncDesktopProjects(
+        manager.getPaths({ ...options, globalStatePath: malformedGlobalStatePath }),
+        { desktopProjectOptions: { randomUUID: () => 'unused-project-id' } }
+      ),
+    /项目状态文件格式不正确/
+  )
+  assert.strictEqual(fs.readFileSync(malformedGlobalStatePath, 'utf8'), '[]\n')
+
   const firstStatus = manager.readStatus(options)
   assert.strictEqual(firstStatus.currentProvider, 'builtin-relay')
   assert.strictEqual(firstStatus.initialBackup.exists, true)
@@ -328,7 +399,7 @@ async function main() {
     fs.rmSync(blockedSessionPath, { force: true })
   }
   assert.ok(firstStatus.projects.some(project => project.path === projectDir.toLowerCase()))
-  assert.strictEqual(firstStatus.newApi.baseUrl, '')
+  assert.strictEqual(firstStatus.newApi.baseUrl, 'https://ainiubi.org')
   assert.strictEqual(firstStatus.newApi.relayBaseUrl, '')
   assert.strictEqual(firstStatus.initialBackup.modelsCacheExists, true)
   let conversationIndexScanned = false
@@ -1898,6 +1969,10 @@ async function main() {
       restartEvents.push('stop')
       return { ok: true, stopped: 4, remaining: [] }
     },
+    afterStop: () => {
+      restartEvents.push('sync')
+      return { synced: true }
+    },
     launchTarget: () => restartEvents.push('launch'),
     waitForClient: () => {
       restartEvents.push('wait')
@@ -1907,10 +1982,11 @@ async function main() {
   })
 
   assert.strictEqual(completeRestart.ok, true)
-  assert.deepStrictEqual(restartEvents, ['stop', 'launch', 'wait'])
+  assert.deepStrictEqual(completeRestart.afterStopResult, { synced: true })
+  assert.deepStrictEqual(restartEvents, ['stop', 'sync', 'launch', 'wait'])
   assert.deepStrictEqual(
     restartProgress.map(progress => progress.stage),
-    ['locating-client', 'closing-client', 'launching-client', 'waiting-for-client', 'client-ready']
+    ['locating-client', 'closing-client', 'syncing-projects', 'launching-client', 'waiting-for-client', 'client-ready']
   )
   assert.ok(
     restartProgress.every((progress, index) => index === 0 || progress.progress >= restartProgress[index - 1].progress)
@@ -1936,6 +2012,26 @@ async function main() {
   assert.match(blockedRestart.error, /尚未完全关闭/)
   assert.strictEqual(blockedRestartProgress.at(-1).stage, 'close-failed')
   assert.strictEqual(blockedRestartProgress.at(-1).status, 'warning')
+
+  let failedProjectSyncLaunched = false
+  const failedProjectSync = manager.restartCodex({
+    forceWindowsRestart: true,
+    launchTargets: {
+      targets: ['C:\\Program Files\\WindowsApps\\OpenAI.Codex_test\\app\\ChatGPT.exe'],
+      appLaunchers: []
+    },
+    stopClients: () => ({ ok: true, stopped: 1, remaining: [] }),
+    afterStop: () => {
+      throw new Error('invalid desktop project state')
+    },
+    launchTarget: () => {
+      failedProjectSyncLaunched = true
+    }
+  })
+
+  assert.strictEqual(failedProjectSync.ok, false)
+  assert.strictEqual(failedProjectSyncLaunched, false)
+  assert.match(failedProjectSync.error, /Projects 同步失败/)
 
   const originalFetchForNewApi = global.fetch
   const newApiRequests = []

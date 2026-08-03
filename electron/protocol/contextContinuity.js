@@ -4,6 +4,7 @@ const { AGENT_COMPLETION_SIGNAL, AGENT_SAFETY_STOP_SIGNAL } = require('./toolCon
 const RECOVERY_TAIL_MESSAGES = 8
 const RECOVERY_CONVERSATION_ANCHORS = 4
 const RECOVERY_MESSAGE_CHARS = 3500
+const LEGACY_AGENT_FAILURE_TEXT = '上游模型未能完成剩余步骤，请重试本轮任务。'
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -21,9 +22,81 @@ function internalAgentSignalCount(content) {
 function stripAgentControlSignals(content) {
   return String(content || '')
     .replace(INTERNAL_AGENT_SIGNAL_PATTERN, '')
+    .replaceAll(LEGACY_AGENT_FAILURE_TEXT, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function isShortContinuationText(content) {
+  const text = stripAgentControlSignals(content)
+    .replace(/[。！!？?，,；;：:~～\s]+$/g, '')
+    .trim()
+
+  if (!text || text.length > 32) return false
+
+  return /^(?:继续|接着|继续吧|接着来|继续做|继续执行|然后呢|往下做|go on|continue|keep going|proceed)$/i.test(text)
+}
+
+function anchorShortContinuation(messages) {
+  const source = (Array.isArray(messages) ? messages : []).map(sanitizeChatMessage)
+  let currentIndex = -1
+
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    if (String(source[index]?.role || '').toLowerCase() !== 'user') continue
+    if (isSyntheticChatUserMessage(source[index])) continue
+    currentIndex = index
+    break
+  }
+
+  if (currentIndex < 0 || !isShortContinuationText(source[currentIndex]?.content)) {
+    return { messages: source, anchored: false, task: '', assistantState: '' }
+  }
+
+  let task = ''
+  let taskIndex = -1
+
+  for (let index = currentIndex - 1; index >= 0; index -= 1) {
+    const message = source[index]
+
+    if (String(message?.role || '').toLowerCase() !== 'user' || isSyntheticChatUserMessage(message)) continue
+    if (isShortContinuationText(message?.content)) continue
+
+    task = truncateContextText(message?.content, 3000)
+    taskIndex = index
+    break
+  }
+
+  if (!task) return { messages: source, anchored: false, task: '', assistantState: '' }
+
+  let assistantState = ''
+
+  for (let index = currentIndex - 1; index > taskIndex; index -= 1) {
+    const message = source[index]
+
+    if (String(message?.role || '').toLowerCase() !== 'assistant') continue
+    const text = truncateContextText(message?.content, 1800)
+
+    if (!text || /^\[Codex local tool calls\]/i.test(text)) continue
+    assistantState = text
+    break
+  }
+
+  const anchor = [
+    '[Codex continuation context: the short user message above means resume the unresolved prior task; it is not a new task.]',
+    `Original task: ${task}`,
+    assistantState ? `Latest visible assistant state: ${assistantState}` : '',
+    'Continue from that exact task state. Do not ask the user to repeat information already present in the conversation.'
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  source[currentIndex] = {
+    ...source[currentIndex],
+    content: `${String(source[currentIndex].content || '').trim()}\n\n${anchor}`
+  }
+
+  return { messages: source, anchored: true, task, assistantState }
 }
 
 function sanitizeChatMessage(message) {
@@ -114,7 +187,9 @@ module.exports = {
   RECOVERY_CONVERSATION_ANCHORS,
   RECOVERY_MESSAGE_CHARS,
   RECOVERY_TAIL_MESSAGES,
+  anchorShortContinuation,
   internalAgentSignalCount,
+  isShortContinuationText,
   isSyntheticChatUserMessage,
   recoveryConversationContext,
   sanitizeChatMessage,

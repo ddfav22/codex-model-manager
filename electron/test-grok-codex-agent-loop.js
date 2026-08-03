@@ -18,7 +18,12 @@ const {
   supportedModelsForProvider
 } = require('./features/modelAdapters')
 const { responsesRequestToChat } = require('./protocolProxy')
-const { recoveryConversationContext, stripAgentControlSignals } = require('./protocol/contextContinuity')
+const {
+  anchorShortContinuation,
+  isShortContinuationText,
+  recoveryConversationContext,
+  stripAgentControlSignals
+} = require('./protocol/contextContinuity')
 
 const nativeCompatibility = {
   ok: true,
@@ -228,5 +233,19 @@ assert.strictEqual(
   stripAgentControlSignals(`最终结果\n${AGENT_COMPLETION_SIGNAL}\n${AGENT_SAFETY_STOP_SIGNAL}`),
   '最终结果'
 )
+assert.strictEqual(stripAgentControlSignals('正在处理。\n上游模型未能完成剩余步骤，请重试本轮任务。'), '正在处理。')
+assert.strictEqual(isShortContinuationText('继续！！！'), true)
+assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
+
+const anchoredContinuation = anchorShortContinuation([
+  { role: 'user', content: '查询今日金价，并把结果写入桌面文件。' },
+  { role: 'assistant', content: '先查询最新金价。\n上游模型未能完成剩余步骤，请重试本轮任务。' },
+  { role: 'user', content: '继续' }
+])
+
+assert.strictEqual(anchoredContinuation.anchored, true)
+assert.match(anchoredContinuation.messages.at(-1).content, /Original task: 查询今日金价/)
+assert.match(anchoredContinuation.messages.at(-1).content, /Latest visible assistant state: 先查询最新金价/)
+assert.doesNotMatch(anchoredContinuation.messages.at(-1).content, /上游模型未能完成剩余步骤/)
 
 console.log('Grok Codex Agent Loop adapter tests passed')

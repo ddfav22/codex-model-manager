@@ -24,7 +24,7 @@ export type NewApiForm = {
 export const APP_VERSION = packageMetadata.version
 
 export const defaultNewApiForm: NewApiForm = {
-  baseUrl: '',
+  baseUrl: 'https://ainiubi.org',
   relayBaseUrl: '',
   username: '',
   password: '',

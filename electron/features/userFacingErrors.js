@@ -30,7 +30,8 @@ function toUserFacingErrorMessage(error) {
 
   const rules = [
     {
-      pattern: /\bEBUSY\b|resource busy|being used by another process|used by another process|another process.*(?:file|access)|process cannot access.*another process/i,
+      pattern:
+        /\bEBUSY\b|resource busy|being used by another process|used by another process|another process.*(?:file|access)|process cannot access.*another process/i,
       text: '文件正在被其他程序使用。请先关闭 Codex 或相关程序，然后重试。'
     },
     {

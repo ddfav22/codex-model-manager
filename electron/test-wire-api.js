@@ -685,6 +685,39 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-short-continue-anchor') {
+        const requestText = JSON.stringify(requestBody)
+
+        assert.ok(requestText.includes('Original task: 查询今日金价，并把结果写入桌面文件。'))
+        assert.ok(requestText.includes('Latest visible assistant state: 先查询最新金价。'))
+        assert.ok(!requestText.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-short-continue-anchor',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  content:
+                    '继续执行：\n```json\n{"tool_call":{"tool":"exec","input":"const result = await tools.web__run({search_query:[{q:\\"今日金价\\"}]}); text(result);"}}\n```'
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'gpt-native-responses-test' || requestBody.model === 'gpt-5.6-sol') {
         assert.strictEqual(request.url, '/v1/responses')
         response.writeHead(200, {
@@ -1056,6 +1089,7 @@ async function main() {
     'grok-current-live-data',
     'grok-image-generation',
     'grok-delayed-plain-answer',
+    'grok-short-continue-anchor',
     'grok-identity-self-report'
   ]
   const modelCapabilities = Object.fromEntries(
@@ -1072,7 +1106,8 @@ async function main() {
           model === 'grok-historical-tool-new-turn' ||
           model === 'grok-current-live-data' ||
           model === 'grok-image-generation' ||
-          model === 'grok-delayed-plain-answer'
+          model === 'grok-delayed-plain-answer' ||
+          model === 'grok-short-continue-anchor'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : {
               wireApi: model.startsWith('gpt-native') || model === 'gpt-newapi-chat-only' ? 'responses' : undefined
@@ -1506,6 +1541,44 @@ async function main() {
   assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.toolIntentRequired, false)
   assert.strictEqual(delayedPlainDiagnostic.emulation.earlyResponseStarted, true)
   upstreamRequests.length = 0
+  const shortContinueResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-short-continue-anchor',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '查询今日金价，并把结果写入桌面文件。' }]
+        },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [
+            {
+              type: 'output_text',
+              text: '先查询最新金价。\n上游模型未能完成剩余步骤，请重试本轮任务。'
+            }
+          ]
+        },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: '继续' }] }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const shortContinueStream = await shortContinueResponse.text()
+  const shortContinueDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(shortContinueResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 1)
+  assert.ok(shortContinueStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(shortContinueStream.includes('tools.web__run'))
+  assert.strictEqual(shortContinueDiagnostic.emulation.toolCallName, 'exec')
+  assert.strictEqual(shortContinueDiagnostic.emulation.contextContinuity.shortContinuationAnchored, true)
+  assert.ok(shortContinueDiagnostic.emulation.contextContinuity.continuationTaskLength > 0)
+  upstreamRequests.length = 0
   const currentLiveDataResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -1676,7 +1749,7 @@ async function main() {
   assert.strictEqual(completionSignalDiagnostic.missingCompletionSignal, true)
   assert.strictEqual(completionSignalDiagnostic.retryAttempted, true)
   assert.strictEqual(completionSignalDiagnostic.recoveryAttempts, 1)
-  assert.strictEqual(completionSignalDiagnostic.maximumRecoveryAttempts, 3)
+  assert.strictEqual(completionSignalDiagnostic.maximumRecoveryAttempts, 1)
   assert.strictEqual(completionSignalDiagnostic.acceptedRetry, true)
   assert.strictEqual(completionSignalDiagnostic.visibleProgressCount, 0)
   assert.strictEqual(completionSignalDiagnostic.exhausted, false)
@@ -1720,19 +1793,22 @@ async function main() {
   const exhaustedCompletionSignalDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
 
   assert.strictEqual(exhaustedCompletionSignalResponse.status, 200)
-  assert.strictEqual(upstreamRequests.length, 4)
-  assert.strictEqual(exhaustedCompletionSignalRecoveryRequests, 3)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.strictEqual(exhaustedCompletionSignalRecoveryRequests, 1)
   assert.ok(!exhaustedCompletionSignalStream.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
   assert.ok(!exhaustedCompletionSignalStream.includes('[CODEX_AGENT_LOOP_SAFETY_STOP]'))
-  assert.ok(exhaustedCompletionSignalStream.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
+  assert.ok(!exhaustedCompletionSignalStream.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
+  assert.ok(exhaustedCompletionSignalStream.includes('任务已经完成，文件已保存。'))
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.retryAttempted, true)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, 3)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, 3)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, 1)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, 1)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedRetry, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.exhausted, true)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.safetyStopAppended, false)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.safetyStopTriggered, true)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.safetyStopTriggered, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedCompletionSignal, false)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredTerminalCandidate, true)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredCompletionAccepted, true)
   upstreamRequests.length = 0
   const recoveryFailureResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -1782,7 +1858,7 @@ async function main() {
   assert.ok(upstreamRequests.every(request => request.body.stream === true))
   assert.strictEqual((recoveryFailureDeltas.match(/下一步我会继续保存文件。/g) || []).length, 1)
   assert.strictEqual((recoveryFailureDeltas.match(/\[CODEX_AGENT_LOOP_SAFETY_STOP\]/g) || []).length, 0)
-  assert.strictEqual((recoveryFailureDeltas.match(/上游模型未能完成剩余步骤，请重试本轮任务。/g) || []).length, 1)
+  assert.strictEqual((recoveryFailureDeltas.match(/上游模型未能完成剩余步骤，请重试本轮任务。/g) || []).length, 0)
   assert.ok(!recoveryFailureDeltas.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
   assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, 3)
   assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, 3)

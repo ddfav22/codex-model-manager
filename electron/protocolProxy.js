@@ -17,6 +17,7 @@ const {
   normalizeReasoningEffort
 } = require('./protocol/modelRouting')
 const {
+  anchorShortContinuation,
   internalAgentSignalCount,
   isSyntheticChatUserMessage,
   recoveryConversationContext,
@@ -465,11 +466,13 @@ function execToolContract(catalog) {
 }
 
 function toolEmulationRequest(request) {
-  const catalog = promptToolCatalog(request.tools, request.messages)
+  const sourceMessages = Array.isArray(request.messages) ? request.messages : []
+  const continuation = anchorShortContinuation(sourceMessages)
+  const originalMessages = continuation.messages
+  const catalog = promptToolCatalog(request.tools, originalMessages)
   const allowed = new Set(catalog.map(tool => tool.name))
   const messages = []
-  const originalMessages = Array.isArray(request.messages) ? request.messages : []
-  const removedControlSignalCount = originalMessages.reduce(
+  const removedControlSignalCount = sourceMessages.reduce(
     (count, message) => count + internalAgentSignalCount(message?.content),
     0
   )
@@ -556,7 +559,10 @@ function toolEmulationRequest(request) {
       actionableUserMessageCount: messages.filter(
         message => message?.role === 'user' && !isSyntheticChatUserMessage(message)
       ).length,
-      removedControlSignalCount
+      removedControlSignalCount,
+      shortContinuationAnchored: continuation.anchored,
+      continuationTaskLength: continuation.task.length,
+      continuationAssistantStateLength: continuation.assistantState.length
     }
   }
 }
@@ -587,31 +593,75 @@ function normalizeEmulatedToolArguments(name, value) {
   return JSON.stringify({ ...parsed, input: wrapped })
 }
 
-function parseEmulatedToolCall(content, allowed) {
-  const text = String(content || '')
-  const marker = text.match(/<codex_tool_call>\s*([\s\S]{1,1048576}?)\s*<\/codex_tool_call>/i)
-  const fenced = text.match(/```(?:json)?\s*({[\s\S]{1,1048576}?})\s*```/i)
-  const bare = text.match(/({\s*"name"\s*:\s*"[^"]+"[\s\S]{1,1048576}?"arguments"\s*:[\s\S]*})/i)
-  const raw = marker?.[1] || fenced?.[1] || bare?.[1]
+function firstBalancedJsonObject(text) {
+  let start = -1
+  let depth = 0
+  let quoted = false
+  let escaped = false
 
-  if (!raw) return null
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
 
-  try {
-    const parsed = JSON.parse(raw)
-    const name = String(parsed?.name || '')
-
-    if (!allowed.has(name)) return null
-
-    const args = normalizeEmulatedToolArguments(name, parsed.arguments || {})
-
-    return {
-      id: `call_${randomUUID().replace(/-/g, '')}`,
-      type: 'function',
-      function: { name, arguments: args.slice(0, 1024 * 1024) }
+    if (start < 0) {
+      if (character === '{') {
+        start = index
+        depth = 1
+      }
+      continue
     }
-  } catch {
-    return null
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') quoted = true
+    else if (character === '{') depth += 1
+    else if (character === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, index + 1)
+    }
   }
+
+  return ''
+}
+
+function parseEmulatedToolCall(content, allowed) {
+  const text = String(content || '').slice(0, 1024 * 1024)
+  const marker = text.match(/<codex_tool_call>\s*([\s\S]{1,1048576}?)\s*<\/codex_tool_call>/i)
+  const fenced = text.match(/```(?:json)?\s*([\s\S]{1,1048576}?)\s*```/i)
+  const candidates = [
+    ...new Set([marker?.[1], fenced?.[1], text.trim(), firstBalancedJsonObject(text)].filter(Boolean))
+  ]
+
+  for (const raw of candidates) {
+    try {
+      const parsed = JSON.parse(raw)
+      const envelope = parsed?.tool_call || parsed?.function || parsed
+      const name = String(envelope?.name || envelope?.tool || envelope?.tool_name || '')
+
+      if (!allowed.has(name)) continue
+
+      let argumentValue = envelope?.arguments ?? envelope?.args
+
+      if (argumentValue === undefined && name === 'exec' && envelope?.input !== undefined) {
+        argumentValue = { input: envelope.input }
+      }
+      if (argumentValue === undefined) argumentValue = {}
+
+      const args = normalizeEmulatedToolArguments(name, argumentValue)
+
+      return {
+        id: `call_${randomUUID().replace(/-/g, '')}`,
+        type: 'function',
+        function: { name, arguments: args.slice(0, 1024 * 1024) }
+      }
+    } catch {
+      // Try the next common Grok-compatible tool envelope.
+    }
+  }
+
+  return null
 }
 
 async function readChatAssistant(upstream) {
@@ -672,6 +722,7 @@ async function synthesizeEmulatedToolResponse(
 ) {
   const synthesisStartedAt = Date.now()
   let assistant = await readChatAssistant(upstream)
+  const initialAssistant = assistant
   const initialResponseMs = Date.now() - synthesisStartedAt
   let toolCall = parseEmulatedToolCall(assistant.content, allowed)
   const firstContent = String(assistant.content || '')
@@ -690,7 +741,14 @@ async function synthesizeEmulatedToolResponse(
   const initialToolOmission = toolIntentRequired && !toolCall && !awaitsExplicitUserInput(firstContent)
   const initialStalledContinuation = initialNaturalStall || initialMissingCompletionSignal || initialToolOmission
   const stalledAfterToolResult = followsToolResult && initialStalledContinuation
-  const maximumRecoveryAttempts = initialStalledContinuation ? 3 : 0
+  const inferredTerminalCandidate =
+    followsToolResult &&
+    initialMissingCompletionSignal &&
+    !initialNaturalStall &&
+    !initialToolOmission &&
+    !awaitsExplicitUserInput(firstContent) &&
+    !isMalformedToolRecovery(firstContent)
+  const maximumRecoveryAttempts = initialStalledContinuation ? (inferredTerminalCandidate ? 1 : 3) : 0
   const maximumRecoveryMs = Math.max(0, Number(options.maximumRecoveryMs || 0)) || Infinity
   const recoveryBudgetStartedAt = Date.now()
   let recoveryAssistant = assistant
@@ -700,6 +758,7 @@ async function synthesizeEmulatedToolResponse(
   let currentMissingCompletionSignal = initialMissingCompletionSignal
   let acceptedRetry = false
   let safetyStopTriggered = false
+  let inferredCompletionAccepted = false
   let failedRecoveryAttempts = 0
   const recoveryRequestMs = []
   const rememberProgress = content => {
@@ -736,6 +795,9 @@ async function synthesizeEmulatedToolResponse(
     if (currentNaturalStall) publishProgress(recoveryAssistant.content)
     recoveryAttempts += 1
     const recoveryStartedAt = Date.now()
+    const remainingRecoveryMs = Number.isFinite(maximumRecoveryMs)
+      ? Math.max(1, maximumRecoveryMs - (recoveryStartedAt - recoveryBudgetStartedAt))
+      : 0
     const retried = await retryAssistant(recoveryAssistant, {
       followsToolResult,
       stalledAfterToolResult: followsToolResult && currentStalledContinuation,
@@ -743,7 +805,8 @@ async function synthesizeEmulatedToolResponse(
       missingCompletionSignal: currentMissingCompletionSignal,
       toolIntentRequired,
       attempt: recoveryAttempts,
-      maximumAttempts: maximumRecoveryAttempts
+      maximumAttempts: maximumRecoveryAttempts,
+      remainingRecoveryMs
     })
     recoveryRequestMs.push(Date.now() - recoveryStartedAt)
 
@@ -787,9 +850,6 @@ async function synthesizeEmulatedToolResponse(
     currentNaturalStall = retryNaturalStall
     currentMissingCompletionSignal = retryMissingCompletionSignal
   }
-  if (!toolCall && !acceptedRetry && recoveryAttempts > 0 && recoveryAssistant !== assistant) {
-    assistant = recoveryAssistant
-  }
   const recoveryElapsedMs = Date.now() - recoveryBudgetStartedAt
   const recoveryTimeBudgetExhausted =
     initialStalledContinuation &&
@@ -802,24 +862,21 @@ async function synthesizeEmulatedToolResponse(
     (recoveryAttempts >= maximumRecoveryAttempts || recoveryTimeBudgetExhausted)
 
   if (!toolCall && exhaustedRecovery) {
-    const finalText = isMalformedToolRecovery(assistant.content)
-      ? 'The upstream model did not produce a valid Codex tool call.'
-      : hasAgentCompletionSignal(assistant.content)
-        ? agentCompletionResult(assistant.content)
-        : String(assistant.content || '').trim()
-
-    if (awaitsExplicitUserInput(assistant.content)) {
-      assistant = { ...assistant, content: finalText }
+    if (inferredTerminalCandidate) {
+      assistant = initialAssistant
+      inferredCompletionAccepted = true
     } else {
-      const finalAlreadyPublished = publishedProgressMessages.has(finalText)
+      const finalText = isMalformedToolRecovery(initialAssistant.content)
+        ? 'The upstream model did not produce a valid Codex tool call.'
+        : hasAgentCompletionSignal(initialAssistant.content)
+          ? agentCompletionResult(initialAssistant.content)
+          : String(initialAssistant.content || '').trim()
 
       assistant = {
-        ...assistant,
-        content: [finalAlreadyPublished ? '' : finalText, '上游模型未能完成剩余步骤，请重试本轮任务。']
-          .filter(Boolean)
-          .join('\n')
+        ...initialAssistant,
+        content: publishedProgressMessages.has(finalText) ? '' : finalText
       }
-      safetyStopTriggered = true
+      safetyStopTriggered = !awaitsExplicitUserInput(initialAssistant.content)
     }
   }
   const acceptedCompletionSignal = !toolCall && hasAgentCompletionSignal(assistant.content)
@@ -884,7 +941,9 @@ async function synthesizeEmulatedToolResponse(
       exhausted: exhaustedRecovery,
       safetyStopAppended: false,
       safetyStopTriggered,
-      acceptedCompletionSignal
+      acceptedCompletionSignal,
+      inferredTerminalCandidate,
+      inferredCompletionAccepted
     }
   }
 
@@ -2210,7 +2269,9 @@ async function handleResponsesRequest(
             try {
               return await runWithAbortTimeout(
                 upstreamSignal,
-                PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+                retryContext.remainingRecoveryMs
+                  ? Math.min(PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS, retryContext.remainingRecoveryMs)
+                  : PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
                 async recoverySignal => {
                   const retryUpstream = await sendUpstream(retryPayload, recoverySignal)
 

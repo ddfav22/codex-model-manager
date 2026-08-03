@@ -44,7 +44,7 @@ async function main() {
     repository
   )
   assert.strictEqual(repositoryFromPackageMetadata(packageMetadata), productionRepository)
-  assert.deepStrictEqual(normalizeVersion(packageMetadata.version), [1, 2, 55])
+  assert.deepStrictEqual(normalizeVersion(packageMetadata.version), [1, 2, 56])
   assert.strictEqual(
     releaseAssetUrlAllowed(
       'https://github.com/example/codex-model-manager/releases/download/v1.2.53/update.exe',
