@@ -1436,6 +1436,7 @@ async function main() {
     configPath: path.join(neverLoggedInRoot, 'config.toml'),
     authPath: path.join(neverLoggedInRoot, 'auth.json'),
     modelsCachePath: path.join(neverLoggedInRoot, 'models_cache.json'),
+    nativeModelsPath: nativeCatalogFixturePath,
     stateDir: path.join(neverLoggedInRoot, 'codex-model-manager'),
     skipEnvWrite: true,
     skipChannelTest: true,
@@ -1966,8 +1967,7 @@ async function main() {
       return {
         ok: true,
         status: 200,
-        text: async () =>
-          JSON.stringify({ success: true, data: { keys: { 7: 'sk-newapi-full', 8: 'fixture-grok' } } })
+        text: async () => JSON.stringify({ success: true, data: { keys: { 7: 'sk-newapi-full', 8: 'fixture-grok' } } })
       }
     }
 
