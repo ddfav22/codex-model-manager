@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run test:modules
+      - run: npm run test:core
+      - run: npm run test:wire
+      - run: npm run dist
+      - run: npm run test:packaged-ui
+      - run: npm run dist:installer
+      - run: npm run test:installer
+      - name: Verify tag and package version
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$packageVersion") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion"
+          }
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $installer = "release/ChatGPT-Model-Manager-Setup-$packageVersion-x64.exe"
+          if (-not (Test-Path -LiteralPath $installer)) { throw "Installer not found: $installer" }
+          gh release create $env:GITHUB_REF_NAME $installer --generate-notes --verify-tag --title "v$packageVersion"

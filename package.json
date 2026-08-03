@@ -1,0 +1,134 @@
+{
+  "name": "chatgpt-model-manager",
+  "version": "1.2.55",
+  "description": "Windows desktop manager for ChatGPT model providers and relay channels.",
+  "author": "ChatGPT Model Manager",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ddfav22/codex-model-manager.git"
+  },
+  "homepage": "https://github.com/ddfav22/codex-model-manager#readme",
+  "bugs": {
+    "url": "https://github.com/ddfav22/codex-model-manager/issues"
+  },
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "next dev",
+    "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:NODE_ENV='development'; $env:NEXT_DEV_SERVER_URL='http://localhost:3000'; electron .\"",
+    "build": "node electron/build-next.js",
+    "dist": "npm run build && electron-builder --win --dir --config.win.signAndEditExecutable=false && npm run assemble:clean-release && npm run test:clean-release",
+    "dist:installer": "npm run build && electron-builder --win nsis --config.win.signAndEditExecutable=false",
+    "dist:portable": "npm run build && electron-builder --win portable --config.win.signAndEditExecutable=false",
+    "pack": "npm run build && electron-builder --win --dir --config.win.signAndEditExecutable=false",
+    "start": "electron .",
+    "test:core": "node electron/test-codex-manager.js && npm run test:agent-loop && npm run test:friendly-errors && npm run test:updater",
+    "test:agent-loop": "node electron/test-grok-codex-agent-loop.js",
+    "test:friendly-errors": "node electron/test-user-facing-errors.js",
+    "test:modules": "node electron/test-modules.js",
+    "test:updater": "node electron/test-app-updater.js",
+    "test:wire": "node electron/test-wire-api.js",
+    "test:live-proxy": "node electron/test-live-proxy.js",
+    "test:packaged-ui": "node electron/test-packaged-ui.js",
+    "test:installer": "node electron/test-installer.js",
+    "test:clean-release": "node electron/test-clean-release.js",
+    "assemble:clean-release": "node tools/assemble-clean-release.js",
+    "lint": "next lint",
+    "lint:fix": "next lint --fix",
+    "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx}\"",
+    "build:icons": "tsx src/assets/iconify-icons/bundle-icons-css.ts",
+    "postinstall": "npm run build:icons"
+  },
+  "dependencies": {
+    "eventsource-parser": "^3.1.0",
+    "smol-toml": "^1.4.1"
+  },
+  "devDependencies": {
+    "@emotion/cache": "^11.11.0",
+    "@emotion/react": "^11.11.4",
+    "@emotion/styled": "^11.11.5",
+    "@mui/lab": "5.0.0-alpha.170",
+    "@mui/material": "^5.15.19",
+    "@mui/material-nextjs": "^5.15.11",
+    "classnames": "^2.5.1",
+    "next": "^14.2.35",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-perfect-scrollbar": "^1.5.8",
+    "react-use": "^17.5.0",
+    "server-only": "^0.0.1",
+    "@iconify/json": "^2.2.218",
+    "@iconify/types": "^2.0.0",
+    "@iconify/utils": "^2.1.24",
+    "@types/node": "^20.14.2",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "autoprefixer": "^10.4.19",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^14.2.3",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-import-resolver-typescript": "^3.6.1",
+    "eslint-plugin-import": "^2.29.1",
+    "postcss": "^8.4.38",
+    "postcss-styled-syntax": "^0.6.4",
+    "prettier": "^3.3.2",
+    "stylelint": "^16.6.1",
+    "stylelint-use-logical-spec": "^5.0.1",
+    "tailwindcss": "^3.4.4",
+    "tailwindcss-logical": "^3.0.1",
+    "tsx": "^4.15.2",
+    "typescript": "^5.4.5"
+  },
+  "resolutions": {
+    "rimraf": "^5.0.7"
+  },
+  "overrides": {
+    "react": "^18.3.1",
+    "rimraf": "^5.0.7"
+  },
+  "build": {
+    "appId": "cn.chatgpt.manager",
+    "productName": "ChatGPT Model Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "electron/**/*",
+      "!electron/build-next.js",
+      "!electron/test-*.js",
+      "node_modules/eventsource-parser/**/*",
+      "node_modules/smol-toml/**/*",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ChatGPT-Model-Manager-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ChatGPT Model Manager",
+      "deleteAppDataOnUninstall": false,
+      "packElevateHelper": false,
+      "include": "build/installer.nsh",
+      "artifactName": "ChatGPT-Model-Manager-Setup-${version}-${arch}.${ext}"
+    }
+  }
+}
