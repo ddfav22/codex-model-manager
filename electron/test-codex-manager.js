@@ -309,6 +309,7 @@ async function main() {
           }
         },
         'project-order': ['existing-project'],
+        'pinned-project-ids': ['existing-project'],
         'thread-project-assignments': {},
         'projectless-thread-ids': ['test-session', 'unrelated-thread'],
         'thread-workspace-root-hints': {
@@ -333,6 +334,7 @@ async function main() {
   assert.strictEqual(desktopProjectSync.changed, true)
   assert.strictEqual(desktopProjectSync.addedProjectCount, 1)
   assert.strictEqual(desktopProjectSync.assignedThreadCount, 2)
+  assert.strictEqual(desktopProjectSync.pinnedProjectCount, 2)
   assert.ok(fs.existsSync(desktopProjectSync.backupPath))
   assert.deepStrictEqual(desktopProjectState['local-projects']['new-local-project'].rootPaths, [projectDir])
   assert.strictEqual(desktopProjectState['thread-project-assignments']['test-session'].projectId, 'new-local-project')
@@ -344,7 +346,25 @@ async function main() {
   assert.deepStrictEqual(desktopProjectState['thread-workspace-root-hints'], {
     'unrelated-thread': externalDir
   })
+  assert.deepStrictEqual(desktopProjectState['pinned-project-ids'], ['existing-project', 'new-local-project'])
   assert.deepStrictEqual(desktopProjectState['unrelated-setting'], { preserved: true })
+
+  fs.writeFileSync(
+    globalStatePath,
+    `${JSON.stringify({ ...desktopProjectState, 'pinned-project-ids': [] }, null, 2)}\n`,
+    'utf8'
+  )
+  const repairedPinnedProjects = manager._internal.syncDesktopProjects(manager.getPaths(options), {
+    desktopProjectOptions: { randomUUID: () => 'must-not-be-used' }
+  })
+
+  assert.strictEqual(repairedPinnedProjects.changed, true)
+  assert.strictEqual(repairedPinnedProjects.addedProjectCount, 0)
+  assert.strictEqual(repairedPinnedProjects.assignedThreadCount, 0)
+  assert.strictEqual(repairedPinnedProjects.pinnedProjectCount, 1)
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(globalStatePath, 'utf8'))['pinned-project-ids'], [
+    'new-local-project'
+  ])
   assert.strictEqual(
     manager._internal.syncDesktopProjects(manager.getPaths(options), {
       desktopProjectOptions: { randomUUID: () => 'must-not-be-used' }

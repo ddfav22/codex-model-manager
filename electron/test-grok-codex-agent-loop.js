@@ -182,6 +182,12 @@ assert.strictEqual(
   }),
   true
 )
+assert.strictEqual(looksLikeStalledToolContinuation('我接下来会处理剩余步骤。', { afterToolResult: true }), true)
+assert.strictEqual(looksLikeStalledToolContinuation('好的。下一步我将继续。', { afterToolResult: true }), true)
+assert.strictEqual(
+  looksLikeStalledToolContinuation('Next, I will handle the remaining steps.', { afterToolResult: true }),
+  true
+)
 assert.strictEqual(looksLikeStalledToolContinuation(signedResult, { afterToolResult: true }), false)
 assert.strictEqual(
   shouldAcceptContinuationRecovery({

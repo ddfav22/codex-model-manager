@@ -181,8 +181,13 @@ function looksLikePendingMultiStepAction(content) {
   const englishLead =
     /^(?:first|next|then|after that|i(?:'ll| will| am going to)|let me|continuing|preparing to|planning to)\b/i
   const multiStepSequence = /(?:先|首先|first).{0,260}(?:再|然后|随后|接着|并(?:且)?|next|then|after that).{0,260}/i
+  const genericFutureCommitment =
+    /(?:^|[。！？!?\n])\s*(?:我)?(?:接下来|下一步|然后|随后|接着|现在)(?:我)?(?:会|将|准备|打算|需要|继续|先|马上|立即)|^(?:next|then|after that)[,:]?\s+i(?:'ll| will| am going to)\b/i
 
-  return action.test(text) && (chineseLead.test(text) || englishLead.test(text) || multiStepSequence.test(text))
+  return (
+    genericFutureCommitment.test(text) ||
+    (action.test(text) && (chineseLead.test(text) || englishLead.test(text) || multiStepSequence.test(text)))
+  )
 }
 
 function looksLikeStalledToolContinuation(content, options = {}) {

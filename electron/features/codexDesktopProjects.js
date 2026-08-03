@@ -93,6 +93,7 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
       addedProjectCount: 0,
       assignedThreadCount: 0,
       projectCount: 0,
+      pinnedProjectCount: 0,
       backupPath: ''
     }
   }
@@ -122,6 +123,8 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
   const createId = typeof options.randomUUID === 'function' ? options.randomUUID : randomUUID
   const addedProjectIds = []
   const addedProjects = []
+  const syncedProjectIds = []
+  const syncedProjectIdSet = new Set()
   let assignedThreadCount = 0
 
   for (const session of sessionProjects) {
@@ -140,6 +143,11 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
       projectsByRoot.set(key, projectId)
       addedProjectIds.push(projectId)
       addedProjects.push(session.cwd)
+    }
+
+    if (!syncedProjectIdSet.has(projectId)) {
+      syncedProjectIdSet.add(projectId)
+      syncedProjectIds.push(projectId)
     }
 
     const expected = {
@@ -183,12 +191,15 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
     )
   ]
   const projectOrder = [...new Set(orderCandidates)]
+  const pinnedBefore = Array.isArray(state['pinned-project-ids']) ? state['pinned-project-ids'].map(String) : []
+  const pinnedProjectIds = [...new Set([...pinnedBefore, ...syncedProjectIds])]
   const changed =
     addedProjectIds.length > 0 ||
     assignedThreadCount > 0 ||
     projectlessAfter.length !== projectlessBefore.length ||
     Object.keys(hintsAfter).length !== Object.keys(hintsBefore).length ||
-    JSON.stringify(projectOrder) !== JSON.stringify(existingOrder)
+    JSON.stringify(projectOrder) !== JSON.stringify(existingOrder) ||
+    JSON.stringify(pinnedProjectIds) !== JSON.stringify(pinnedBefore)
 
   if (!changed) {
     return {
@@ -196,6 +207,7 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
       addedProjectCount: 0,
       assignedThreadCount: 0,
       projectCount: Object.keys(localProjects).length,
+      pinnedProjectCount: pinnedProjectIds.length,
       backupPath: ''
     }
   }
@@ -204,6 +216,7 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
     ...state,
     'local-projects': localProjects,
     'project-order': projectOrder,
+    'pinned-project-ids': pinnedProjectIds,
     'thread-project-assignments': assignments,
     'projectless-thread-ids': projectlessAfter,
     'thread-workspace-root-hints': hintsAfter
@@ -218,6 +231,7 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
     addedProjects,
     assignedThreadCount,
     projectCount: Object.keys(localProjects).length,
+    pinnedProjectCount: pinnedProjectIds.length,
     backupPath
   }
 }

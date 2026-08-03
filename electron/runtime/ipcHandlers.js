@@ -174,6 +174,12 @@ function registerIpcHandlers({
       authLogin: result.authLogin?.reason || '',
       historyRepairRequested: result.conversationIndexRepair !== null,
       availableModels: result.status?.providers?.find(provider => provider.id === id)?.models || [],
+      projectSync: {
+        changed: result.restart?.afterStopResult?.desktopProjects?.changed === true,
+        projectCount: result.restart?.afterStopResult?.desktopProjects?.projectCount || 0,
+        pinnedProjectCount: result.restart?.afterStopResult?.desktopProjects?.pinnedProjectCount || 0,
+        assignedThreadCount: result.restart?.afterStopResult?.desktopProjects?.assignedThreadCount || 0
+      },
       timings: result.timings,
       durationMs: Date.now() - activationStartedAt
     })

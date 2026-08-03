@@ -877,7 +877,7 @@ async function main() {
                 : '{"name":"exec","arguments":{"input":"const saved = await tools.shell_command({command:\\"Set-Content -Path gold-price.txt -Value 2026-07-31_gold_2800; Start-Process notepad.exe gold-price.txt\\"}); text(saved);"}}'
         } else {
           content = hasLocalToolResult
-            ? '先改用更稳妥的方式：写一个本地脚本，再获取金价、打开记事本并保存到桌面。'
+            ? '我接下来会处理剩余步骤。'
             : '{"name":"exec","arguments":{"input":"const price = await tools.shell_command({command:\\"Write-Output 2800\\"}); text(price);"}}'
         }
 
@@ -1983,7 +1983,7 @@ async function main() {
     const decoder = new TextDecoder()
 
     while (
-      !stalledContinuationPrefix.includes('先改用更稳妥的方式：写一个本地脚本，再获取金价、打开记事本并保存到桌面。') ||
+      !stalledContinuationPrefix.includes('我接下来会处理剩余步骤。') ||
       !stalledContinuationPrefix.includes('正在准备下一个可执行步骤。') ||
       !stalledContinuationPrefix.includes('下一步将继续执行保存任务。')
     ) {
@@ -1992,9 +1992,7 @@ async function main() {
       if (done) break
       stalledContinuationPrefix += decoder.decode(value, { stream: true })
     }
-    assert.ok(
-      stalledContinuationPrefix.includes('先改用更稳妥的方式：写一个本地脚本，再获取金价、打开记事本并保存到桌面。')
-    )
+    assert.ok(stalledContinuationPrefix.includes('我接下来会处理剩余步骤。'))
     assert.ok(stalledContinuationPrefix.includes('正在准备下一个可执行步骤。'))
     assert.ok(stalledContinuationPrefix.includes('下一步将继续执行保存任务。'))
     assert.ok(!stalledContinuationPrefix.includes('notepad.exe'))
@@ -2024,13 +2022,11 @@ async function main() {
   assert.ok(stalledContinuationStream.includes('response.custom_tool_call_input.done'))
   assert.ok(stalledContinuationStream.includes('notepad.exe'))
   assert.ok(stalledContinuationStream.includes('"id":"ctc_'))
-  assert.ok(
-    stalledContinuationStream.includes('先改用更稳妥的方式：写一个本地脚本，再获取金价、打开记事本并保存到桌面。')
-  )
+  assert.ok(stalledContinuationStream.includes('我接下来会处理剩余步骤。'))
   assert.ok(stalledContinuationStream.includes('正在准备下一个可执行步骤。'))
   assert.ok(stalledContinuationStream.includes('下一步将继续执行保存任务。'))
   assert.ok(
-    stalledContinuationStream.indexOf('先改用更稳妥的方式：写一个本地脚本，再获取金价、打开记事本并保存到桌面。') <
+    stalledContinuationStream.indexOf('我接下来会处理剩余步骤。') <
       stalledContinuationStream.indexOf('正在准备下一个可执行步骤。')
   )
   assert.ok(

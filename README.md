@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.56**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.57**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -34,6 +34,18 @@ Windows 可能会对未签名的安装包显示 SmartScreen 提示。当前项�
 npm ci
 npm run desktop
 ```
+
+### 源码热更新（开发模式）
+
+源码提交推送到 GitHub 后，开发工作区可以直接拉取并继续使用 Next.js 热重载：
+
+```powershell
+git pull --ff-only
+npm ci
+npm run desktop
+```
+
+如果 `package-lock.json` 没有变化，可以继续使用现有依赖并省略 `npm ci`。这里的“热更新”仅适用于源码开发模式；已经安装的客户端只会读取 GitHub Release，仍需等待对应版本安装包发布。
 
 生产构建与安装包：
 

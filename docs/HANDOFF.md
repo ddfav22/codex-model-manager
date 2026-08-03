@@ -4,7 +4,7 @@
 
 ## 不可破坏的产品约束
 
-1. 修改源码前必须创建排除依赖、构建产物和用户数据的源码备份，并逐文件校验相对路径与 SHA-256。
+1. 修改源码前必须检查 Git 工作区并保护已有改动。普通受版本控制的源码修改依靠 Git 提交恢复；只有涉及真实用户数据、迁移、安装/卸载、破坏性操作或未受 Git 管理的文件时，才创建隔离备份并校验相对路径与 SHA-256。
 2. 用户普通启动管理器时不能自动启动或关闭 Codex；只有用户明确点击同步/启用并重启时才可操作 Codex 进程。
 3. 切换渠道、Key 或模型不能删除 `sessions`、Projects、Skills、Agents 或原登录字段。
 4. 发布产物必须是纯净版，不得包含 `data`、API Key、Cookie、登录态、日志或缓存。
@@ -70,6 +70,12 @@ Grok 返回工具 JSON 时不一定严格使用 `name` + `arguments`。兼容层
 
 `config.toml [projects]` 只控制目录信任。桌面端 Projects 页读取 `.codex-global-state.json` 的 `local-projects`、`project-order` 和 `thread-project-assignments`。同步流程必须在 Codex 进程关闭后执行，先备份完整状态，只合并这些项目字段，并从 `projectless-thread-ids`/`thread-workspace-root-hints` 移除已经成功归属的任务。文件损坏或写后校验失败时禁止启动 Codex并恢复备份。
 
+Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。仅创建 Local Project 和任务归属仍可能让所有任务停留在统一列表；同步到的项目 ID 必须追加到固定列表，同时保留用户原有固定项并保持幂等。
+
+### 未来承诺不是 Grok 的终态
+
+“我接下来会……”“下一步我将……”和同类英文未来承诺只表示任务仍在进行。即使它出现在工具结果之后且缺少结束标志，也不能走一次快速终态推断；应进入最多三次、总计不超过 25 秒的有限恢复。只有包含已验证结果的完整答复才允许终态推断。
+
 ### 启动慢不一定是代理慢
 
 代理通常只占很小一段时间。记录静态服务启动、页面 `loadURL`、`ready-to-show` 等分段耗时后再优化。指纹静态资源可长期缓存，HTML 需要重新验证。
@@ -86,28 +92,39 @@ Grok 返回工具 JSON 时不一定严格使用 `name` + `arguments`。兼容层
 - 任何凭据只能出现在用户本机运行数据中；源码、测试、文档和发布包使用明显的假值。
 - GitHub 发布前执行敏感信息扫描，根目录本机交接文档保持忽略。
 
-## 验证顺序
+## 分阶段验证顺序
+
+源码阶段先执行以下门禁，通过后推送 GitHub 并给出精确提交：
 
 ```powershell
 npm ci --dry-run --ignore-scripts
+npx prettier --check .
 npm run lint
 npx tsc --noEmit
 npm run test:modules
 npm run test:core
 npm run test:wire
 npm run build
+```
+
+安装包阶段随后执行：
+
+```powershell
 npm run dist
 npm run test:packaged-ui
 npm run dist:installer
 npm run test:installer
 ```
 
-测试退出码为 0 但执行 0 个断言/场景，不算通过。真实渠道测试需要隔离凭据与明确授权；无法运行时必须在发布报告中说明未验证范围。
+如果变更触及安装器、更新器、Electron 生命周期、持久化路径、数据迁移或发布脚本，相关安装包阶段测试必须在源码推送前提前执行。测试退出码为 0 但执行 0 个断言/场景，不算通过。真实渠道测试需要隔离凭据与明确授权；无法运行时必须在发布报告中说明未验证范围。
 
 ## 版本与发布
 
 - 每次用户可见更新递增 `package.json` 与 `package-lock.json` 版本。
 - Git tag 使用 `v<版本>`。
+- 固定顺序为：源码门禁通过 → 推送 GitHub 源码并通知提交 → 用户可在开发工作区拉取并热重载 → 安装包门禁通过 → 推送版本标签并发布 GitHub Release。
+- 共享目录只维护一个不带版本号的稳定程序文件夹，不再创建逐版本目录或复制安装包。后续原位更新前必须确认程序已退出，并备份、保留和验证稳定目录中的 `data`；不能用纯净包覆盖掉真实用户数据。
+- 开发模式的源码热重载和已安装客户端更新是两个不同通道。仅推送源码不会被安装版更新器发现；安装版仍读取 GitHub Release，并下载经过 SHA-256 校验的安装包。
 - GitHub Release 安装包名称必须为 `ChatGPT-Model-Manager-Setup-<版本>-x64.exe`，在线更新模块按此精确匹配。
 - Release 工作流必须先通过 lint、类型、模块、核心、wire、构建和纯净包测试。
 - 当前未配置商业 Windows 代码签名证书，这是已知发布风险，不得隐藏。
