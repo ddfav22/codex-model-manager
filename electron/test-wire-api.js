@@ -9,6 +9,8 @@ const {
   createProtocolProxy,
   endpointCompatibilityFailure,
   inferredWireApiForModel,
+  PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   responsesRequestToChat,
   wireApiForModel
 } = require('./protocolProxy')
@@ -229,6 +231,8 @@ function writeHistoryProviderConfig(configPath, model, proxyBaseUrl, modelCatalo
 }
 
 async function main() {
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS, 15000)
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS, 40000)
   let phase = 'discover-codex'
   const watchdog = setTimeout(() => {
     console.error(`wire test watchdog timeout at phase: ${phase}`)
@@ -612,14 +616,20 @@ async function main() {
 
       if (requestBody.model === 'grok-image-generation') {
         const recovering = requestBody.messages?.some(message =>
-          /requires a verified tool result/i.test(String(message?.content || ''))
+          /requires a verified tool result|^The previous answer stopped at a plan-only sentence/i.test(
+            String(message?.content || '')
+          )
         )
         const requestText = JSON.stringify(requestBody)
 
         if (recovering) {
           assert.ok(requestText.includes('image_gen__imagegen'))
           assert.ok(requestText.includes('generatedImage'))
-          assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
+          assert.deepStrictEqual(
+            requestBody.response_format,
+            { type: 'json_object' },
+            `image recovery payload: ${JSON.stringify(requestBody)}`
+          )
         } else {
           assert.ok(requestText.includes('reading an image skill'))
           assert.ok(requestText.includes('image_gen__imagegen'))
@@ -869,6 +879,15 @@ async function main() {
 
         if (recovering) {
           stalledRecoveryRequests += 1
+          const recoveryInstructions = requestBody.messages
+            .filter(message => message.role === 'system')
+            .map(message => String(message.content || ''))
+            .join('\n')
+
+          assert.ok(recoveryInstructions.includes('plan-only sentence'))
+          assert.ok(!recoveryInstructions.includes('omitted the required completion signal'))
+          assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
+          assert.strictEqual(requestBody.max_tokens, 512)
           content =
             stalledRecoveryRequests === 1
               ? '正在准备下一个可执行步骤。'
@@ -1607,7 +1626,7 @@ async function main() {
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.initialToolOmission, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryAttempts, 2)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 3)
-  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryMs, 25000)
+  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryMs, 40000)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryTimeBudgetExhausted, false)
   assert.ok(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryElapsedMs >= 0)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.acceptedRetry, true)

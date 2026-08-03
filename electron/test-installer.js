@@ -14,6 +14,10 @@ function sleep(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
 }
 
+function canonicalExistingPath(targetPath) {
+  return path.normalize(fs.realpathSync.native(targetPath)).toLowerCase()
+}
+
 function waitFor(predicate, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs
 
@@ -215,7 +219,11 @@ async function selfUpdate(installerPath, installDirectory, markerPath) {
     .at(-1)
 
   assert.ok(Number.isInteger(restarted?.pid), '更新后启动日志缺少进程 ID')
-  assert.strictEqual(path.resolve(restarted.details.executable), path.resolve(installedExecutable))
+  assert.strictEqual(
+    canonicalExistingPath(restarted.details.executable),
+    canonicalExistingPath(installedExecutable),
+    '更新后必须从原安装目录启动；Windows 8.3 短路径和完整路径视为同一路径'
+  )
   stopProcessTree(restarted.pid)
   sleep(2000)
 }
