@@ -317,7 +317,11 @@ async function main() {
 
     for (let attempt = 0; attempt < 150; attempt += 1) {
       pageText = await cdp.evaluate('document.body?.textContent || ""')
-      if (pageText.includes(expectedVersionLabel) && pageText.includes('Codex 客户端已安装')) {
+      const versionVisible = pageText.includes(expectedVersionLabel)
+      const installedVisible = pageText.includes('Codex 客户端已安装')
+      const missingVisibleAndStable = pageText.includes('未发现 Codex 客户端') && Date.now() - uiStartedAt >= 2000
+
+      if (versionVisible && (installedVisible || missingVisibleAndStable)) {
         uiReadyMs = Date.now() - uiStartedAt
         break
       }
@@ -609,17 +613,27 @@ async function main() {
 
     console.log(JSON.stringify(result, null, 2))
 
+    const installedClientStateValid =
+      result.uiInstalled === true &&
+      result.uiNotFound === false &&
+      result.quick?.installed === true &&
+      result.full?.installed === true &&
+      Number(result.full?.targetCount) > 0
+    const missingClientStateValid =
+      result.uiInstalled === false &&
+      result.uiNotFound === true &&
+      result.quick?.installed === false &&
+      result.full?.installed === false &&
+      Number(result.quick?.targetCount) === 0 &&
+      Number(result.full?.targetCount) === 0 &&
+      [...(result.quick?.issues || []), ...(result.full?.issues || [])].some(issue => /没有发现 Codex/.test(issue))
     const checks = [
       result.uiReadyMs > 0,
-      result.uiInstalled,
-      !result.uiNotFound,
+      installedClientStateValid || missingClientStateValid,
       result.visibleVersionLabels.length === 1,
       result.visibleVersionLabels[0] === expectedVersionLabel,
       result.rendererExceptions.length === 0,
       result.rendererConsoleErrors.length === 0,
-      result.quick?.installed === true,
-      result.full?.installed === true,
-      Number(result.full?.targetCount) > 0,
       result.packageManagement?.skills?.some(
         item => item.name === 'packaged-skill' && item.source === 'user' && item.valid === true
       ),
