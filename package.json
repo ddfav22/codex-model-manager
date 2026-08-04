@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-model-manager",
-  "version": "1.2.65",
+  "version": "1.2.66",
   "description": "Windows desktop manager for ChatGPT model providers and relay channels.",
   "author": "ChatGPT Model Manager",
   "license": "MIT",
@@ -64,7 +64,7 @@
     "autoprefixer": "^10.4.19",
     "classnames": "^2.5.1",
     "electron": "^33.4.11",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "26.15.3",
     "eslint": "^8.57.0",
     "eslint-config-next": "^14.2.3",
     "eslint-config-prettier": "^9.1.0",
