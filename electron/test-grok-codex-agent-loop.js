@@ -264,6 +264,12 @@ assert.strictEqual(
   stripInternalToolTranscript('[Codex local tool calls]\n[{"name":"exec"}]\n正常结果').trim(),
   '正常结果'
 )
+assert.strictEqual(
+  stripInternalToolTranscript(
+    '[Codex local tool calls]\n[\n  {"name":"exec","arguments":{"input":"const paths = [\\"C:\\\\Temp\\\\one.js\\", \\"C:\\\\Temp\\\\two.js\\"]; text(paths);"}}\n]\n正常结果'
+  ).trim(),
+  '正常结果'
+)
 assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
 

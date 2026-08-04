@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.62**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.63**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -24,7 +24,7 @@
 
 ## 安装
 
-从仓库的 Releases 页面下载 `ChatGPT-Model-Manager-Setup-<版本>-x64.exe`，运行安装程序即可。
+从仓库的 Releases 页面下载 `ChatGPT-Model-Manager-Setup-<版本>-x64.exe`。安装向导允许自行选择安装目录；静默在线更新会继续覆盖当前程序目录并保留其中的 `data` 用户数据。
 
 Windows 可能会对未签名的安装包显示 SmartScreen 提示。当前项目没有商业代码签名证书，请只从本仓库的 Release 下载，并核对 Release 资产信息。
 

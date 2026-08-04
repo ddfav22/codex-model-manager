@@ -6,6 +6,7 @@ const path = require('path')
 const { execFileSync, spawn } = require('child_process')
 const packageMetadata = require('../package.json')
 const { createAppUpdater } = require('./features/appUpdater')
+const { assertPackagedIcon } = require('./test-packaged-icon')
 
 const productExecutable = 'ChatGPT Model Manager.exe'
 const updaterCacheDirectory = path.join(process.env.LOCALAPPDATA || '', `${packageMetadata.name}-updater`)
@@ -94,6 +95,7 @@ function uninstall(installDirectory) {
 }
 
 function packagedUiSmoke(installDirectory, port) {
+  assertPackagedIcon(path.join(installDirectory, productExecutable))
   run(process.execPath, [path.join(__dirname, 'test-packaged-ui.js'), path.join(installDirectory, productExecutable)], {
     env: {
       ...process.env,
@@ -235,11 +237,13 @@ async function main() {
     process.argv[2] ||
       path.join(__dirname, '..', 'release', `ChatGPT-Model-Manager-Setup-${packageMetadata.version}-x64.exe`)
   )
+
+  assert.ok(fs.existsSync(installerPath), `安装包不存在：${installerPath}`)
+  assertPackagedIcon(installerPath)
+
   const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-installer-'))
   const installDirectory = path.join(testRoot, 'ChatGPT Model Manager')
   const markerPath = path.join(installDirectory, 'data', 'manager', 'installer-preserve-test.json')
-
-  assert.ok(fs.existsSync(installerPath), `安装包不存在：${installerPath}`)
 
   let testFailure = null
 

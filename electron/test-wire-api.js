@@ -449,6 +449,7 @@ async function main() {
   let currentLiveRecoveryRequests = 0
   let completionSignalRecoveryRequests = 0
   let exhaustedCompletionSignalRecoveryRequests = 0
+  let streamedInternalTranscriptRequests = 0
   let releaseStalledFinalResponse = null
   let markStalledFinalReached
   const stalledFinalReached = new Promise(resolve => {
@@ -780,6 +781,35 @@ async function main() {
             ]
           })}\n\n`
         )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
+      if (requestBody.model === 'grok-streamed-internal-transcript') {
+        streamedInternalTranscriptRequests += 1
+        const recovering = streamedInternalTranscriptRequests > 1
+        const chunks = recovering
+          ? ['{"decision":"complete","answer":"VISIBLE_ONLY"}']
+          : [
+              'I will inspect the local frontend and then verify the authentication flow.',
+              '\n[Codex local tool calls]\n[\n  {"name":"exec","arguments":{"input":"RAW_POWERSHELL_SHOULD_NOT_RENDER C:\\\\Users\\\\Tester\\\\Desktop\\\\recon.js","nested":["one",{"two":true}]}}\n]'
+            ]
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const content of chunks) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-streamed-internal-transcript',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
         response.end('data: [DONE]\n\n')
         return
       }
@@ -1204,6 +1234,7 @@ async function main() {
     'grok-delayed-plain-answer',
     'grok-streamed-plan-progress',
     'grok-internal-transcript-echo',
+    'grok-streamed-internal-transcript',
     'grok-short-continue-anchor',
     'grok-identity-self-report'
   ]
@@ -1224,6 +1255,7 @@ async function main() {
           model === 'grok-delayed-plain-answer' ||
           model === 'grok-streamed-plan-progress' ||
           model === 'grok-internal-transcript-echo' ||
+          model === 'grok-streamed-internal-transcript' ||
           model === 'grok-short-continue-anchor'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : {
@@ -1910,6 +1942,32 @@ async function main() {
   assert.ok(!transcriptEchoStream.includes('[Codex local tool calls]'))
   assert.ok(!transcriptEchoStream.includes('"name":"exec","arguments":"{}"'))
   assert.ok(!transcriptEchoStream.includes('response.custom_tool_call_input.done'))
+  assert.strictEqual(proxyDiagnostics.at(-1).emulation.internalTranscriptSuppressed, true)
+  upstreamRequests.length = 0
+  const streamedTranscriptResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-streamed-internal-transcript',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Say hello.' }] }],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const streamedTranscript = await streamedTranscriptResponse.text()
+
+  assert.strictEqual(streamedTranscriptResponse.status, 200)
+  assert.ok(
+    streamedTranscript.includes('VISIBLE_ONLY'),
+    `${streamedTranscript}\nrequests=${streamedInternalTranscriptRequests}\nmodels=${upstreamRequests
+      .map(request => request.body?.model)
+      .join(',')}`
+  )
+  assert.ok(streamedTranscript.includes('I will inspect the local frontend'))
+  assert.ok(!streamedTranscript.includes('[Codex local tool calls]'))
+  assert.ok(!streamedTranscript.includes('RAW_POWERSHELL_SHOULD_NOT_RENDER'))
+  assert.ok(!streamedTranscript.includes('C:\\\\Users\\\\Tester'))
+  assert.ok(!streamedTranscript.includes('response.custom_tool_call_input.done'))
   assert.strictEqual(proxyDiagnostics.at(-1).emulation.internalTranscriptSuppressed, true)
   upstreamRequests.length = 0
   const completionSignalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {

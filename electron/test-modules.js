@@ -1,4 +1,5 @@
 const assert = require('assert')
+const crypto = require('crypto')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
@@ -76,6 +77,24 @@ async function main() {
   const installerIncludeRelative = String(packageMetadata.build?.nsis?.include || '')
   const installerIncludePath = path.resolve(projectRoot, installerIncludeRelative)
   const installerBuildScript = String(packageMetadata.scripts?.['dist:installer'] || '')
+  const windowsBuildScripts = ['dist', 'dist:installer', 'dist:portable', 'pack'].map(name =>
+    String(packageMetadata.scripts?.[name] || '')
+  )
+  const packagedFileRules = packageMetadata.build?.files || []
+  const mainProcessSource = fs.readFileSync(path.join(projectRoot, 'electron', 'main.js'), 'utf8')
+  const afterPackRelative = String(packageMetadata.build?.afterPack || '')
+  const afterPackPath = path.resolve(projectRoot, afterPackRelative)
+  const afterPackSource = fs.readFileSync(afterPackPath, 'utf8')
+  const rceditPath = path.join(projectRoot, 'tools', 'vendor', 'rcedit-x64.exe')
+  const iconPaths = [
+    ...new Set([
+      packageMetadata.build?.win?.icon,
+      packageMetadata.build?.nsis?.installerIcon,
+      packageMetadata.build?.nsis?.uninstallerIcon,
+      packageMetadata.build?.nsis?.installerHeaderIcon,
+      'src/app/favicon.ico'
+    ])
+  ].map(iconPath => path.resolve(projectRoot, String(iconPath || '')))
 
   assert.ok(installerIncludeRelative, 'NSIS include path must be configured')
   assert.ok(
@@ -92,6 +111,45 @@ async function main() {
     /--publish\s+never(?:\s|$)/,
     'installer build must not auto-publish before release validation completes'
   )
+  assert.strictEqual(
+    packageMetadata.build?.win?.signAndEditExecutable,
+    false,
+    'electron-builder resource editing must stay disabled because its winCodeSign archive requires symlink privileges'
+  )
+  assert.ok(
+    windowsBuildScripts.every(script => !/signAndEditExecutable=false/i.test(script)),
+    'Windows build commands must use the centralized resource-editing configuration'
+  )
+  assert.strictEqual(afterPackRelative, 'tools/after-pack.js', 'the Windows icon hook must stay configured')
+  assert.strictEqual(fs.statSync(afterPackPath).isFile(), true, 'the Windows icon hook must exist')
+  assert.match(afterPackSource, /--set-icon/, 'the afterPack hook must embed the application icon')
+  assert.strictEqual(fs.statSync(rceditPath).isFile(), true, 'the vendored Windows resource editor must exist')
+  assert.strictEqual(
+    crypto.createHash('sha256').update(fs.readFileSync(rceditPath)).digest('hex').toUpperCase(),
+    '3E7801DB1A5EDBEC91B49A24A094AAD776CB4515488EA5A4CA2289C400EADE2A',
+    'the vendored Windows resource editor must match the reviewed binary'
+  )
+  assert.ok(packagedFileRules.includes('!electron/assets/app.ico'), 'the unused default Electron icon must be excluded')
+  assert.ok(
+    !packagedFileRules.includes('!electron/assets/app-icon.ico'),
+    'the runtime window icon must remain available in the packaged app'
+  )
+  assert.match(mainProcessSource, /assets['"],\s*['"]app-icon\.ico['"]/, 'the window must use the custom icon')
+  assert.strictEqual(packageMetadata.build?.nsis?.oneClick, false, 'installer must use the assisted wizard')
+  assert.strictEqual(
+    packageMetadata.build?.nsis?.allowToChangeInstallationDirectory,
+    true,
+    'installer wizard must let the user choose the installation directory'
+  )
+  for (const iconPath of iconPaths) {
+    assert.ok(iconPath.startsWith(`${projectRoot}${path.sep}`), 'application icons must stay inside the project')
+    assert.strictEqual(fs.statSync(iconPath).isFile(), true, 'application icon asset must exist')
+    assert.ok(fs.statSync(iconPath).size > 1024, 'application icon must contain real multi-size image data')
+    const iconBytes = fs.readFileSync(iconPath)
+
+    assert.deepStrictEqual([...iconBytes.subarray(0, 4)], [0, 0, 1, 0], 'application icon must be a valid ICO')
+    assert.ok(iconBytes.readUInt16LE(4) >= 6, 'application icon must include the Windows small and large sizes')
+  }
 
   const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-legacy-'))
   const markerPath = path.join(legacyRoot, 'manager-executable.json')

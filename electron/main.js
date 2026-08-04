@@ -216,7 +216,7 @@ async function createWindow() {
     minHeight: 720,
     show: false,
     title: 'ChatGPT Model Manager',
-    icon: path.join(__dirname, 'assets', 'app.ico'),
+    icon: path.join(__dirname, 'assets', 'app-icon.ico'),
     backgroundColor: '#f7f7f9',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

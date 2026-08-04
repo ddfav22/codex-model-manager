@@ -50,6 +50,7 @@ const {
   internalAdapterInstruction,
   internalToolCallsTranscript,
   internalToolResultTranscript,
+  internalToolTranscriptStart,
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
 const {
@@ -680,6 +681,7 @@ function parseEmulatedToolCall(content, allowed) {
 function emulatedToolSyntaxStart(content) {
   const text = String(content || '')
   const candidates = [
+    internalToolTranscriptStart(text),
     text.search(/<codex_tool_call>/i),
     text.search(/```(?:json)?\s*\{/i),
     text.search(/(?:^|\n)\s*\{\s*"?(?:tool_call|function|name|tool|tool_name)"?\s*:/i)
