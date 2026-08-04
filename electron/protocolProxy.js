@@ -44,6 +44,7 @@ const {
   readResponseJsonLimited,
   readResponseTextLimited
 } = require('./protocol/upstreamRequest')
+const { readChatAssistant } = require('./protocol/chatAssistantStream')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 15_000
 const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 40_000
@@ -664,52 +665,15 @@ function parseEmulatedToolCall(content, allowed) {
   return null
 }
 
-async function readChatAssistant(upstream) {
-  const raw = await readResponseTextLimited(upstream)
-  let parsed
+function emulatedToolSyntaxStart(content) {
+  const text = String(content || '')
+  const candidates = [
+    text.search(/<codex_tool_call>/i),
+    text.search(/```(?:json)?\s*\{/i),
+    text.search(/(?:^|\n)\s*\{\s*"?(?:tool_call|function|name|tool|tool_name)"?\s*:/i)
+  ].filter(index => index >= 0)
 
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    parsed = null
-  }
-
-  if (parsed) {
-    return {
-      id: parsed.id,
-      model: parsed.model,
-      content: textFromContent(parsed.choices?.[0]?.message?.content),
-      usage: parsed.usage
-    }
-  }
-
-  let id = ''
-  let model = ''
-  let content = ''
-  let usage = null
-  const parser = createParser({
-    onEvent(event) {
-      if (!event.data || event.data === '[DONE]') return
-
-      try {
-        const chunk = JSON.parse(event.data)
-
-        id ||= String(chunk.id || '')
-        model ||= String(chunk.model || '')
-        usage ||= chunk.usage || null
-        for (const choice of Array.isArray(chunk.choices) ? chunk.choices : []) {
-          content += textFromContent(choice?.delta?.content)
-        }
-      } catch {
-        // Ignore provider-specific SSE metadata.
-      }
-    }
-  })
-
-  parser.feed(raw)
-  parser.reset({ consume: true })
-
-  return { id, model, content, usage }
+  return candidates.length ? Math.min(...candidates) : -1
 }
 
 async function synthesizeEmulatedToolResponse(
@@ -721,19 +685,98 @@ async function synthesizeEmulatedToolResponse(
   options = {}
 ) {
   const synthesisStartedAt = Date.now()
-  let assistant = await readChatAssistant(upstream)
+  const progressMessages = []
+  const publishedProgressMessages = new Set()
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
+  const onProgressStart = typeof options.onProgressStart === 'function' ? options.onProgressStart : null
+  const onProgressDelta = typeof options.onProgressDelta === 'function' ? options.onProgressDelta : null
+  const onProgressEnd = typeof options.onProgressEnd === 'function' ? options.onProgressEnd : null
+  let firstProgressDeltaMs = -1
+  let progressDeltaCount = 0
+  const callProgress = (callback, value) => {
+    if (!callback) return false
+
+    try {
+      callback(value)
+
+      return true
+    } catch {
+      // Downstream cancellation must not corrupt the bounded recovery state.
+      return false
+    }
+  }
+  const publishProgressDelta = delta => {
+    if (!delta || !callProgress(onProgressDelta, delta)) return
+    if (firstProgressDeltaMs < 0) firstProgressDeltaMs = Date.now() - synthesisStartedAt
+    progressDeltaCount += 1
+  }
+  const convertedFollowsToolResult = followsImmediateToolResult(request?.messages)
+  const sourceFollowsToolResult = followsImmediateResponsesToolResult(sourceInput)
+  const followsToolResult = convertedFollowsToolResult || sourceFollowsToolResult
+  const likelyRequiresTool = requestLikelyRequiresTool(request?.messages, allowed)
+  const rememberProgress = content => {
+    const text = stripAgentControlSignals(content)
+
+    if (!text || isMalformedToolRecovery(text) || progressMessages.includes(text)) return ''
+    progressMessages.push(text)
+
+    return text
+  }
+  const createProgressObserver = () => {
+    let buffer = ''
+    let emittedLength = 0
+    let streaming = false
+    let closed = false
+
+    const safeText = () => {
+      const syntaxStart = emulatedToolSyntaxStart(buffer)
+
+      return syntaxStart >= 0 ? buffer.slice(0, syntaxStart) : buffer
+    }
+    const onContentDelta = (_delta, snapshot) => {
+      if (closed) return
+      buffer = String(snapshot || buffer)
+      const visible = safeText()
+
+      if (!streaming) {
+        const stalled = looksLikeStalledToolContinuation(visible, { afterToolResult: followsToolResult })
+
+        if (!stalled || !onProgressStart || !onProgressDelta || !onProgressEnd) return
+        streaming = true
+        callProgress(onProgressStart)
+      }
+      if (visible.length <= emittedLength) return
+      publishProgressDelta(visible.slice(emittedLength))
+      emittedLength = visible.length
+    }
+    const finish = content => {
+      if (closed) return false
+      closed = true
+      buffer = String(content || buffer)
+      const visible = stripAgentControlSignals(safeText())
+
+      if (!streaming) return false
+      if (visible.length > emittedLength) publishProgressDelta(visible.slice(emittedLength))
+      callProgress(onProgressEnd)
+      const remembered = rememberProgress(visible)
+
+      if (remembered) publishedProgressMessages.add(remembered)
+
+      return true
+    }
+
+    return { finish, onContentDelta }
+  }
+  const initialProgressObserver = createProgressObserver()
+  let assistant = await readChatAssistant(upstream, { onContentDelta: initialProgressObserver.onContentDelta })
+
+  initialProgressObserver.finish(assistant.content)
   const initialAssistant = assistant
   const initialResponseMs = Date.now() - synthesisStartedAt
   let toolCall = parseEmulatedToolCall(assistant.content, allowed)
   const firstContent = String(assistant.content || '')
-  const progressMessages = []
-  const publishedProgressMessages = new Set()
-  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
   let retryContent = ''
-  const convertedFollowsToolResult = followsImmediateToolResult(request?.messages)
-  const sourceFollowsToolResult = followsImmediateResponsesToolResult(sourceInput)
-  const followsToolResult = convertedFollowsToolResult || sourceFollowsToolResult
-  const toolIntentRequired = !followsToolResult && !toolCall && requestLikelyRequiresTool(request?.messages, allowed)
+  const toolIntentRequired = !followsToolResult && !toolCall && likelyRequiresTool
   const initialNaturalStall =
     !toolCall && looksLikeStalledToolContinuation(firstContent, { afterToolResult: followsToolResult })
   const initialMissingCompletionSignal =
@@ -761,14 +804,6 @@ async function synthesizeEmulatedToolResponse(
   let inferredCompletionAccepted = false
   let failedRecoveryAttempts = 0
   const recoveryRequestMs = []
-  const rememberProgress = content => {
-    const text = stripAgentControlSignals(content)
-
-    if (!text || isMalformedToolRecovery(text) || progressMessages.includes(text)) return ''
-    progressMessages.push(text)
-
-    return text
-  }
   const publishProgress = content => {
     const text = stripAgentControlSignals(content)
 
@@ -798,6 +833,7 @@ async function synthesizeEmulatedToolResponse(
     const remainingRecoveryMs = Number.isFinite(maximumRecoveryMs)
       ? Math.max(1, maximumRecoveryMs - (recoveryStartedAt - recoveryBudgetStartedAt))
       : 0
+    const retryProgressObserver = createProgressObserver()
     const retried = await retryAssistant(recoveryAssistant, {
       followsToolResult,
       stalledAfterToolResult: followsToolResult && currentStalledContinuation,
@@ -807,8 +843,10 @@ async function synthesizeEmulatedToolResponse(
       toolIntentRequired,
       attempt: recoveryAttempts,
       maximumAttempts: maximumRecoveryAttempts,
-      remainingRecoveryMs
+      remainingRecoveryMs,
+      onContentDelta: retryProgressObserver.onContentDelta
     })
+    retryProgressObserver.finish(retried?.content)
     recoveryRequestMs.push(Date.now() - recoveryStartedAt)
 
     if (!retried) {
@@ -938,6 +976,8 @@ async function synthesizeEmulatedToolResponse(
       retryProducedToolCall: Boolean(toolCall && acceptedRetry),
       visibleProgressCount: visibleProgressMessages.length,
       liveProgressCount: publishedProgressMessages.size,
+      firstProgressDeltaMs,
+      progressDeltaCount,
       bufferedProgressCount: pendingProgressMessages.length,
       exhausted: exhaustedRecovery,
       safetyStopAppended: false,
@@ -1071,6 +1111,7 @@ function createStreamState(body, toolNames, response) {
     tools: new Map(),
     usage: null,
     progressOutput: [],
+    liveProgress: null,
     outputOffset: 0,
     finished: false
   }
@@ -1084,54 +1125,80 @@ function progressItem(text) {
     type: 'message',
     status: 'completed',
     role: 'assistant',
+    phase: 'commentary',
     content: [{ type: 'output_text', text, annotations: [] }]
   }
+}
+
+function startLiveProgress(state) {
+  if (state.liveProgress) return
+  ensureResponseStarted(state)
+  const item = progressItem('')
+  const outputIndex = state.progressOutput.length
+
+  state.liveProgress = { item, outputIndex, text: '' }
+  writeEvent(state.response, 'response.output_item.added', {
+    output_index: outputIndex,
+    item: { ...item, status: 'in_progress', content: [] }
+  })
+  writeEvent(state.response, 'response.content_part.added', {
+    item_id: item.id,
+    output_index: outputIndex,
+    content_index: 0,
+    part: { type: 'output_text', text: '', annotations: [] }
+  })
+}
+
+function appendLiveProgress(state, delta) {
+  const text = String(delta || '')
+
+  if (!text) return
+  startLiveProgress(state)
+  state.liveProgress.text += text
+  writeEvent(state.response, 'response.output_text.delta', {
+    item_id: state.liveProgress.item.id,
+    output_index: state.liveProgress.outputIndex,
+    content_index: 0,
+    delta: text,
+    logprobs: []
+  })
+}
+
+function finishLiveProgress(state) {
+  const live = state.liveProgress
+
+  if (!live) return
+  const part = { type: 'output_text', text: live.text, annotations: [] }
+  const item = { ...live.item, content: [part] }
+
+  writeEvent(state.response, 'response.output_text.done', {
+    item_id: item.id,
+    output_index: live.outputIndex,
+    content_index: 0,
+    text: live.text,
+    logprobs: []
+  })
+  writeEvent(state.response, 'response.content_part.done', {
+    item_id: item.id,
+    output_index: live.outputIndex,
+    content_index: 0,
+    part
+  })
+  writeEvent(state.response, 'response.output_item.done', { output_index: live.outputIndex, item })
+  state.progressOutput.push(item)
+  state.outputOffset = state.progressOutput.length
+  state.liveProgress = null
 }
 
 function emitProgressMessages(state, messages) {
   for (const text of Array.isArray(messages) ? messages : []) {
     if (!String(text || '').trim()) continue
 
-    ensureResponseStarted(state)
-    const item = progressItem(String(text).trim())
-    const outputIndex = state.progressOutput.length
-    const part = item.content[0]
-
-    writeEvent(state.response, 'response.output_item.added', {
-      output_index: outputIndex,
-      item: { ...item, status: 'in_progress', content: [] }
-    })
-    writeEvent(state.response, 'response.content_part.added', {
-      item_id: item.id,
-      output_index: outputIndex,
-      content_index: 0,
-      part: { ...part, text: '' }
-    })
-    writeEvent(state.response, 'response.output_text.delta', {
-      item_id: item.id,
-      output_index: outputIndex,
-      content_index: 0,
-      delta: part.text,
-      logprobs: []
-    })
-    writeEvent(state.response, 'response.output_text.done', {
-      item_id: item.id,
-      output_index: outputIndex,
-      content_index: 0,
-      text: part.text,
-      logprobs: []
-    })
-    writeEvent(state.response, 'response.content_part.done', {
-      item_id: item.id,
-      output_index: outputIndex,
-      content_index: 0,
-      part
-    })
-    writeEvent(state.response, 'response.output_item.done', { output_index: outputIndex, item })
-    state.progressOutput.push(item)
+    finishLiveProgress(state)
+    startLiveProgress(state)
+    appendLiveProgress(state, String(text).trim())
+    finishLiveProgress(state)
   }
-
-  state.outputOffset = state.progressOutput.length
 }
 
 function ensureResponseStarted(state) {
@@ -1285,6 +1352,7 @@ function consumeChatChunk(state, chunk) {
 function finishResponseStream(state) {
   if (state.finished) return
   state.finished = true
+  finishLiveProgress(state)
   ensureResponseStarted(state)
   const output = [...state.progressOutput]
 
@@ -2282,7 +2350,9 @@ async function handleResponsesRequest(
                 async recoverySignal => {
                   const retryUpstream = await sendUpstream(retryPayload, recoverySignal)
 
-                  if (retryUpstream.ok) return readChatAssistant(retryUpstream)
+                  if (retryUpstream.ok) {
+                    return readChatAssistant(retryUpstream, { onContentDelta: retryContext.onContentDelta })
+                  }
 
                   const retryError = await readResponseTextLimited(retryUpstream)
 
@@ -2301,6 +2371,24 @@ async function handleResponsesRequest(
           body.input,
           {
             maximumRecoveryMs: PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
+            onProgressStart: emulatedStreamState
+              ? () => {
+                  ensureResponsesStreamHeaders(response)
+                  startLiveProgress(emulatedStreamState)
+                }
+              : null,
+            onProgressDelta: emulatedStreamState
+              ? delta => {
+                  ensureResponsesStreamHeaders(response)
+                  appendLiveProgress(emulatedStreamState, delta)
+                }
+              : null,
+            onProgressEnd: emulatedStreamState
+              ? () => {
+                  ensureResponsesStreamHeaders(response)
+                  finishLiveProgress(emulatedStreamState)
+                }
+              : null,
             onProgress: emulatedStreamState
               ? text => {
                   ensureResponsesStreamHeaders(response)

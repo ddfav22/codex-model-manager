@@ -458,6 +458,11 @@ async function main() {
   const delayedPlainReached = new Promise(resolve => {
     markDelayedPlainReached = resolve
   })
+  let releaseStreamedPlanResponse = null
+  let markStreamedPlanReached
+  const streamedPlanReached = new Promise(resolve => {
+    markStreamedPlanReached = resolve
+  })
   const upstream = http.createServer((request, response) => {
     const chunks = []
 
@@ -692,6 +697,61 @@ async function main() {
           response.end('data: [DONE]\n\n')
         }
         markDelayedPlainReached()
+        return
+      }
+
+      if (requestBody.model === 'grok-streamed-plan-progress') {
+        if (Array.isArray(requestBody.tools) && requestBody.tools.length) {
+          response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'tool calls are not supported by the selected adapter' } }))
+          return
+        }
+        const recovering = requestBody.messages?.some(
+          message =>
+            message?.role === 'system' &&
+            /^The previous answer stopped at a plan-only sentence/i.test(String(message?.content || ''))
+        )
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        if (recovering) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-streamed-plan-recovery',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: 'assistant', content: '{"name":"exec","arguments":{"input":"text(123)"}}' },
+                  finish_reason: null
+                }
+              ]
+            })}\n\n`
+          )
+          response.end('data: [DONE]\n\n')
+          return
+        }
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-streamed-plan-progress',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '我先确认有没有 image-gen 工具。' },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        releaseStreamedPlanResponse = () => response.end('data: [DONE]\n\n')
+        markStreamedPlanReached()
         return
       }
 
@@ -1108,6 +1168,7 @@ async function main() {
     'grok-current-live-data',
     'grok-image-generation',
     'grok-delayed-plain-answer',
+    'grok-streamed-plan-progress',
     'grok-short-continue-anchor',
     'grok-identity-self-report'
   ]
@@ -1126,6 +1187,7 @@ async function main() {
           model === 'grok-current-live-data' ||
           model === 'grok-image-generation' ||
           model === 'grok-delayed-plain-answer' ||
+          model === 'grok-streamed-plan-progress' ||
           model === 'grok-short-continue-anchor'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : {
@@ -1559,6 +1621,75 @@ async function main() {
   assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 0)
   assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.toolIntentRequired, false)
   assert.strictEqual(delayedPlainDiagnostic.emulation.earlyResponseStarted, true)
+  upstreamRequests.length = 0
+  const streamedPlanResponsePromise = fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-streamed-plan-progress',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '生成一张太阳图片。' }] }],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  let streamedPlanResponse
+  let streamedPlanReader
+  let streamedPlanPrefix = ''
+
+  try {
+    await withTimeout(streamedPlanReached, 3000, 'streamed plan first upstream delta').catch(error => {
+      error.message += `; upstream=${JSON.stringify(upstreamRequests.slice(-3).map(item => ({ url: item.url, model: item.body.model, tools: item.body.tools?.length || 0 })))}`
+      throw error
+    })
+    streamedPlanResponse = await withTimeout(streamedPlanResponsePromise, 1000, 'streamed commentary response')
+    streamedPlanReader = streamedPlanResponse.body.getReader()
+    const decoder = new TextDecoder()
+
+    while (!streamedPlanPrefix.includes('我先确认有没有 image-gen 工具。')) {
+      const { done, value } = await withTimeout(streamedPlanReader.read(), 1000, 'streamed commentary delta')
+
+      if (done) break
+      streamedPlanPrefix += decoder.decode(value, { stream: true })
+    }
+    assert.ok(streamedPlanPrefix.includes('我先确认有没有 image-gen 工具。'))
+    assert.ok(streamedPlanPrefix.includes('"phase":"commentary"'))
+    assert.ok(!streamedPlanPrefix.includes('text(123)'))
+  } finally {
+    const release = releaseStreamedPlanResponse
+
+    releaseStreamedPlanResponse = null
+    release?.()
+  }
+  let streamedPlanStream = streamedPlanPrefix
+
+  if (streamedPlanReader) {
+    const decoder = new TextDecoder()
+
+    for (;;) {
+      const { done, value } = await streamedPlanReader.read()
+
+      if (done) break
+      streamedPlanStream += decoder.decode(value, { stream: true })
+    }
+    streamedPlanStream += decoder.decode()
+  } else {
+    streamedPlanResponse = await streamedPlanResponsePromise
+    streamedPlanStream = await streamedPlanResponse.text()
+  }
+  const streamedPlanDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(streamedPlanResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.ok(streamedPlanStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(streamedPlanStream.includes('text(123)'))
+  assert.strictEqual(streamedPlanDiagnostic.emulation.continuationRecovery.liveProgressCount, 1)
+  assert.ok(streamedPlanDiagnostic.emulation.continuationRecovery.firstProgressDeltaMs >= 0)
+  assert.ok(
+    streamedPlanDiagnostic.emulation.continuationRecovery.firstProgressDeltaMs <
+      streamedPlanDiagnostic.emulation.totalSynthesisMs
+  )
+  assert.ok(streamedPlanDiagnostic.emulation.continuationRecovery.progressDeltaCount >= 1)
+  assert.strictEqual(streamedPlanDiagnostic.emulation.continuationRecovery.acceptedRetry, true)
   upstreamRequests.length = 0
   const shortContinueResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.59**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.60**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -10,7 +10,7 @@
 - NewAPI 登录页默认使用 `https://ainiubi.org`，也可以改为其他兼容平台地址。
 - 对每个模型执行聊天、流式、工具调用和工具结果续答检测；未知接口明确标记为暂不支持。
 - 在 Codex 内通过原生可见槽位切换已验证模型，并保持真实上游模型路由。
-- 为仅提供 Chat Completions 的 Grok 渠道适配 Responses 事件、工具调用、工具结果与有限 Agent Loop 恢复。
+- 为仅提供 Chat Completions 的 Grok 渠道适配 Responses 事件、工具调用、工具结果与有限 Agent Loop 恢复；计划型中间消息按 `commentary` delta 渐进显示，不再等恢复请求结束后一次性出现。
 - 保留 Codex 的 `sessions`、Projects、Skills、Agents 和登录配置；历史任务目录会同步为 Codex 桌面端 Local Projects，导入、导出和删除操作包含隔离与失败回滚。
 - 管理器自己的设置、日志和更新文件只写入客户端目录下的 `data`，发布包不携带开发机数据。
 - 提供中文错误提示、启动进度、关闭行为选择和 GitHub Release 在线更新。
@@ -82,7 +82,7 @@ npm run test:installer
 
 - `electron/codexManager.js`：渠道、模型目录、Codex 配置、会话与项目管理。
 - `electron/protocolProxy.js`：Responses/Chat 路由、流式事件与工具循环适配。
-- `electron/protocol/`：模型别名、工具连续性、协议转换等可复用模块。
+- `electron/protocol/`：模型别名、工具连续性、上游 Chat SSE 增量读取与协议转换等可复用模块。
 - `electron/runtime/`：窗口、静态页面、IPC、安全边界与生命周期。
 - `electron/features/`：桌面 Projects 同步、更新、导入、用户错误等独立功能。
 - `src/views/model-manager/`：管理器界面及模块化组件。

@@ -20,6 +20,7 @@ const {
   shouldAcceptContinuationRecovery
 } = require('./protocol/toolContinuation')
 const { readResponseBufferLimited, readResponseJsonLimited } = require('./protocol/upstreamRequest')
+const { readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
   legacyCleanupCommand,
   legacyScanDecision,
@@ -705,6 +706,49 @@ async function main() {
   const limitedJson = await readResponseJsonLimited(new Response(JSON.stringify({ ok: true })), 64)
 
   assert.deepStrictEqual(limitedJson, { ok: true })
+  const chatDeltas = []
+  const chatAssistant = await readChatAssistant(
+    new Response(
+      [
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-module-stream',
+          model: 'grok-module-test',
+          choices: [{ index: 0, delta: { content: '第一段' } }]
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+          choices: [{ index: 0, delta: { content: '第二段' } }]
+        })}\n\ndata: [DONE]\n\n`
+      ].join(''),
+      { headers: { 'content-type': 'text/event-stream; charset=utf-8' } }
+    ),
+    {
+      onContentDelta(delta, snapshot) {
+        chatDeltas.push([delta, snapshot])
+      }
+    }
+  )
+
+  assert.deepStrictEqual(chatDeltas, [
+    ['第一段', '第一段'],
+    ['第二段', '第一段第二段']
+  ])
+  assert.deepStrictEqual(chatAssistant, {
+    id: 'chatcmpl-module-stream',
+    model: 'grok-module-test',
+    content: '第一段第二段',
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 }
+  })
+  assert.strictEqual(
+    (
+      await readChatAssistant(new Response(JSON.stringify({ choices: [{ message: { content: 'JSON_OK' } }] })), {
+        onContentDelta() {
+          throw new Error('simulated disconnected display')
+        }
+      })
+    ).content,
+    'JSON_OK'
+  )
   await assert.rejects(readResponseBufferLimited(new Response('0123456789'), 5), /上游响应超过/)
   const recoveryTimeoutStartedAt = Date.now()
 

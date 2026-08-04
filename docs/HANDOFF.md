@@ -23,7 +23,7 @@ IPC / lifecycle (electron/runtime, electron/main.js)
         │
         ├── codexManager.js        配置、会话、项目、模型目录、事务与进程
         ├── protocolProxy.js       HTTP/SSE 编排与上游请求
-        ├── protocol/*             转换、模型别名、工具续接判定
+        ├── protocol/*             转换、模型别名、Chat SSE 增量读取、工具续接判定
         └── features/*             更新、导入、错误转换等独立能力
 ```
 
@@ -36,7 +36,8 @@ IPC / lifecycle (electron/runtime, electron/main.js)
 3. GPT 原生路径尽可能透传合法 Responses 事件。
 4. Grok Chat 路径把 Codex 工具声明编译成上游可理解的格式，再把工具调用还原为标准 Responses 项。
 5. Codex 执行工具并把 `custom_tool_call_output`/`function_call_output` 发回代理。
-6. 代理保持 `call_id`，继续请求当前上游，直到得到最终结果、一个明确问题或达到有限恢复上限。
+6. 上游输出计划型中间消息时，代理在完整响应仍用于判型的同时，把安全正文前缀作为 `phase=commentary` 的 delta 立即交给 Codex；工具 JSON 保持缓冲且不进入可见消息。
+7. 代理保持 `call_id`，继续请求当前上游，直到得到最终结果、一个明确问题或达到有限恢复上限。
 
 不得向用户展示或伪造隐藏推理链。可见内容只能来自上游主动输出的进度、标准工具事件、工具结果和最终消息。
 
@@ -59,6 +60,14 @@ Grok 可能返回计划句但不发工具调用。只有紧邻当前工具结果
 Grok 返回工具 JSON 时不一定严格使用 `name` + `arguments`。兼容层允许常见的 `tool_call`/`function` 信封、`tool`/`tool_name` 名称、`args` 和 `exec.input`，但最终工具名仍必须存在于本轮 Codex 允许列表中。
 
 用户只说“继续/接着”时，需要把最近一条真实用户任务和最近助手状态作为只发给上游的续接锚点；旧版内部失败提示必须先清理，不能让它成为新的任务上下文。
+
+### 先缓存完整响应再判型会制造“假卡死”
+
+Grok 的 prompt-emulated 工具路径必须同时维护“增量显示”和“完整判型”两份状态。若先调用 `response.text()` 收齐上游，再判断它是计划、工具 JSON 还是终态，用户会在首轮生成和后续恢复期间一直看不到任何内容，最后一次性出现整段文字。
+
+`chatAssistantStream.js` 必须在 SSE 到达时逐块回调；只有已命中计划停顿规则且位于工具 JSON 之前的安全正文前缀可以作为 commentary 输出。`<codex_tool_call>`、JSON 代码块和顶层工具信封一旦出现就停止可见转发，完整内容仍用于 `parseEmulatedToolCall`。回归测试必须证明第一段 commentary 在上游响应结束前已经到达，不能只断言最终字符串包含进度。
+
+诊断里的 `firstProgressDeltaMs` 是从本轮合成开始到首个可见 commentary delta 的耗时，`progressDeltaCount` 是成功写入下游的增量次数；二者不记录消息正文。
 
 ### 完成信号必须精确
 
