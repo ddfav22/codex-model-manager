@@ -39,6 +39,57 @@ function run(executablePath, args, options = {}) {
   })
 }
 
+function recentInstallerCrashEvents() {
+  try {
+    return execFileSync(
+      'wevtutil.exe',
+      [
+        'qe',
+        'Application',
+        '/q:*[System[TimeCreated[timediff(@SystemTime) <= 120000]] and (EventID=1000 or EventID=1001)]',
+        '/rd:true',
+        '/f:text',
+        '/c:8'
+      ],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        maxBuffer: 1024 * 1024
+      }
+    ).trim()
+  } catch (error) {
+    return `无法读取 Windows 应用程序崩溃事件：${error.message}`
+  }
+}
+
+function reportInstallerFailure(error, installerPath, installDirectory) {
+  const installedExecutable = path.join(installDirectory, productExecutable)
+  const directoryEntries = fs.existsSync(installDirectory)
+    ? fs.readdirSync(installDirectory, { withFileTypes: true }).map(entry => ({
+        name: entry.name,
+        type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other'
+      }))
+    : []
+
+  console.error(
+    JSON.stringify(
+      {
+        installerFailure: {
+          status: error?.status ?? null,
+          signal: error?.signal ?? null,
+          installerPath,
+          installDirectory,
+          installedExecutableExists: fs.existsSync(installedExecutable),
+          directoryEntries
+        }
+      },
+      null,
+      2
+    )
+  )
+  console.error(recentInstallerCrashEvents())
+}
+
 function findUninstaller(installDirectory) {
   const filename = fs.readdirSync(installDirectory).find(entry => /^Uninstall .+\.exe$/i.test(entry))
 
@@ -54,7 +105,12 @@ function assertUpdaterCacheRemoved() {
 }
 
 function install(installerPath, installDirectory) {
-  run(installerPath, ['/S', '/currentuser', '--no-desktop-shortcut', `/D=${installDirectory}`])
+  try {
+    run(installerPath, ['/S', '/currentuser', '--no-desktop-shortcut', `/D=${installDirectory}`])
+  } catch (error) {
+    reportInstallerFailure(error, installerPath, installDirectory)
+    throw error
+  }
   assert.ok(fs.existsSync(path.join(installDirectory, productExecutable)), '安装后缺少主程序')
   assertUpdaterCacheRemoved()
 }

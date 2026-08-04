@@ -27,3 +27,5 @@ jobs:
       - run: npm run build
       - run: npm run dist
       - run: npm run test:packaged-ui
+      - run: npm run dist:installer
+      - run: npm run test:installer
