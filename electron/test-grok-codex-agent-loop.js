@@ -24,6 +24,14 @@ const {
   recoveryConversationContext,
   stripAgentControlSignals
 } = require('./protocol/contextContinuity')
+const {
+  hasInternalToolResult,
+  internalAdapterInstruction,
+  internalToolCallsTranscript,
+  internalToolResultTranscript,
+  isInternalToolCallsOnly,
+  stripInternalToolTranscript
+} = require('./protocol/internalToolTranscript')
 
 const nativeCompatibility = {
   ok: true,
@@ -240,6 +248,22 @@ assert.strictEqual(
   '最终结果'
 )
 assert.strictEqual(stripAgentControlSignals('正在处理。\n上游模型未能完成剩余步骤，请重试本轮任务。'), '正在处理。')
+const internalCalls = internalToolCallsTranscript([{ name: 'exec', arguments: '{}', call_id: 'call_internal' }])
+const internalResult = internalToolResultTranscript('call_internal', 'ok')
+const internalAdapter = internalAdapterInstruction('continue')
+
+assert.ok(internalCalls.includes('"kind":"tool_calls"'))
+assert.ok(!internalCalls.includes('[Codex local tool calls]'))
+assert.strictEqual(isInternalToolCallsOnly(internalCalls), true)
+assert.strictEqual(hasInternalToolResult(internalResult), true)
+assert.strictEqual(
+  stripInternalToolTranscript(`${internalCalls}\n${internalResult}\n${internalAdapter}\n用户可见结果`).trim(),
+  '用户可见结果'
+)
+assert.strictEqual(
+  stripInternalToolTranscript('[Codex local tool calls]\n[{"name":"exec"}]\n正常结果').trim(),
+  '正常结果'
+)
 assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
 

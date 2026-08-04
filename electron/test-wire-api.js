@@ -755,6 +755,34 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-internal-transcript-echo') {
+        assert.ok(!JSON.stringify(requestBody.messages || []).includes('[Codex local tool calls]'))
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-internal-transcript-echo',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  content: '[Codex local tool calls]\n[{"name":"exec","arguments":"{}"}]\nVISIBLE_ONLY'
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'grok-short-continue-anchor') {
         const requestText = JSON.stringify(requestBody)
 
@@ -825,7 +853,7 @@ async function main() {
 
         assert.ok(requestBody.messages.some(message => String(message.content || '').includes('<codex_tool_call>')))
         const hasLocalToolResult = requestBody.messages.some(message =>
-          String(message.content || '').includes('[Codex local tool result')
+          String(message.content || '').includes('"kind":"tool_result"')
         )
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
@@ -933,7 +961,7 @@ async function main() {
           /recovering a stalled Codex agent turn|bounded recovery attempt/i.test(String(message?.content || ''))
         )
         const hasLocalToolResult = requestBody.messages?.some(message =>
-          String(message?.content || '').includes('[Codex local tool result')
+          String(message?.content || '').includes('"kind":"tool_result"')
         )
         let content
 
@@ -1169,6 +1197,7 @@ async function main() {
     'grok-image-generation',
     'grok-delayed-plain-answer',
     'grok-streamed-plan-progress',
+    'grok-internal-transcript-echo',
     'grok-short-continue-anchor',
     'grok-identity-self-report'
   ]
@@ -1188,6 +1217,7 @@ async function main() {
           model === 'grok-image-generation' ||
           model === 'grok-delayed-plain-answer' ||
           model === 'grok-streamed-plan-progress' ||
+          model === 'grok-internal-transcript-echo' ||
           model === 'grok-short-continue-anchor'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : {
@@ -1750,7 +1780,7 @@ async function main() {
   assert.ok(upstreamRequests.every(request => request.body.stream === true))
   assert.ok(currentLiveDataStream.includes('response.custom_tool_call_input.done'))
   assert.ok(currentLiveDataStream.includes('tools.web__run'))
-  assert.ok(!currentLiveDataStream.includes('9999'))
+  assert.ok(!currentLiveDataStream.includes('Gold is 9999 from unverified model memory.'))
   assert.strictEqual(currentLiveDataDiagnostic.emulation.toolCallName, 'exec')
   assert.strictEqual(currentLiveDataDiagnostic.emulation.toolCallUsesWebRun, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.toolIntentRequired, true)
@@ -1845,6 +1875,36 @@ async function main() {
   assert.strictEqual(proxyDiagnostics.at(-1).sourceToolOutputCount, 1)
   assert.strictEqual(proxyDiagnostics.at(-1).emulation.continuationRecovery.retryAttempted, false)
   assert.strictEqual(proxyDiagnostics.at(-1).emulation.continuationRecovery.acceptedCompletionSignal, true)
+  const continuationFallbackBody = upstreamRequests[1].body
+  const continuationFallbackContents = (continuationFallbackBody.messages || []).map(message =>
+    String(message?.content || '')
+  )
+  const continuationFallbackMessages = continuationFallbackContents.join('\n')
+
+  assert.ok(continuationFallbackMessages.includes('<codex_internal_tool_history>'))
+  assert.ok(continuationFallbackMessages.includes('"kind":"tool_calls"'))
+  assert.ok(continuationFallbackMessages.includes('"kind":"tool_result"'))
+  assert.ok(!continuationFallbackMessages.includes('[Codex local tool calls]'))
+  assert.ok(!continuationFallbackMessages.includes('[Codex local tool result'))
+  upstreamRequests.length = 0
+  const transcriptEchoResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-internal-transcript-echo',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Return a normal answer.' }] }],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const transcriptEchoStream = await transcriptEchoResponse.text()
+
+  assert.strictEqual(transcriptEchoResponse.status, 200)
+  assert.ok(transcriptEchoStream.includes('VISIBLE_ONLY'), transcriptEchoStream)
+  assert.ok(!transcriptEchoStream.includes('[Codex local tool calls]'))
+  assert.ok(!transcriptEchoStream.includes('"name":"exec","arguments":"{}"'))
+  assert.ok(!transcriptEchoStream.includes('response.custom_tool_call_input.done'))
+  assert.strictEqual(proxyDiagnostics.at(-1).emulation.internalTranscriptSuppressed, true)
   upstreamRequests.length = 0
   const completionSignalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

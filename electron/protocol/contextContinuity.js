@@ -1,5 +1,6 @@
 const { SUMMARY_PREFIX } = require('./constants')
 const { AGENT_COMPLETION_SIGNAL, AGENT_SAFETY_STOP_SIGNAL } = require('./toolContinuation')
+const { hasInternalToolResult, isInternalToolCallsOnly } = require('./internalToolTranscript')
 
 const RECOVERY_TAIL_MESSAGES = 8
 const RECOVERY_CONVERSATION_ANCHORS = 4
@@ -77,7 +78,7 @@ function anchorShortContinuation(messages) {
     if (String(message?.role || '').toLowerCase() !== 'assistant') continue
     const text = truncateContextText(message?.content, 1800)
 
-    if (!text || /^\[Codex local tool calls\]/i.test(text)) continue
+    if (!text || isInternalToolCallsOnly(text)) continue
     assistantState = text
     break
   }
@@ -121,8 +122,11 @@ function isSyntheticChatUserMessage(message) {
 
   const text = String(message?.content || '').trim()
 
-  return /^(?:\[Codex local tool result\b|\[Codex tool adapter\b|<environment_context>|<app-context>|<permissions instructions>|<collaboration_mode>|<apps_instructions>|<plugins_instructions>|<skills_instructions>|# AGENTS\.md instructions for\b)/i.test(
-    text
+  return (
+    hasInternalToolResult(text) ||
+    /^(?:<codex_internal_adapter>|\[Codex tool adapter\b|<environment_context>|<app-context>|<permissions instructions>|<collaboration_mode>|<apps_instructions>|<plugins_instructions>|<skills_instructions>|# AGENTS\.md instructions for\b)/i.test(
+      text
+    )
   )
 }
 
@@ -134,7 +138,7 @@ function isConversationAnchor(message) {
   if (role === 'user') return !isSyntheticChatUserMessage(message)
   if (role !== 'assistant') return false
 
-  return !/^\[Codex local tool calls\][\s\S]*$/i.test(text)
+  return !isInternalToolCallsOnly(text)
 }
 
 function truncateContextText(content, maximumChars = RECOVERY_MESSAGE_CHARS) {

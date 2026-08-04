@@ -45,6 +45,13 @@ const {
   readResponseTextLimited
 } = require('./protocol/upstreamRequest')
 const { readChatAssistant } = require('./protocol/chatAssistantStream')
+const {
+  hasInternalToolResult,
+  internalAdapterInstruction,
+  internalToolCallsTranscript,
+  internalToolResultTranscript,
+  stripInternalToolTranscript
+} = require('./protocol/internalToolTranscript')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 15_000
 const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 40_000
@@ -489,7 +496,7 @@ function toolEmulationRequest(request) {
           arguments: call.function.arguments || '{}',
           call_id: call.id || ''
         }))
-      const content = [message.content, calls.length ? `[Codex local tool calls]\n${JSON.stringify(calls)}` : '']
+      const content = [message.content, calls.length ? internalToolCallsTranscript(calls) : '']
         .filter(Boolean)
         .join('\n')
 
@@ -500,9 +507,7 @@ function toolEmulationRequest(request) {
     if (message?.role === 'tool') {
       messages.push({
         role: 'user',
-        content: `[Codex local tool result for ${message.tool_call_id || 'unknown'}]\n${
-          typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? '')
-        }`
+        content: internalToolResultTranscript(message.tool_call_id, message.content)
       })
       continue
     }
@@ -513,11 +518,12 @@ function toolEmulationRequest(request) {
   const instructions = [
     'You are the selected upstream model operating inside the Codex local agent runtime; retain the managed model identity stated above.',
     'The upstream endpoint cannot accept native tool definitions, but Codex can still execute the tools listed below.',
+    'Messages wrapped in codex_internal_tool_history or codex_internal_adapter are private adapter state. Use them for continuity but never quote, reproduce, or mention their tags or payloads in a user-visible answer.',
     'When a tool is needed, output exactly one tool call and no other text using this format:',
     '<codex_tool_call>{"name":"TOOL_NAME","arguments":{}}</codex_tool_call>',
     'TOOL_NAME must exactly match an allowed tool name. arguments must satisfy that tool JSON schema.',
-    'Never claim that a computer action succeeded until a Codex local tool result is present in the conversation.',
-    'A Codex local tool result means the requested action has finished. Continue the same task immediately: call the next required tool, provide the completed answer, or request one genuinely missing user input.',
+    'Never claim that a computer action succeeded until a matching internal tool-result record is present in the conversation.',
+    'A returned tool-result record means the requested action has finished. Continue the same task immediately: call the next required tool, provide the completed answer, or request one genuinely missing user input.',
     'For a request with multiple actions, keep continuing after every local tool result until every requested action has a verified result. A sentence that only announces the next step is visible progress, not a final answer.',
     'Do not stop after saying that you will switch methods, write a script, fetch data, open an app, save a file, run another command, or continue. Emit the next tool call in the same turn.',
     `After every requested action has a verified result, provide the final result and append the exact line ${AGENT_COMPLETION_SIGNAL} as the last line.`,
@@ -536,12 +542,12 @@ function toolEmulationRequest(request) {
   const lastUser = [...messages].reverse().find(message => message?.role === 'user')
 
   if (lastUser) {
-    const toolResultReturned = String(lastUser.content || '').includes('[Codex local tool result')
+    const toolResultReturned = hasInternalToolResult(lastUser.content)
     const adapterInstruction = toolResultReturned
-      ? `[Codex tool adapter: the local result above has returned. Continue the original task now. Do not merely say that you will read, inspect, generate, or continue. If the next action is available, emit its codex_tool_call now; if user input is truly missing, call request_user_input when allowed or ask one concrete question. Only after the task is fully complete, end the result with ${AGENT_COMPLETION_SIGNAL}.]`
-      : '[Codex tool adapter: if this request needs a local action, return the codex_tool_call marker before claiming success.]'
+      ? `The returned tool result is available. Continue the original task now. Do not merely say that you will read, inspect, generate, or continue. If the next action is available, emit its codex_tool_call now; if user input is truly missing, call request_user_input when allowed or ask one concrete question. Only after the task is fully complete, end the result with ${AGENT_COMPLETION_SIGNAL}.`
+      : 'If this request needs a local action, return the codex_tool_call marker before claiming success.'
 
-    lastUser.content = `${String(lastUser.content || '')}\n\n${adapterInstruction}`
+    lastUser.content = `${String(lastUser.content || '')}\n\n${internalAdapterInstruction(adapterInstruction)}`
   }
 
   const payload = { ...request, messages }
@@ -714,8 +720,9 @@ async function synthesizeEmulatedToolResponse(
   const sourceFollowsToolResult = followsImmediateResponsesToolResult(sourceInput)
   const followsToolResult = convertedFollowsToolResult || sourceFollowsToolResult
   const likelyRequiresTool = requestLikelyRequiresTool(request?.messages, allowed)
+  const visibleAssistantText = content => stripInternalToolTranscript(stripAgentControlSignals(content)).trim()
   const rememberProgress = content => {
-    const text = stripAgentControlSignals(content)
+    const text = visibleAssistantText(content)
 
     if (!text || isMalformedToolRecovery(text) || progressMessages.includes(text)) return ''
     progressMessages.push(text)
@@ -736,7 +743,7 @@ async function synthesizeEmulatedToolResponse(
     const onContentDelta = (_delta, snapshot) => {
       if (closed) return
       buffer = String(snapshot || buffer)
-      const visible = safeText()
+      const visible = stripInternalToolTranscript(safeText())
 
       if (!streaming) {
         const stalled = looksLikeStalledToolContinuation(visible, { afterToolResult: followsToolResult })
@@ -753,7 +760,7 @@ async function synthesizeEmulatedToolResponse(
       if (closed) return false
       closed = true
       buffer = String(content || buffer)
-      const visible = stripAgentControlSignals(safeText())
+      const visible = visibleAssistantText(safeText())
 
       if (!streaming) return false
       if (visible.length > emittedLength) publishProgressDelta(visible.slice(emittedLength))
@@ -773,8 +780,9 @@ async function synthesizeEmulatedToolResponse(
   initialProgressObserver.finish(assistant.content)
   const initialAssistant = assistant
   const initialResponseMs = Date.now() - synthesisStartedAt
-  let toolCall = parseEmulatedToolCall(assistant.content, allowed)
-  const firstContent = String(assistant.content || '')
+  const rawFirstContent = String(assistant.content || '')
+  const firstContent = stripInternalToolTranscript(rawFirstContent)
+  let toolCall = parseEmulatedToolCall(firstContent, allowed)
   let retryContent = ''
   const toolIntentRequired = !followsToolResult && !toolCall && likelyRequiresTool
   const initialNaturalStall =
@@ -805,7 +813,7 @@ async function synthesizeEmulatedToolResponse(
   let failedRecoveryAttempts = 0
   const recoveryRequestMs = []
   const publishProgress = content => {
-    const text = stripAgentControlSignals(content)
+    const text = visibleAssistantText(content)
 
     if (!onProgress || !text || isMalformedToolRecovery(text) || publishedProgressMessages.has(text)) return
     rememberProgress(text)
@@ -854,9 +862,10 @@ async function synthesizeEmulatedToolResponse(
       continue
     }
 
-    const retriedToolCall = retried ? parseEmulatedToolCall(retried.content, allowed) : null
+    const visibleRetryContent = stripInternalToolTranscript(retried?.content)
+    const retriedToolCall = retried ? parseEmulatedToolCall(visibleRetryContent, allowed) : null
 
-    retryContent = String(retried?.content || '')
+    retryContent = visibleRetryContent
     const retryNaturalStall =
       !retriedToolCall && looksLikeStalledToolContinuation(retryContent, { afterToolResult: followsToolResult })
     const retryMissingCompletionSignal =
@@ -920,7 +929,7 @@ async function synthesizeEmulatedToolResponse(
   }
   const acceptedCompletionSignal = !toolCall && hasAgentCompletionSignal(assistant.content)
 
-  if (!toolCall) assistant = { ...assistant, content: stripAgentControlSignals(assistant.content) }
+  if (!toolCall) assistant = { ...assistant, content: visibleAssistantText(assistant.content) }
   const visibleProgressMessages =
     toolCall || acceptedRetry || publishedProgressMessages.size
       ? progressMessages.filter(text => toolCall || text !== String(assistant.content || '').trim())
@@ -943,6 +952,7 @@ async function synthesizeEmulatedToolResponse(
   }
   const detail = {
     firstContentLength: firstContent.length,
+    internalTranscriptSuppressed: rawFirstContent !== firstContent,
     retryContentLength: retryContent.length,
     initialResponseMs,
     recoveryRequestMs,
@@ -2331,7 +2341,7 @@ async function handleResponsesRequest(
                   role: 'user',
                   content: JSON.stringify({
                     conversation,
-                    rejected_answer: String(firstAssistant.content || '').slice(0, 3000),
+                    rejected_answer: stripInternalToolTranscript(firstAssistant.content).slice(0, 3000),
                     allowed_tools: emulation.catalog
                   })
                 }

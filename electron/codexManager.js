@@ -7,6 +7,7 @@ const toml = require('smol-toml')
 const { DEFAULT_PROTOCOL_PROXY_PORT } = require('./protocol/constants')
 const { modelIdentityInstruction, modelIdentityLabel } = require('./protocol/modelRouting')
 const { parseResponsesProbePayload } = require('./protocol/probeParsing')
+const { internalToolResultTranscript } = require('./protocol/internalToolTranscript')
 const {
   RESPONSES_PROBE_MAX_ATTEMPTS,
   isTransientResponsesProbeFailure,
@@ -2590,13 +2591,16 @@ async function testPromptEmulatedToolEndpoint(normalized, signal) {
         {
           role: 'system',
           content:
-            'You are inside Codex. Never stop after promising to inspect. After a local tool result, continue to a completed answer.'
+            'You are inside Codex. Never stop after promising to inspect. After a returned tool result, continue to a completed answer.'
         },
         { role: 'user', content: `Call ${toolName} and confirm the result.` },
         { role: 'assistant', content: assistantText },
         {
           role: 'user',
-          content: `[Codex local tool result]\n${JSON.stringify({ ok: true, result: completionMarker })}\nReply with exactly ${completionMarker}.`
+          content: `${internalToolResultTranscript('compatibility_probe', {
+            ok: true,
+            result: completionMarker
+          })}\nReply with exactly ${completionMarker}.`
         }
       ],
       max_tokens: 64,

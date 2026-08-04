@@ -46,7 +46,11 @@ async function main() {
     repository
   )
   assert.strictEqual(repositoryFromPackageMetadata(packageMetadata), productionRepository)
-  assert.deepStrictEqual(normalizeVersion(packageMetadata.version), [1, 2, 60])
+  const packageVersionParts = String(packageMetadata.version).split('.').map(Number)
+
+  assert.strictEqual(packageVersionParts.length, 3)
+  assert.ok(packageVersionParts.every(Number.isInteger))
+  assert.deepStrictEqual(normalizeVersion(packageMetadata.version), packageVersionParts)
   const installedExecutable = path.join('C:\\', 'portable app', 'ChatGPT Model Manager.exe')
   const installDirectory = path.dirname(installedExecutable)
 

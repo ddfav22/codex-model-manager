@@ -39,6 +39,8 @@ IPC / lifecycle (electron/runtime, electron/main.js)
 6. 上游输出计划型中间消息时，代理在完整响应仍用于判型的同时，把安全正文前缀作为 `phase=commentary` 的 delta 立即交给 Codex；工具 JSON 保持缓冲且不进入可见消息。
 7. 代理保持 `call_id`，继续请求当前上游，直到得到最终结果、一个明确问题或达到有限恢复上限。
 
+Grok prompt-emulated 路径会把历史工具调用和结果编码为 `codex_internal_tool_history` 私有信封，并把续接指令编码为 `codex_internal_adapter`。这些内容只供上游保持执行连续性，绝不能进入用户可见正文。可见文本必须先调用 `stripInternalToolTranscript`，然后才能做工具 JSON 解析和输出；否则上游复述的历史 JSON 可能被误判为新的工具调用并造成重复执行。标准 `custom_tool_call` / `function_call` Responses 事件仍必须保留，不能为了隐藏开发标签而破坏 Agent Loop。
+
 不得向用户展示或伪造隐藏推理链。可见内容只能来自上游主动输出的进度、标准工具事件、工具结果和最终消息。
 
 ## 已踩过的坑
