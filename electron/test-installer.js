@@ -86,11 +86,19 @@ function installAtDefaultLocation(installerPath, setupDirectory) {
 }
 
 function uninstall(installDirectory) {
-  run(findUninstaller(installDirectory), ['/S', '/currentuser'])
+  const uninstallerPath = findUninstaller(installDirectory)
+
+  run(uninstallerPath, ['/S', '/currentuser'])
   assert.ok(
-    waitFor(() => !fs.existsSync(path.join(installDirectory, productExecutable))),
-    '卸载后仍残留主程序'
+    waitFor(
+      () => !fs.existsSync(path.join(installDirectory, productExecutable)) && !fs.existsSync(uninstallerPath),
+      60000
+    ),
+    '卸载程序尚未完成清理，不能立即继续安装或删除测试目录'
   )
+  // NSIS may finish its temporary child process just after deleting the in-place
+  // uninstaller. Give Windows a short grace period before starting another setup.
+  sleep(1000)
   assertUpdaterCacheRemoved()
 }
 
