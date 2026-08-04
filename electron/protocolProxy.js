@@ -52,9 +52,15 @@ const {
   internalToolResultTranscript,
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
+const {
+  RECOVERY_DECISION,
+  parseAgentRecoveryDecision,
+  recoveryDecisionContract
+} = require('./protocol/agentRecoveryDecision')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 15_000
 const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 40_000
+const PROMPT_TOOL_RECOVERY_MAX_TOKENS = 4096
 
 async function runWithAbortTimeout(parentSignal, timeoutMs, task) {
   const controller = new AbortController()
@@ -812,6 +818,7 @@ async function synthesizeEmulatedToolResponse(
   let inferredCompletionAccepted = false
   let failedRecoveryAttempts = 0
   const recoveryRequestMs = []
+  const recoveryDecisionKinds = []
   const publishProgress = content => {
     const text = visibleAssistantText(content)
 
@@ -863,14 +870,33 @@ async function synthesizeEmulatedToolResponse(
     }
 
     const visibleRetryContent = stripInternalToolTranscript(retried?.content)
+    const recoveryDecision = parseAgentRecoveryDecision(visibleRetryContent)
+    let normalizedRetryContent = visibleRetryContent
+
+    recoveryDecisionKinds.push(recoveryDecision?.type || 'legacy')
+    if (recoveryDecision?.type === RECOVERY_DECISION.COMPLETE) {
+      const decisionAnswer = recoveryDecision.content
+
+      if (!looksLikeStalledToolContinuation(decisionAnswer, { afterToolResult: followsToolResult })) {
+        normalizedRetryContent = `${decisionAnswer}\n${AGENT_COMPLETION_SIGNAL}`
+      }
+    } else if (recoveryDecision?.type === RECOVERY_DECISION.NEEDS_INPUT) {
+      normalizedRetryContent = recoveryDecision.content
+    }
+    const explicitUserInputRequired = recoveryDecision?.type === RECOVERY_DECISION.NEEDS_INPUT
     const retriedToolCall = retried ? parseEmulatedToolCall(visibleRetryContent, allowed) : null
 
-    retryContent = visibleRetryContent
+    retryContent = normalizedRetryContent
     const retryNaturalStall =
-      !retriedToolCall && looksLikeStalledToolContinuation(retryContent, { afterToolResult: followsToolResult })
+      !retriedToolCall &&
+      !explicitUserInputRequired &&
+      looksLikeStalledToolContinuation(retryContent, { afterToolResult: followsToolResult })
     const retryMissingCompletionSignal =
-      !retriedToolCall && requiresAgentCompletionSignal(retryContent, { afterToolResult: followsToolResult })
-    const retryToolOmission = toolIntentRequired && !retriedToolCall && !awaitsExplicitUserInput(retryContent)
+      !retriedToolCall &&
+      !explicitUserInputRequired &&
+      requiresAgentCompletionSignal(retryContent, { afterToolResult: followsToolResult })
+    const retryToolOmission =
+      toolIntentRequired && !retriedToolCall && !explicitUserInputRequired && !awaitsExplicitUserInput(retryContent)
     const retryStalledContinuation = retryNaturalStall || retryMissingCompletionSignal || retryToolOmission
 
     if (!retriedToolCall && retryNaturalStall) rememberProgress(retryContent)
@@ -879,13 +905,14 @@ async function synthesizeEmulatedToolResponse(
       !retryToolOmission &&
       shouldAcceptContinuationRecovery({
         afterToolResult: followsToolResult,
+        explicitUserInputRequired,
         stalledAfterToolResult: followsToolResult && currentStalledContinuation,
         stalledContinuation: currentStalledContinuation,
         retryContent,
         retryToolCall: retriedToolCall
       })
     ) {
-      assistant = retried
+      assistant = { ...retried, content: normalizedRetryContent }
       toolCall = retriedToolCall
       acceptedRetry = true
       break
@@ -984,6 +1011,8 @@ async function synthesizeEmulatedToolResponse(
       recoveryTimeBudgetExhausted,
       acceptedRetry,
       retryProducedToolCall: Boolean(toolCall && acceptedRetry),
+      recoveryDecisionKinds,
+      acceptedRecoveryDecision: acceptedRetry ? recoveryDecisionKinds.at(-1) || 'legacy' : '',
       visibleProgressCount: visibleProgressMessages.length,
       liveProgressCount: publishedProgressMessages.size,
       firstProgressDeltaMs,
@@ -2299,34 +2328,29 @@ async function handleResponsesRequest(
           converted.request,
           emulation.allowed,
           async (firstAssistant, retryContext = {}) => {
-            const strictToolRecovery = retryContext.toolIntentRequired || retryContext.naturalStall
+            const strictToolRecovery = Boolean(retryContext.stalledContinuation)
+            const decisionContract = recoveryDecisionContract(AGENT_COMPLETION_SIGNAL)
             const recoveryPrompt = retryContext.naturalStall
               ? `The previous answer stopped at a plan-only sentence instead of executing the next Codex agent step. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
                 'The rejected plan is already visible to the user, so do not repeat, paraphrase, or explain it. Re-check the original user request and returned tool results. ' +
-                'If any requested action is still pending and an allowed local tool can perform it, output only JSON with exactly {"name":"TOOL_NAME","arguments":{}} now. ' +
                 'For current or time-sensitive information, use exec with the nested web__run tool. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result). ' +
-                `If a real user decision, attachment, authorization, or parameter is missing, ask exactly one concrete question without ${AGENT_COMPLETION_SIGNAL}. ` +
-                `Only when every requested action already has a verified result may you provide the final answer ending with ${AGENT_COMPLETION_SIGNAL}.`
+                decisionContract
               : retryContext.missingCompletionSignal
                 ? `The previous answer followed a Codex local tool result but omitted the required completion signal. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
-                  `Re-check the original user request and every returned tool result. If every requested action has a verified result, provide the final result once and append the exact line ${AGENT_COMPLETION_SIGNAL} as the last line. ` +
-                  'If work remains and an allowed local tool can perform it, output only JSON with exactly {"name":"TOOL_NAME","arguments":{}}. ' +
-                  `If a real user decision, attachment, authorization, or parameter is missing, ask exactly one concrete question and do not emit ${AGENT_COMPLETION_SIGNAL}. ` +
-                  `Never emit ${AGENT_COMPLETION_SIGNAL} after a plan-only sentence or while any action remains pending.`
+                  'Re-check the original user request and every returned tool result. ' +
+                  decisionContract
                 : retryContext.stalledAfterToolResult
                   ? `You are recovering a stalled Codex agent turn after a local tool result has already returned. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
                     'Re-check every action in the original user request against the returned tool results and continue the original task now. ' +
-                    'The rejected answer is already visible to the user as live progress, so do not repeat or rephrase that plan. If any requested action is still pending and another allowed local tool can perform it, output only JSON with exactly {"name":"TOOL_NAME","arguments":{}} now. ' +
-                    `If a real user decision, attachment, authorization, or parameter is missing, ask exactly one concrete question without ${AGENT_COMPLETION_SIGNAL}. Otherwise provide the completed answer and append the exact line ${AGENT_COMPLETION_SIGNAL} as the last line. ` +
-                    'Never stop at a sentence saying that you will switch methods, write a script, fetch data, open an app, save a file, read a skill, inspect, generate, run, wait, or continue.'
+                    'The rejected answer is already visible to the user as live progress, so do not repeat or rephrase that plan. ' +
+                    decisionContract
                   : retryContext.toolIntentRequired
                     ? `The latest request requires a verified tool result, but the previous answer did not emit a valid Codex tool call. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
                       'For current or time-sensitive information, use exec with the nested web__run tool; do not answer from memory. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. For local actions, use the matching allowed tool. ' +
-                      'Output only JSON with exactly {"name":"TOOL_NAME","arguments":{}}. If a genuinely required user value is missing, ask exactly one concrete question instead.'
+                      decisionContract
                     : `The previous answer stopped at an intermediate promise instead of executing the Codex agent step. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
-                      'Continue the original user task now. If an allowed local tool is required and its inputs are available, output only JSON with exactly {"name":"TOOL_NAME","arguments":{}}. ' +
-                      'Reading or loading a skill is not a final answer. If a real user decision, attachment, or parameter is missing, ask exactly one concrete question. Otherwise provide the completed answer. ' +
-                      'Do not narrate that you will inspect, load, read, generate, run, wait, or continue.'
+                      'Continue the original user task now. Reading or loading a skill is not a final answer. ' +
+                      decisionContract
             const conversation = recoveryConversationContext(emulation.payload.messages)
 
             recoveryContextMessageCount = conversation.length
@@ -2346,7 +2370,7 @@ async function handleResponsesRequest(
                   })
                 }
               ],
-              max_tokens: strictToolRecovery ? 512 : 1200,
+              max_tokens: strictToolRecovery ? PROMPT_TOOL_RECOVERY_MAX_TOKENS : 1200,
               temperature: 0,
               stream: true,
               ...(strictToolRecovery && structuredRecoverySupported ? { response_format: { type: 'json_object' } } : {})
@@ -2582,6 +2606,7 @@ function createProtocolProxy({
 module.exports = {
   DEFAULT_PROTOCOL_PROXY_PORT,
   PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   adaptResponsesRequest,
   coalesceAssistantMessages,

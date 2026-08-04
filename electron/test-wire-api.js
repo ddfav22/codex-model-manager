@@ -10,6 +10,7 @@ const {
   endpointCompatibilityFailure,
   inferredWireApiForModel,
   PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   responsesRequestToChat,
   wireApiForModel
@@ -584,7 +585,7 @@ async function main() {
         if (recovering) {
           assert.ok(requestText.includes('nested web__run tool'))
           assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
-          assert.strictEqual(requestBody.max_tokens, 512)
+          assert.strictEqual(requestBody.max_tokens, PROMPT_TOOL_RECOVERY_MAX_TOKENS)
         } else {
           assert.ok(requestText.includes('Current or time-sensitive facts require a tool result.'))
           assert.ok(requestText.includes('tools.web__run'))
@@ -900,7 +901,9 @@ async function main() {
 
         if (recovering && requestBody.model === 'grok-completion-signal') {
           completionSignalRecoveryRequests += 1
-          content = '任务已经完成，文件已保存。\n[CODEX_AGENT_LOOP_COMPLETE]'
+          assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
+          assert.strictEqual(requestBody.max_tokens, PROMPT_TOOL_RECOVERY_MAX_TOKENS)
+          content = '{"decision":"complete","answer":"任务已经完成，文件已保存。"}'
         } else if (recovering) {
           exhaustedCompletionSignalRecoveryRequests += 1
         }
@@ -975,13 +978,16 @@ async function main() {
           assert.ok(recoveryInstructions.includes('plan-only sentence'))
           assert.ok(!recoveryInstructions.includes('omitted the required completion signal'))
           assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
-          assert.strictEqual(requestBody.max_tokens, 512)
+          assert.strictEqual(requestBody.max_tokens, PROMPT_TOOL_RECOVERY_MAX_TOKENS)
           content =
             stalledRecoveryRequests === 1
               ? '正在准备下一个可执行步骤。'
               : stalledRecoveryRequests === 2
                 ? '下一步将继续执行保存任务。'
                 : '{"name":"exec","arguments":{"input":"const saved = await tools.shell_command({command:\\"Set-Content -Path gold-price.txt -Value 2026-07-31_gold_2800; Start-Process notepad.exe gold-price.txt\\"}); text(saved);"}}'
+          if (stalledRecoveryRequests === 3) {
+            content = content.replace('{"name"', '{"decision":"tool","name"')
+          }
         } else {
           content = hasLocalToolResult
             ? '我接下来会处理剩余步骤。'
@@ -1965,6 +1971,8 @@ async function main() {
   assert.strictEqual(completionSignalDiagnostic.exhausted, false)
   assert.strictEqual(completionSignalDiagnostic.safetyStopAppended, false)
   assert.strictEqual(completionSignalDiagnostic.acceptedCompletionSignal, true)
+  assert.deepStrictEqual(completionSignalDiagnostic.recoveryDecisionKinds, ['complete'])
+  assert.strictEqual(completionSignalDiagnostic.acceptedRecoveryDecision, 'complete')
   upstreamRequests.length = 0
   const exhaustedCompletionSignalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2257,6 +2265,12 @@ async function main() {
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 3)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.acceptedRetry, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.retryProducedToolCall, true)
+  assert.deepStrictEqual(stalledDiagnostic.emulation.continuationRecovery.recoveryDecisionKinds, [
+    'legacy',
+    'legacy',
+    'tool'
+  ])
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.acceptedRecoveryDecision, 'tool')
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.visibleProgressCount, 3)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.liveProgressCount, 3)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.bufferedProgressCount, 0)

@@ -6,7 +6,13 @@ const path = require('path')
 const packageMetadata = require('../package.json')
 
 const manager = require('./codexManager')
-const { adaptResponsesRequest, normalizeResponsesToolItemIds, runWithAbortTimeout } = require('./protocolProxy')
+const {
+  PROMPT_TOOL_RECOVERY_MAX_TOKENS,
+  adaptResponsesRequest,
+  normalizeResponsesToolItemIds,
+  runWithAbortTimeout
+} = require('./protocolProxy')
+const { RECOVERY_DECISION, parseAgentRecoveryDecision } = require('./protocol/agentRecoveryDecision')
 const runtimeLogger = require('./runtimeLogger')
 const { allowedGithubDownloadHost, safePackageName } = require('./features/packageArchive')
 const { canonicalModelFor, modelIdentityInstruction, normalizeReasoningEffort } = require('./protocol/modelRouting')
@@ -660,6 +666,20 @@ async function main() {
     false
   )
   assert.strictEqual(looksLikeStalledToolContinuation('图片已经生成，见附件。'), false)
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_MAX_TOKENS, 4096)
+  assert.deepStrictEqual(parseAgentRecoveryDecision('{"decision":"complete","answer":"文件已经保存。"}'), {
+    type: RECOVERY_DECISION.COMPLETE,
+    content: '文件已经保存。'
+  })
+  assert.deepStrictEqual(
+    parseAgentRecoveryDecision('```json\n{"action":"needs-input","question":"请提供保存路径。"}\n```'),
+    { type: RECOVERY_DECISION.NEEDS_INPUT, content: '请提供保存路径。' }
+  )
+  assert.deepStrictEqual(
+    parseAgentRecoveryDecision('{"decision":"tool","name":"exec","arguments":{"input":"text(1)"}}'),
+    { type: RECOVERY_DECISION.TOOL, content: '' }
+  )
+  assert.strictEqual(parseAgentRecoveryDecision('{"decision":"complete","answer":""}'), null)
   assert.strictEqual(
     shouldAcceptContinuationRecovery({
       stalledAfterToolResult: true,
@@ -689,6 +709,16 @@ async function main() {
     shouldAcceptContinuationRecovery({
       stalledContinuation: true,
       retryContent: '还缺少要编辑的原图，请重新附加图片。',
+      retryToolCall: null
+    }),
+    true
+  )
+  assert.strictEqual(
+    shouldAcceptContinuationRecovery({
+      afterToolResult: true,
+      explicitUserInputRequired: true,
+      stalledContinuation: true,
+      retryContent: '保存到哪个目录？',
       retryToolCall: null
     }),
     true

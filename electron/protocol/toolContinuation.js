@@ -222,6 +222,7 @@ function looksLikeStalledToolContinuation(content, options = {}) {
 
 function shouldAcceptContinuationRecovery({
   afterToolResult,
+  explicitUserInputRequired,
   stalledAfterToolResult,
   stalledContinuation,
   retryContent,
@@ -229,6 +230,7 @@ function shouldAcceptContinuationRecovery({
 }) {
   if (retryToolCall) return true
   if (!(stalledContinuation ?? stalledAfterToolResult) || !String(retryContent || '').trim()) return false
+  if (explicitUserInputRequired) return !isMalformedToolRecovery(retryContent)
   if (requiresAgentCompletionSignal(retryContent, { afterToolResult: Boolean(afterToolResult) })) return false
   if (looksLikeStalledToolContinuation(retryContent, { afterToolResult: Boolean(stalledAfterToolResult) })) return false
 

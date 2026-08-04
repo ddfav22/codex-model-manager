@@ -77,6 +77,8 @@ Grok 的 prompt-emulated 工具路径必须同时维护“增量显示”和“�
 
 工具结果后的自然语言看起来已经是终态但缺少标志时，只做一次快速恢复；若恢复服务超时，保留上游原始结果并在脱敏诊断中记录“推断终态”，不向会话追加内部安全停止文字。仍在承诺下一步或明确需要工具时维持最多三次、总计 40 秒的恢复门禁，单次最多等待 15 秒。
 
+恢复请求必须使用内部三态 JSON 决策：`tool` 继续标准工具事件，`complete` 携带原始用户可见最终答复，`needs_input` 携带一个具体问题。代理负责把 `complete` 转成内部完成状态并剥离控制结构；不得把决策 JSON 或完成标志展示给用户。复杂 `exec` 恢复需要 4096 token 输出预算，否则脚本可能被 512 token 截断；三次/40 秒防死循环上限不能因此放宽。
+
 ### Codex Projects 有两层状态
 
 `config.toml [projects]` 只控制目录信任。桌面端 Projects 页读取 `.codex-global-state.json` 的 `local-projects`、`project-order` 和 `thread-project-assignments`。同步流程必须在 Codex 进程关闭后执行，先备份完整状态，只合并这些项目字段，并从 `projectless-thread-ids`/`thread-workspace-root-hints` 移除已经成功归属的任务。文件损坏或写后校验失败时禁止启动 Codex并恢复备份。
