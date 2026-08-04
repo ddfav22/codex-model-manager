@@ -450,6 +450,7 @@ async function main() {
   let completionSignalRecoveryRequests = 0
   let exhaustedCompletionSignalRecoveryRequests = 0
   let streamedInternalTranscriptRequests = 0
+  let formatFallbackRecoveryRequests = 0
   let releaseStalledFinalResponse = null
   let markStalledFinalReached
   const stalledFinalReached = new Promise(resolve => {
@@ -1050,6 +1051,78 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-partial-emulated-tool-tag') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const content of [
+          'Ping 已通。SSH 密码登录刚才超时了。我改用 Windows 可用的方式完成登录验证。',
+          '\n<codex_tool_cal',
+          `l>${JSON.stringify({
+            decision: 'tool',
+            name: 'exec',
+            arguments: {
+              input: 'const result = await tools.shell_command({command:"Write-Output CONNECTED"}); text(result);'
+            }
+          })}`
+        ]) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-partial-emulated-tool-tag',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
+      if (requestBody.model === 'grok-recovery-format-fallback') {
+        const recovering = requestBody.messages?.some(message =>
+          /bounded recovery attempt/i.test(String(message?.content || ''))
+        )
+
+        if (recovering) {
+          formatFallbackRecoveryRequests += 1
+          if (requestBody.response_format) {
+            response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+            response.end(JSON.stringify({ error: { message: 'response_format is not supported by this channel' } }))
+            return
+          }
+        }
+
+        const content = recovering
+          ? JSON.stringify({
+              decision: 'tool',
+              name: 'exec',
+              arguments: {
+                input:
+                  'const result = await tools.shell_command({command:"Write-Output POSH_SSH_READY"}); text(result);'
+              }
+            })
+          : 'Ping 已通，SSH 密码登录刚才超时了。我改用 PowerShell 的 Posh-SSH 做端口探测和登录验证。'
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-recovery-format-fallback',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'grok-historical-tool-new-turn') {
         const recovering = requestBody.messages?.some(message =>
           /strict Codex tool-call compiler|requires a verified tool result|bounded recovery attempt/i.test(
@@ -1228,6 +1301,8 @@ async function main() {
     'grok-completion-signal-recovery-failure',
     'grok-completion-signal-user-input',
     'grok-stalled-continuation',
+    'grok-partial-emulated-tool-tag',
+    'grok-recovery-format-fallback',
     'grok-historical-tool-new-turn',
     'grok-current-live-data',
     'grok-image-generation',
@@ -1249,6 +1324,8 @@ async function main() {
           model === 'grok-completion-signal-recovery-failure' ||
           model === 'grok-completion-signal-user-input' ||
           model === 'grok-stalled-continuation' ||
+          model === 'grok-partial-emulated-tool-tag' ||
+          model === 'grok-recovery-format-fallback' ||
           model === 'grok-historical-tool-new-turn' ||
           model === 'grok-current-live-data' ||
           model === 'grok-image-generation' ||
@@ -2190,6 +2267,82 @@ async function main() {
   assert.strictEqual(completionSignalUserInputDiagnostic.retryAttempted, false)
   assert.strictEqual(completionSignalUserInputDiagnostic.exhausted, false)
   assert.strictEqual(completionSignalUserInputDiagnostic.safetyStopAppended, false)
+  upstreamRequests.length = 0
+  const partialToolTagResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-partial-emulated-tool-tag',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Connect to the host and verify the login.' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_initial_ssh_probe',
+          input: 'const probe = await tools.shell_command({command:"ping 127.0.0.1"}); text(probe);'
+        },
+        { type: 'custom_tool_call_output', call_id: 'call_initial_ssh_probe', output: 'Ping succeeded.' }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const partialToolTagStream = await partialToolTagResponse.text()
+
+  assert.strictEqual(partialToolTagResponse.status, 200)
+  assert.ok(partialToolTagStream.includes('Ping 已通'))
+  assert.ok(
+    partialToolTagStream.includes('response.custom_tool_call_input.done'),
+    `${partialToolTagStream}\ndiagnostic=${JSON.stringify(proxyDiagnostics.at(-1))}`
+  )
+  assert.ok(partialToolTagStream.includes('CONNECTED'))
+  assert.ok(!partialToolTagStream.includes('<codex_tool_call'))
+  assert.ok(!partialToolTagStream.includes('<codex_tool_cal'))
+  assert.strictEqual(proxyDiagnostics.at(-1).emulation.continuationRecovery.recoveryAttempts, 0)
+  upstreamRequests.length = 0
+  formatFallbackRecoveryRequests = 0
+  const formatFallbackResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-recovery-format-fallback',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Connect to the host and verify the login.' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_failed_ssh_login',
+          input: 'const login = await tools.shell_command({command:"ssh test"}); text(login);'
+        },
+        { type: 'custom_tool_call_output', call_id: 'call_failed_ssh_login', output: 'SSH login timed out.' }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const formatFallbackStream = await formatFallbackResponse.text()
+  const formatFallbackDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+
+  assert.strictEqual(formatFallbackResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 3)
+  assert.strictEqual(formatFallbackRecoveryRequests, 2)
+  assert.deepStrictEqual(upstreamRequests[1].body.response_format, { type: 'json_object' })
+  assert.strictEqual(upstreamRequests[2].body.response_format, undefined)
+  assert.ok(formatFallbackStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(formatFallbackStream.includes('POSH_SSH_READY'))
+  assert.ok(!formatFallbackStream.includes('<codex_tool_call'))
+  assert.strictEqual(formatFallbackDiagnostic.recoveryAttempts, 1)
+  assert.strictEqual(formatFallbackDiagnostic.failedRecoveryAttempts, 0)
+  assert.strictEqual(formatFallbackDiagnostic.acceptedRetry, true)
+  assert.strictEqual(formatFallbackDiagnostic.retryProducedToolCall, true)
   upstreamRequests.length = 0
   const stalledContinuationResponsePromise = fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

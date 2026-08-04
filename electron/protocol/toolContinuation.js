@@ -171,7 +171,7 @@ function looksLikePendingMultiStepAction(content) {
   const explicitTerminalOutcome =
     /(?:已经|已)(?:经)?(?:成功)?(?:完成|生成|保存|写入|打开|执行|处理)|(?:无法|不能|不支持|未能|失败|出错|不存在|没有可用|无需继续)|(?:请|需要你|需要用户)(?:提供|选择|确认|重新|授权)|\b(?:completed|finished|saved|unable|cannot|can't|failed|not supported|not available|need you to|please provide)\b/i
   const resumesAfterOutcome =
-    /(?:接下来|下一步|然后|再|随后|接着|现在).{0,50}(?:会|将|准备|需要|继续|执行|调用|写|创建|获取|查询|打开|保存|运行|读取|检查|生成)/i
+    /(?:(?:接下来|下一步|然后|再|随后|接着|现在).{0,50}(?:会|将|准备|需要|继续|执行|调用|写|创建|获取|查询|打开|保存|运行|读取|检查|生成)|(?:^|[。！？!?\n])\s*(?:我)?(?:改用|换用|转用|尝试使用|采用))/i
 
   if (explicitTerminalOutcome.test(text) && !resumesAfterOutcome.test(text)) return false
 
@@ -183,9 +183,12 @@ function looksLikePendingMultiStepAction(content) {
   const multiStepSequence = /(?:先|首先|first).{0,260}(?:再|然后|随后|接着|并(?:且)?|next|then|after that).{0,260}/i
   const genericFutureCommitment =
     /(?:^|[。！？!?\n])\s*(?:我)?(?:接下来|下一步|然后|随后|接着|现在)(?:我)?(?:会|将|准备|打算|需要|继续|先|马上|立即)|^(?:next|then|after that)[,:]?\s+i(?:'ll| will| am going to)\b/i
+  const methodSwitchCommitment =
+    /(?:^|[。！？!?\n])\s*(?:我)?(?:改用|换用|转用|尝试使用|采用).{0,160}(?:执行|运行|调用|安装|下载|登录|连接|验证|探测|检查|读取|查询|打开|保存|处理|完成|做|进行)/i
 
   return (
     genericFutureCommitment.test(text) ||
+    methodSwitchCommitment.test(text) ||
     (action.test(text) && (chineseLead.test(text) || englishLead.test(text) || multiStepSequence.test(text)))
   )
 }

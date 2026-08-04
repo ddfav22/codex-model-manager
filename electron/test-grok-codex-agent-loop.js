@@ -32,6 +32,7 @@ const {
   isInternalToolCallsOnly,
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
+const { emulatedToolSyntaxStart, partialControlMarkerStart } = require('./protocol/emulatedToolSyntax')
 
 const nativeCompatibility = {
   ok: true,
@@ -196,6 +197,15 @@ assert.strictEqual(
   looksLikeStalledToolContinuation('Next, I will handle the remaining steps.', { afterToolResult: true }),
   true
 )
+assert.strictEqual(
+  looksLikeStalledToolContinuation(
+    'Ping 已通，SSH 密码登录刚才超时了。我改用 PowerShell 的 Posh-SSH 做端口探测和登录验证。',
+    {
+      afterToolResult: true
+    }
+  ),
+  true
+)
 assert.strictEqual(looksLikeStalledToolContinuation(signedResult, { afterToolResult: true }), false)
 assert.strictEqual(
   shouldAcceptContinuationRecovery({
@@ -272,6 +282,15 @@ assert.strictEqual(
 )
 assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
+assert.strictEqual(partialControlMarkerStart('Ping 已通。\n<codex_tool_cal'), 'Ping 已通。\n'.length)
+assert.strictEqual(
+  emulatedToolSyntaxStart('Ping 已通。\n<codex_tool_call', { includePartial: true }),
+  'Ping 已通。\n'.length
+)
+assert.strictEqual(
+  emulatedToolSyntaxStart('Ping 已通。\n<codex_tool_call>{"name":"exec"}', { includePartial: false }),
+  'Ping 已通。\n'.length
+)
 
 const anchoredContinuation = anchorShortContinuation([
   { role: 'user', content: '查询今日金价，并把结果写入桌面文件。' },

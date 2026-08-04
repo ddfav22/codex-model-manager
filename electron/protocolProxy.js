@@ -50,9 +50,9 @@ const {
   internalAdapterInstruction,
   internalToolCallsTranscript,
   internalToolResultTranscript,
-  internalToolTranscriptStart,
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
+const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
 const {
   RECOVERY_DECISION,
   parseAgentRecoveryDecision,
@@ -678,18 +678,6 @@ function parseEmulatedToolCall(content, allowed) {
   return null
 }
 
-function emulatedToolSyntaxStart(content) {
-  const text = String(content || '')
-  const candidates = [
-    internalToolTranscriptStart(text),
-    text.search(/<codex_tool_call>/i),
-    text.search(/```(?:json)?\s*\{/i),
-    text.search(/(?:^|\n)\s*\{\s*"?(?:tool_call|function|name|tool|tool_name)"?\s*:/i)
-  ].filter(index => index >= 0)
-
-  return candidates.length ? Math.min(...candidates) : -1
-}
-
 async function synthesizeEmulatedToolResponse(
   upstream,
   request,
@@ -743,15 +731,15 @@ async function synthesizeEmulatedToolResponse(
     let streaming = false
     let closed = false
 
-    const safeText = () => {
-      const syntaxStart = emulatedToolSyntaxStart(buffer)
+    const safeText = (includePartial = false) => {
+      const syntaxStart = emulatedToolSyntaxStart(buffer, { includePartial })
 
       return syntaxStart >= 0 ? buffer.slice(0, syntaxStart) : buffer
     }
     const onContentDelta = (_delta, snapshot) => {
       if (closed) return
       buffer = String(snapshot || buffer)
-      const visible = stripInternalToolTranscript(safeText())
+      const visible = stripInternalToolTranscript(safeText(true))
 
       if (!streaming) {
         const stalled = looksLikeStalledToolContinuation(visible, { afterToolResult: followsToolResult })
@@ -2335,6 +2323,7 @@ async function handleResponsesRequest(
             const recoveryPrompt = retryContext.naturalStall
               ? `The previous answer stopped at a plan-only sentence instead of executing the next Codex agent step. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
                 'The rejected plan is already visible to the user, so do not repeat, paraphrase, or explain it. Re-check the original user request and returned tool results. ' +
+                'If the rejected answer says it will switch methods, turn that stated method into the next executable tool call now; do not announce the switch again. ' +
                 'For current or time-sensitive information, use exec with the nested web__run tool. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result). ' +
                 decisionContract
               : retryContext.missingCompletionSignal
@@ -2391,9 +2380,24 @@ async function handleResponsesRequest(
                   }
 
                   const retryError = await readResponseTextLimited(retryUpstream)
+                  const structuredRecoveryRejected =
+                    strictToolRecovery &&
+                    retryPayload.response_format &&
+                    /response[_ -]?format|json.?mode|structured output/i.test(retryError)
 
-                  if (strictToolRecovery && /response[_ -]?format|json.?mode|structured output/i.test(retryError)) {
+                  if (structuredRecoveryRejected) {
                     structuredRecoverySupported = false
+                    const compatibleRetryPayload = { ...retryPayload }
+
+                    delete compatibleRetryPayload.response_format
+                    const compatibleRetryUpstream = await sendUpstream(compatibleRetryPayload, recoverySignal)
+
+                    if (compatibleRetryUpstream.ok) {
+                      return readChatAssistant(compatibleRetryUpstream, {
+                        onContentDelta: retryContext.onContentDelta
+                      })
+                    }
+                    await readResponseTextLimited(compatibleRetryUpstream)
                   }
 
                   return null
