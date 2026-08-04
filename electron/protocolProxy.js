@@ -60,8 +60,10 @@ const {
 } = require('./protocol/agentRecoveryDecision')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 15_000
-const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 40_000
+const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 0
 const PROMPT_TOOL_RECOVERY_MAX_TOKENS = 4096
+const PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES = 5
+const PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES = 5
 
 async function runWithAbortTimeout(parentSignal, timeoutMs, task) {
   const controller = new AbortController()
@@ -795,7 +797,8 @@ async function synthesizeEmulatedToolResponse(
     !initialToolOmission &&
     !awaitsExplicitUserInput(firstContent) &&
     !isMalformedToolRecovery(firstContent)
-  const maximumRecoveryAttempts = initialStalledContinuation ? (inferredTerminalCandidate ? 1 : 3) : 0
+  const unlimitedRecovery = initialStalledContinuation && !inferredTerminalCandidate
+  const maximumRecoveryAttempts = initialStalledContinuation && inferredTerminalCandidate ? 1 : 0
   const maximumRecoveryMs = Math.max(0, Number(options.maximumRecoveryMs || 0)) || Infinity
   const recoveryBudgetStartedAt = Date.now()
   let recoveryAssistant = assistant
@@ -807,6 +810,10 @@ async function synthesizeEmulatedToolResponse(
   let safetyStopTriggered = false
   let inferredCompletionAccepted = false
   let failedRecoveryAttempts = 0
+  let consecutiveRecoveryFailures = 0
+  let repeatedRecoveryResponses = 0
+  let previousRecoveryFingerprint = ''
+  let recoveryCircuitBreaker = ''
   const recoveryRequestMs = []
   const recoveryDecisionKinds = []
   const publishProgress = content => {
@@ -827,9 +834,10 @@ async function synthesizeEmulatedToolResponse(
 
   while (
     !toolCall &&
-    recoveryAttempts < maximumRecoveryAttempts &&
+    (unlimitedRecovery || recoveryAttempts < maximumRecoveryAttempts) &&
     Date.now() - recoveryBudgetStartedAt < maximumRecoveryMs &&
     currentStalledContinuation &&
+    !recoveryCircuitBreaker &&
     typeof retryAssistant === 'function'
   ) {
     if (currentNaturalStall) publishProgress(recoveryAssistant.content)
@@ -848,6 +856,8 @@ async function synthesizeEmulatedToolResponse(
       toolIntentRequired,
       attempt: recoveryAttempts,
       maximumAttempts: maximumRecoveryAttempts,
+      unlimitedRecovery,
+      consecutiveFailedAttempts: consecutiveRecoveryFailures,
       remainingRecoveryMs,
       onContentDelta: retryProgressObserver.onContentDelta
     })
@@ -856,8 +866,13 @@ async function synthesizeEmulatedToolResponse(
 
     if (!retried) {
       failedRecoveryAttempts += 1
+      consecutiveRecoveryFailures += 1
+      if (unlimitedRecovery && consecutiveRecoveryFailures >= PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES) {
+        recoveryCircuitBreaker = 'consecutive_transport_failures'
+      }
       continue
     }
+    consecutiveRecoveryFailures = 0
 
     const visibleRetryContent = stripInternalToolTranscript(retried?.content)
     const recoveryDecision = parseAgentRecoveryDecision(visibleRetryContent)
@@ -889,6 +904,23 @@ async function synthesizeEmulatedToolResponse(
       toolIntentRequired && !retriedToolCall && !explicitUserInputRequired && !awaitsExplicitUserInput(retryContent)
     const retryStalledContinuation = retryNaturalStall || retryMissingCompletionSignal || retryToolOmission
 
+    if (retryStalledContinuation) {
+      const recoveryFingerprint = String(retryContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase()
+
+      if (recoveryFingerprint && recoveryFingerprint === previousRecoveryFingerprint) {
+        repeatedRecoveryResponses += 1
+      } else {
+        previousRecoveryFingerprint = recoveryFingerprint
+        repeatedRecoveryResponses = recoveryFingerprint ? 1 : 0
+      }
+      if (unlimitedRecovery && repeatedRecoveryResponses >= PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES) {
+        recoveryCircuitBreaker = 'identical_stalled_responses'
+      }
+    }
+
     if (!retriedToolCall && retryNaturalStall) rememberProgress(retryContent)
 
     if (
@@ -908,7 +940,7 @@ async function synthesizeEmulatedToolResponse(
       break
     }
 
-    if (!retryStalledContinuation) break
+    if (!retryStalledContinuation || recoveryCircuitBreaker) break
 
     recoveryAssistant = retried
     currentStalledContinuation = true
@@ -919,23 +951,29 @@ async function synthesizeEmulatedToolResponse(
   const recoveryTimeBudgetExhausted =
     initialStalledContinuation &&
     !acceptedRetry &&
-    recoveryAttempts < maximumRecoveryAttempts &&
+    (unlimitedRecovery || recoveryAttempts < maximumRecoveryAttempts) &&
     recoveryElapsedMs >= maximumRecoveryMs
   const exhaustedRecovery =
     initialStalledContinuation &&
     !acceptedRetry &&
-    (recoveryAttempts >= maximumRecoveryAttempts || recoveryTimeBudgetExhausted)
+    (Boolean(recoveryCircuitBreaker) ||
+      (!unlimitedRecovery && recoveryAttempts >= maximumRecoveryAttempts) ||
+      recoveryTimeBudgetExhausted)
 
   if (!toolCall && exhaustedRecovery) {
     if (inferredTerminalCandidate) {
       assistant = initialAssistant
       inferredCompletionAccepted = true
     } else {
-      const finalText = isMalformedToolRecovery(initialAssistant.content)
-        ? 'The upstream model did not produce a valid Codex tool call.'
-        : hasAgentCompletionSignal(initialAssistant.content)
-          ? agentCompletionResult(initialAssistant.content)
-          : String(initialAssistant.content || '').trim()
+      const finalText = recoveryCircuitBreaker
+        ? recoveryCircuitBreaker === 'consecutive_transport_failures'
+          ? '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
+          : '模型连续返回相同的中间计划，自动续接已暂停；回复“继续”即可从当前任务继续。'
+        : isMalformedToolRecovery(initialAssistant.content)
+          ? 'The upstream model did not produce a valid Codex tool call.'
+          : hasAgentCompletionSignal(initialAssistant.content)
+            ? agentCompletionResult(initialAssistant.content)
+            : String(initialAssistant.content || '').trim()
 
       assistant = {
         ...initialAssistant,
@@ -995,7 +1033,11 @@ async function synthesizeEmulatedToolResponse(
       retryAttempted: recoveryAttempts > 0,
       recoveryAttempts,
       failedRecoveryAttempts,
+      consecutiveRecoveryFailures,
       maximumRecoveryAttempts,
+      unlimitedRecovery,
+      repeatedRecoveryResponses,
+      recoveryCircuitBreaker,
       maximumRecoveryMs: Number.isFinite(maximumRecoveryMs) ? maximumRecoveryMs : 0,
       recoveryElapsedMs,
       recoveryTimeBudgetExhausted,
@@ -2320,26 +2362,34 @@ async function handleResponsesRequest(
           async (firstAssistant, retryContext = {}) => {
             const strictToolRecovery = Boolean(retryContext.stalledContinuation)
             const decisionContract = recoveryDecisionContract(AGENT_COMPLETION_SIGNAL)
+            const recoveryAttemptDescription = retryContext.unlimitedRecovery
+              ? `This is bounded recovery attempt ${retryContext.attempt || 1} with no fixed round limit; only duplicate-response and transport-failure circuit breakers remain. `
+              : `This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 1}. `
             const recoveryPrompt = retryContext.naturalStall
-              ? `The previous answer stopped at a plan-only sentence instead of executing the next Codex agent step. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
+              ? 'The previous answer stopped at a plan-only sentence instead of executing the next Codex agent step. ' +
+                recoveryAttemptDescription +
                 'The rejected plan is already visible to the user, so do not repeat, paraphrase, or explain it. Re-check the original user request and returned tool results. ' +
                 'If the rejected answer says it will switch methods, turn that stated method into the next executable tool call now; do not announce the switch again. ' +
                 'For current or time-sensitive information, use exec with the nested web__run tool. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result). ' +
                 decisionContract
               : retryContext.missingCompletionSignal
-                ? `The previous answer followed a Codex local tool result but omitted the required completion signal. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
+                ? 'The previous answer followed a Codex local tool result but omitted the required completion signal. ' +
+                  recoveryAttemptDescription +
                   'Re-check the original user request and every returned tool result. ' +
                   decisionContract
                 : retryContext.stalledAfterToolResult
-                  ? `You are recovering a stalled Codex agent turn after a local tool result has already returned. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
+                  ? 'You are recovering a stalled Codex agent turn after a local tool result has already returned. ' +
+                    recoveryAttemptDescription +
                     'Re-check every action in the original user request against the returned tool results and continue the original task now. ' +
                     'The rejected answer is already visible to the user as live progress, so do not repeat or rephrase that plan. ' +
                     decisionContract
                   : retryContext.toolIntentRequired
-                    ? `The latest request requires a verified tool result, but the previous answer did not emit a valid Codex tool call. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
+                    ? 'The latest request requires a verified tool result, but the previous answer did not emit a valid Codex tool call. ' +
+                      recoveryAttemptDescription +
                       'For current or time-sensitive information, use exec with the nested web__run tool; do not answer from memory. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. For local actions, use the matching allowed tool. ' +
                       decisionContract
-                    : `The previous answer stopped at an intermediate promise instead of executing the Codex agent step. This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 3}. ` +
+                    : 'The previous answer stopped at an intermediate promise instead of executing the Codex agent step. ' +
+                      recoveryAttemptDescription +
                       'Continue the original user task now. Reading or loading a skill is not a final answer. ' +
                       decisionContract
             const conversation = recoveryConversationContext(emulation.payload.messages)
@@ -2612,6 +2662,8 @@ function createProtocolProxy({
 module.exports = {
   DEFAULT_PROTOCOL_PROXY_PORT,
   PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES,
+  PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES,
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   adaptResponsesRequest,

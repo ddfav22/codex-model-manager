@@ -10,6 +10,8 @@ const {
   endpointCompatibilityFailure,
   inferredWireApiForModel,
   PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES,
+  PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES,
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   responsesRequestToChat,
@@ -233,7 +235,7 @@ function writeHistoryProviderConfig(configPath, model, proxyBaseUrl, modelCatalo
 
 async function main() {
   assert.strictEqual(PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS, 15000)
-  assert.strictEqual(PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS, 40000)
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS, 0)
   let phase = 'discover-codex'
   const watchdog = setTimeout(() => {
     console.error(`wire test watchdog timeout at phase: ${phase}`)
@@ -1008,15 +1010,20 @@ async function main() {
 
           assert.ok(recoveryInstructions.includes('plan-only sentence'))
           assert.ok(!recoveryInstructions.includes('omitted the required completion signal'))
+          assert.ok(recoveryInstructions.includes('no fixed round limit'))
           assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
           assert.strictEqual(requestBody.max_tokens, PROMPT_TOOL_RECOVERY_MAX_TOKENS)
+          const pendingPlans = [
+            '正在准备下一个可执行步骤。',
+            '下一步将继续执行保存任务。',
+            '接下来我会执行写入文件。',
+            '然后我将打开记事本并保存。'
+          ]
+
           content =
-            stalledRecoveryRequests === 1
-              ? '正在准备下一个可执行步骤。'
-              : stalledRecoveryRequests === 2
-                ? '下一步将继续执行保存任务。'
-                : '{"name":"exec","arguments":{"input":"const saved = await tools.shell_command({command:\\"Set-Content -Path gold-price.txt -Value 2026-07-31_gold_2800; Start-Process notepad.exe gold-price.txt\\"}); text(saved);"}}'
-          if (stalledRecoveryRequests === 3) {
+            pendingPlans[stalledRecoveryRequests - 1] ||
+            '{"name":"exec","arguments":{"input":"const saved = await tools.shell_command({command:\\"Set-Content -Path gold-price.txt -Value 2026-07-31_gold_2800; Start-Process notepad.exe gold-price.txt\\"}); text(saved);"}}'
+          if (stalledRecoveryRequests === 5) {
             content = content.replace('{"name"', '{"decision":"tool","name"')
           }
         } else {
@@ -1042,12 +1049,35 @@ async function main() {
           response.end('data: [DONE]\n\n')
         }
 
-        if (recovering && stalledRecoveryRequests === 3) {
+        if (recovering && stalledRecoveryRequests === 5) {
           releaseStalledFinalResponse = sendStalledResponse
           markStalledFinalReached()
         } else {
           sendStalledResponse()
         }
+        return
+      }
+
+      if (requestBody.model === 'grok-repeated-stall-fuse') {
+        const recovering = requestBody.messages?.some(message =>
+          /bounded recovery attempt/i.test(String(message?.content || ''))
+        )
+        const content = recovering ? '下一步我会继续执行相同的中间计划。' : '我接下来会处理剩余步骤。'
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-repeated-stall-fuse',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
         return
       }
 
@@ -1301,6 +1331,7 @@ async function main() {
     'grok-completion-signal-recovery-failure',
     'grok-completion-signal-user-input',
     'grok-stalled-continuation',
+    'grok-repeated-stall-fuse',
     'grok-partial-emulated-tool-tag',
     'grok-recovery-format-fallback',
     'grok-historical-tool-new-turn',
@@ -1324,6 +1355,7 @@ async function main() {
           model === 'grok-completion-signal-recovery-failure' ||
           model === 'grok-completion-signal-user-input' ||
           model === 'grok-stalled-continuation' ||
+          model === 'grok-repeated-stall-fuse' ||
           model === 'grok-partial-emulated-tool-tag' ||
           model === 'grok-recovery-format-fallback' ||
           model === 'grok-historical-tool-new-turn' ||
@@ -1901,8 +1933,9 @@ async function main() {
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.toolIntentRequired, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.initialToolOmission, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryAttempts, 2)
-  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 3)
-  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryMs, 40000)
+  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 0)
+  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryMs, 0)
+  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.unlimitedRecovery, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryTimeBudgetExhausted, false)
   assert.ok(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryElapsedMs >= 0)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.acceptedRetry, true)
@@ -2207,21 +2240,60 @@ async function main() {
     .join('')
 
   assert.strictEqual(recoveryFailureResponse.status, 200)
-  assert.strictEqual(upstreamRequests.length, 4)
+  assert.strictEqual(upstreamRequests.length, 1 + PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
   assert.ok(upstreamRequests.every(request => request.body.stream === true))
   assert.strictEqual((recoveryFailureDeltas.match(/下一步我会继续保存文件。/g) || []).length, 1)
   assert.strictEqual((recoveryFailureDeltas.match(/\[CODEX_AGENT_LOOP_SAFETY_STOP\]/g) || []).length, 0)
   assert.strictEqual((recoveryFailureDeltas.match(/上游模型未能完成剩余步骤，请重试本轮任务。/g) || []).length, 0)
   assert.ok(!recoveryFailureDeltas.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
-  assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, 3)
-  assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, 3)
-  assert.strictEqual(recoveryFailureDiagnostic.maximumRecoveryAttempts, 3)
+  assert.ok(recoveryFailureDeltas.includes('模型渠道连续连接失败'))
+  assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
+  assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
+  assert.strictEqual(recoveryFailureDiagnostic.maximumRecoveryAttempts, 0)
+  assert.strictEqual(recoveryFailureDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(recoveryFailureDiagnostic.recoveryCircuitBreaker, 'consecutive_transport_failures')
   assert.strictEqual(recoveryFailureDiagnostic.visibleProgressCount, 1)
   assert.strictEqual(recoveryFailureDiagnostic.liveProgressCount, 1)
   assert.strictEqual(recoveryFailureDiagnostic.exhausted, true)
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopAppended, false)
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopTriggered, true)
   assert.strictEqual(recoveryFailureDiagnostic.acceptedCompletionSignal, false)
+  upstreamRequests.length = 0
+  const repeatedStallResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-repeated-stall-fuse',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Complete every remaining local step.' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_repeated_stall_first_step',
+          input: 'const first = await tools.shell_command({command:"Write-Output first"}); text(first);'
+        },
+        { type: 'custom_tool_call_output', call_id: 'call_repeated_stall_first_step', output: 'first done' }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const repeatedStallStream = await repeatedStallResponse.text()
+  const repeatedStallDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+
+  assert.strictEqual(repeatedStallResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 1 + PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
+  assert.ok(repeatedStallStream.includes('模型连续返回相同的中间计划'))
+  assert.ok(!repeatedStallStream.includes('[CODEX_AGENT_LOOP_SAFETY_STOP]'))
+  assert.strictEqual(repeatedStallDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(repeatedStallDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
+  assert.strictEqual(repeatedStallDiagnostic.repeatedRecoveryResponses, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
+  assert.strictEqual(repeatedStallDiagnostic.recoveryCircuitBreaker, 'identical_stalled_responses')
+  assert.strictEqual(repeatedStallDiagnostic.acceptedRetry, false)
   upstreamRequests.length = 0
   const completionSignalUserInputResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2446,7 +2518,7 @@ async function main() {
   const stalledDiagnostic = proxyDiagnostics.at(-1)
 
   assert.strictEqual(stalledContinuationResponse.status, 200)
-  assert.strictEqual(upstreamRequests.length, 4)
+  assert.strictEqual(upstreamRequests.length, 6)
   assert.ok(upstreamRequests.every(request => request.body.stream === true))
   assert.ok(stalledContinuationStream.includes('response.custom_tool_call_input.done'))
   assert.ok(stalledContinuationStream.includes('notepad.exe'))
@@ -2454,6 +2526,8 @@ async function main() {
   assert.ok(stalledContinuationStream.includes('我接下来会处理剩余步骤。'))
   assert.ok(stalledContinuationStream.includes('正在准备下一个可执行步骤。'))
   assert.ok(stalledContinuationStream.includes('下一步将继续执行保存任务。'))
+  assert.ok(stalledContinuationStream.includes('接下来我会执行写入文件。'))
+  assert.ok(stalledContinuationStream.includes('然后我将打开记事本并保存。'))
   assert.ok(
     stalledContinuationStream.indexOf('我接下来会处理剩余步骤。') <
       stalledContinuationStream.indexOf('正在准备下一个可执行步骤。')
@@ -2463,7 +2537,15 @@ async function main() {
       stalledContinuationStream.indexOf('下一步将继续执行保存任务。')
   )
   assert.ok(
-    stalledContinuationStream.indexOf('下一步将继续执行保存任务。') < stalledContinuationStream.indexOf('notepad.exe')
+    stalledContinuationStream.indexOf('下一步将继续执行保存任务。') <
+      stalledContinuationStream.indexOf('接下来我会执行写入文件。')
+  )
+  assert.ok(
+    stalledContinuationStream.indexOf('接下来我会执行写入文件。') <
+      stalledContinuationStream.indexOf('然后我将打开记事本并保存。')
+  )
+  assert.ok(
+    stalledContinuationStream.indexOf('然后我将打开记事本并保存。') < stalledContinuationStream.indexOf('notepad.exe')
   )
   assert.strictEqual(stalledDiagnostic.toolTransport, 'prompt-emulated')
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.toolResultPresent, true)
@@ -2472,18 +2554,21 @@ async function main() {
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.stalledContinuation, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.stalledAfterToolResult, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.retryAttempted, true)
-  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.recoveryAttempts, 3)
-  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 3)
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.recoveryAttempts, 5)
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 0)
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.unlimitedRecovery, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.acceptedRetry, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.retryProducedToolCall, true)
   assert.deepStrictEqual(stalledDiagnostic.emulation.continuationRecovery.recoveryDecisionKinds, [
     'legacy',
     'legacy',
+    'legacy',
+    'legacy',
     'tool'
   ])
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.acceptedRecoveryDecision, 'tool')
-  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.visibleProgressCount, 3)
-  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.liveProgressCount, 3)
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.visibleProgressCount, 5)
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.liveProgressCount, 5)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.bufferedProgressCount, 0)
   assert.strictEqual(stalledDiagnostic.sourceFollowsToolResult, true)
   assert.deepStrictEqual(stalledDiagnostic.sourceInputTailKinds.slice(-2), [
