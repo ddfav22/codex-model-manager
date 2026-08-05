@@ -156,3 +156,5 @@ npm run test:installer
 - Codex 的标准工具调用卡属于客户端安全审计通道，工具参数必须随 Responses 工具事件交给 Codex 才能在用户电脑执行，代理不能在保留真实执行的同时伪造或删除该卡。应隐藏的是模型正文中的内部标签、模拟协议和历史转录，而不是声称工具已运行却不发送审计事件。
 - 修改前本地备份标签为 `backup-v1.2.68-before-agent-loop-privacy-20260805`，指向正式 v1.2.68 提交。针对性 Agent Loop 与 wire 测试已通过；完整源码、安装器及云端发布门禁尚待执行。
 - 完整源码门禁随后通过依赖 dry-run、生产审计 0、格式、diff、语法、lint、类型、modules、core/Agent Loop/中文错误/updater、wire 和 production build；安装器及云端发布门禁仍待执行。
+- 本机完整目录随后通过纯净性、图标和 packaged UI 检查：76 个文件、283,147,799 字节，无 `data`、凭据、日志、缓存或开发文件；UI 668 ms 就绪，版本 1.2.69，0 renderer/console/startup error，不自动启动 Codex。
+- 本机 NSIS 安装包 80,652,074 字节，SHA-256 `78BCA7E18BBCE0C59C9052F0779478937FDA21D866B3FE31B6A3A397E4FFFD75`。真实隔离回归通过自选路径安装、纯净启动、卸载、保留 data 重装、原位更新、自动重启、再次 UI、最终卸载和默认路径安装；两轮 UI 484/652 ms 且 0 错误。仍需最终提交的 main CI 和独立 Release runner 通过后才能发布在线更新。
