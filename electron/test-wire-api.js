@@ -454,6 +454,7 @@ async function main() {
   let exhaustedCompletionSignalRecoveryRequests = 0
   let streamedInternalTranscriptRequests = 0
   let formatFallbackRecoveryRequests = 0
+  let highDemandRetryRequests = 0
   let releaseStalledFinalResponse = null
   let markStalledFinalReached
   const stalledFinalReached = new Promise(resolve => {
@@ -577,6 +578,37 @@ async function main() {
         response.end(
           JSON.stringify({ error: { message: 'Chat Completions endpoint is not supported for this provider model' } })
         )
+        return
+      }
+
+      if (requestBody.model === 'grok-high-demand-retry') {
+        highDemandRetryRequests += 1
+        if (highDemandRetryRequests <= 2) {
+          response.writeHead(503, {
+            'content-type': 'application/json; charset=utf-8',
+            'retry-after': '0'
+          })
+          response.end(
+            JSON.stringify({ error: { type: 'server_is_overloaded', message: 'currently experiencing high demand' } })
+          )
+          return
+        }
+      }
+
+      if (requestBody.model === 'grok-high-demand-exhausted') {
+        response.writeHead(503, {
+          'content-type': 'application/json; charset=utf-8',
+          'retry-after': '0'
+        })
+        response.end(
+          JSON.stringify({ error: { type: 'server_is_overloaded', message: 'currently experiencing high demand' } })
+        )
+        return
+      }
+
+      if (requestBody.model === 'grok-context-too-large') {
+        response.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '0' })
+        response.end(JSON.stringify({ error: { type: 'context_length_exceeded', message: 'too many input tokens' } }))
         return
       }
 
@@ -1522,7 +1554,10 @@ async function main() {
     'grok-streamed-internal-transcript',
     'grok-short-continue-anchor',
     'grok-interrupted-continue-anchor',
-    'grok-identity-self-report'
+    'grok-identity-self-report',
+    'grok-high-demand-retry',
+    'grok-high-demand-exhausted',
+    'grok-context-too-large'
   ]
   const modelCapabilities = Object.fromEntries(
     [...expectedCanonicalModels, ...testOnlyModels].map(model => [
@@ -1618,6 +1653,61 @@ async function main() {
     expectedPickerModels
   )
   assert.strictEqual(proxyDiagnostics.at(-1).source, 'validated-alias-catalog')
+  upstreamRequests.length = 0
+  highDemandRetryRequests = 0
+  const highDemandRecovered = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-high-demand-retry',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Capacity retry.' }] }]
+    })
+  })
+  const highDemandRecoveredBody = await highDemandRecovered.text()
+
+  assert.strictEqual(highDemandRecovered.status, 200)
+  assert.ok(highDemandRecoveredBody.includes('OK'))
+  assert.strictEqual(highDemandRetryRequests, 3)
+  assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_accepted')
+  assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 2)
+  assert.ok(proxyDiagnostics.at(-1).sourceRequestBytes > 0)
+  assert.ok(proxyDiagnostics.at(-1).forwardedRequestBytes > 0)
+  upstreamRequests.length = 0
+  const highDemandExhausted = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-high-demand-exhausted',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Capacity failure.' }] }]
+    })
+  })
+  const highDemandExhaustedBody = await highDemandExhausted.text()
+
+  assert.strictEqual(highDemandExhausted.status, 503)
+  assert.ok(highDemandExhaustedBody.includes('已自动重试 2 次'))
+  assert.strictEqual(upstreamRequests.length, 3)
+  assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_error')
+  assert.strictEqual(proxyDiagnostics.at(-1).upstreamFailureKind, 'upstream_capacity')
+  assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 2)
+  upstreamRequests.length = 0
+  const contextTooLarge = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-context-too-large',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Large context.' }] }]
+    })
+  })
+  const contextTooLargeBody = await contextTooLarge.text()
+
+  assert.strictEqual(contextTooLarge.status, 400)
+  assert.ok(contextTooLargeBody.includes('上下文过大'))
+  assert.strictEqual(upstreamRequests.length, 1)
+  assert.strictEqual(proxyDiagnostics.at(-1).upstreamFailureKind, 'context_too_large')
+  assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 0)
   upstreamRequests.length = 0
   const fastResponses = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

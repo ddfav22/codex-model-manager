@@ -18,6 +18,7 @@ const cases = [
   ['429 rate limit exceeded', '请求过于频繁或可用额度不足。请稍后重试，或更换可用渠道。'],
   ['503 Service Unavailable', '上游服务暂时不可用。请稍后重试，或切换其他模型或渠道。'],
   ['Selected model is at capacity.', '当前模型使用人数较多，暂时无法响应。请稍后重试，或切换其他模型。'],
+  ['Currently experiencing high demand.', '当前模型使用人数较多，暂时无法响应。请稍后重试，或切换其他模型。'],
   ['stream must be true', '当前接口要求开启流式响应。请重新检测该模型，或检查渠道适配设置。'],
   [
     "Invalid 'input[7].id': 'fc_123'. Expected an ID that begins with 'ctc'.",

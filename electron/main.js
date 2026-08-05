@@ -279,15 +279,21 @@ function showMainWindow() {
   mainWindow.focus()
 }
 
-function openRuntimeLog() {
+async function openRuntimeLog() {
   const logPath = getRuntimeLogPath()
 
   if (logPath && fs.existsSync(logPath)) {
     shell.showItemInFolder(logPath)
-    return
+    return { ok: true, path: logPath }
   }
 
-  if (logPath) shell.openPath(path.dirname(logPath))
+  if (!logPath) return { ok: false, path: '', error: '运行日志路径尚未初始化' }
+  const logDirectory = path.dirname(logPath)
+
+  if (!fs.existsSync(logDirectory)) return { ok: false, path: logPath, error: '运行日志目录尚未创建' }
+  const error = await shell.openPath(logDirectory)
+
+  return { ok: !error, path: logPath, error }
 }
 
 function createTray() {
@@ -296,7 +302,10 @@ function createTray() {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '打开管理器', click: showMainWindow },
-      { label: '打开运行日志', click: openRuntimeLog },
+      {
+        label: '打开运行日志',
+        click: () => openRuntimeLog().catch(error => logError('runtimeLog.open.failed', error))
+      },
       { type: 'separator' },
       {
         label: '退出',
@@ -317,6 +326,7 @@ function registerIpc() {
     logError,
     logEvent,
     manager,
+    openRuntimeLog,
     updater: appUpdater,
     writeRuntimeDiagnostic
   })
@@ -339,7 +349,9 @@ async function initializeProtocolRuntime() {
     resolveChannel: id => manager.getRelayRuntime(id),
     onDiagnostic: diagnostic => {
       writeRuntimeDiagnostic({ lastProxyRequest: diagnostic }, { lightweight: true })
-      logEvent('info', 'proxy.request', diagnostic)
+      const failed = diagnostic?.outcome === 'upstream_error'
+
+      logEvent(failed ? 'warn' : 'info', failed ? 'proxy.upstreamError' : 'proxy.request', diagnostic)
     }
   })
   process.env.CODEX_MM_PROXY_BASE_URL = protocolProxy.baseUrl

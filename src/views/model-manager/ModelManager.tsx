@@ -223,6 +223,17 @@ const ModelManager = () => {
     }
   }
 
+  const openRuntimeLog = async () => {
+    try {
+      const result = await requireBridge().openRuntimeLog()
+
+      if (!result.ok) throw new Error(result.error || '运行日志暂不可用')
+      setMessage({ type: 'success', text: `已定位运行日志：${result.path}` })
+    } catch (error) {
+      setMessage({ type: 'error', text: cleanErrorMessage(error) })
+    }
+  }
+
   const maintainDisk = async () => {
     setDiskMaintenanceBusy(true)
 
@@ -1539,6 +1550,15 @@ const ModelManager = () => {
                 onClick={() => refresh(true)}
               >
                 重新扫描
+              </Button>
+              <Button
+                variant='outlined'
+                color='secondary'
+                disabled={busy}
+                startIcon={<i className='ri-file-list-3-line' />}
+                onClick={openRuntimeLog}
+              >
+                打开运行日志
               </Button>
               <Button
                 variant='outlined'

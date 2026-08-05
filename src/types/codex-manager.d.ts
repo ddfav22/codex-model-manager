@@ -415,6 +415,7 @@ declare global {
       inspectDiskUsage: () => Promise<CodexDiskUsage>
       maintainDisk: () => Promise<CodexDiskMaintenanceResult>
       repairConversationIndex: () => Promise<ConversationIndexRepair>
+      openRuntimeLog: () => Promise<{ ok: boolean; path: string; error?: string }>
       testRelay: (payload: RelayInput) => Promise<{ test: RelayTest; channel?: RelayProvider; status: CodexStatus }>
       testSavedRelay: (
         id: string,

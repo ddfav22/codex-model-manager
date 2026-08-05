@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('codexManager', {
   inspectDiskUsage: () => ipcRenderer.invoke('codex:inspectDiskUsage'),
   maintainDisk: () => ipcRenderer.invoke('codex:maintainDisk', { confirmed: true }),
   repairConversationIndex: () => ipcRenderer.invoke('codex:repairConversationIndex'),
+  openRuntimeLog: () => ipcRenderer.invoke('codex:openRuntimeLog'),
   testRelay: payload => ipcRenderer.invoke('codex:testRelay', payload),
   testSavedRelay: (id, model) => ipcRenderer.invoke('codex:testSavedRelay', id, model),
   applyRelay: (id, model, operationId) => ipcRenderer.invoke('codex:applyRelay', id, model, operationId),

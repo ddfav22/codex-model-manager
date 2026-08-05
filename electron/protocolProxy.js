@@ -66,6 +66,139 @@ const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 0
 const PROMPT_TOOL_RECOVERY_MAX_TOKENS = 4096
 const PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES = 5
 const PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES = 5
+const UPSTREAM_CAPACITY_MAX_RETRIES = 2
+const UPSTREAM_CAPACITY_RETRY_BASE_MS = 750
+const UPSTREAM_CAPACITY_RETRY_MAX_MS = 5000
+const UPSTREAM_FAILURE_CLASSIFICATION_BYTES = 64 * 1024
+
+function jsonByteLength(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8')
+  } catch {
+    return 0
+  }
+}
+
+function upstreamFailureKind(status, text) {
+  const code = Number(status || 0)
+  const message = String(text || '').toLowerCase()
+
+  if (
+    code === 413 ||
+    /context[_ -]?length[_ -]?exceeded|maximum context length|context (?:window|length).{0,40}(?:exceed|limit)|too many (?:input )?tokens|prompt (?:is )?too long|input.{0,30}too long/.test(
+      message
+    )
+  ) {
+    return 'context_too_large'
+  }
+  if (
+    /currently experiencing high demand|high demand|selected model is at capacity|model.{0,40}(?:at capacity|overloaded)|server_is_overloaded|service[_ -]?overloaded/.test(
+      message
+    )
+  ) {
+    return 'upstream_capacity'
+  }
+  if (code === 408 || code === 504) return 'upstream_timeout'
+  if (code === 429) return 'upstream_rate_limit'
+  if (code >= 500) return 'upstream_server_error'
+  if (code >= 400) return 'upstream_request_rejected'
+
+  return 'invalid_upstream_response'
+}
+
+function retryAfterMilliseconds(response) {
+  const value = String(response?.headers?.get?.('retry-after') || '').trim()
+
+  if (!value) return null
+  const seconds = Number(value)
+
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return Math.min(Math.round(seconds * 1000), UPSTREAM_CAPACITY_RETRY_MAX_MS)
+  const date = Date.parse(value)
+
+  if (!Number.isFinite(date)) return null
+
+  return Math.min(Math.max(0, date - Date.now()), UPSTREAM_CAPACITY_RETRY_MAX_MS)
+}
+
+function waitForRetry(delayMs, signal) {
+  if (!delayMs) return Promise.resolve()
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason || new Error('upstream capacity retry aborted'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve()
+    }, delayMs)
+
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
+async function fetchWithCapacityRetry(fetcher, { signal, maxRetries = UPSTREAM_CAPACITY_MAX_RETRIES } = {}) {
+  let retryCount = 0
+  let retryDelayMs = 0
+
+  while (true) {
+    const response = await fetcher()
+
+    if (response.ok) {
+      response.codexRetryDiagnostic = { retryCount, retryDelayMs, failureKind: '' }
+      return response
+    }
+    let errorText = ''
+
+    try {
+      errorText = await readResponseTextLimited(response.clone(), UPSTREAM_FAILURE_CLASSIFICATION_BYTES)
+    } catch {
+      // Oversized or malformed error bodies are forwarded without automatic retries.
+    }
+    const failureKind = upstreamFailureKind(response.status, errorText)
+
+    if (failureKind !== 'upstream_capacity' || retryCount >= maxRetries) {
+      response.codexRetryDiagnostic = { retryCount, retryDelayMs, failureKind }
+      return response
+    }
+
+    const headerDelay = retryAfterMilliseconds(response)
+    const delayMs =
+      headerDelay === null
+        ? Math.min(UPSTREAM_CAPACITY_RETRY_BASE_MS * 2 ** retryCount, UPSTREAM_CAPACITY_RETRY_MAX_MS)
+        : headerDelay
+
+    retryCount += 1
+    retryDelayMs += delayMs
+    await response.body?.cancel?.()
+    await waitForRetry(delayMs, signal)
+  }
+}
+
+function upstreamDiagnostic(diagnostic, upstream, errorText = '') {
+  const retry = upstream?.codexRetryDiagnostic || {}
+
+  return {
+    ...diagnostic,
+    upstreamStatus: Number(upstream?.status || 0),
+    upstreamFailureKind: retry.failureKind || (upstream?.ok ? '' : upstreamFailureKind(upstream?.status, errorText)),
+    upstreamRetryCount: Number(retry.retryCount || 0),
+    upstreamRetryDelayMs: Number(retry.retryDelayMs || 0)
+  }
+}
+
+function userFacingUpstreamFailure(kind, retryCount) {
+  if (kind === 'upstream_capacity') {
+    return `模型渠道当前负载较高，已自动重试 ${retryCount} 次仍未恢复；请稍后回复“继续”，或切换其他模型或渠道。`
+  }
+  if (kind === 'context_too_large') {
+    return '本轮对话上下文过大，模型渠道无法接收；请让 Codex 压缩上下文，或新建任务后继续。'
+  }
+
+  return ''
+}
 
 function recoveryFailureKindForStatus(status) {
   const code = Number(status || 0)
@@ -461,7 +594,7 @@ function responsesRequestToChat(body, capability = null) {
 }
 
 function upstreamRejectsNativeTools(text) {
-  return /tool calls? (?:are|is) not supported|does not support (?:tool|function) calls?|tools? (?:are|is) not supported|currently experiencing high demand/i.test(
+  return /tool calls? (?:are|is) not supported|does not support (?:tool|function) calls?|tools? (?:are|is) not supported/i.test(
     String(text || '')
   )
 }
@@ -2222,6 +2355,10 @@ async function handleResponsesRequest(
     requestedServiceTier: String(rawBody.service_tier || ''),
     forwardedServiceTier: String(body.service_tier || ''),
     continuationGuard: Array.isArray(body.tools) && body.tools.length > 0,
+    sourceRequestBytes: jsonByteLength(rawBody),
+    forwardedResponsesRequestBytes: jsonByteLength(body),
+    sourceInputItemCount: inputItems.length,
+    sourceInputBytes: jsonByteLength(inputItems),
     sourceToolCallHistoryCount: inputItems.filter(
       item => item?.type === 'function_call' || item?.type === 'custom_tool_call'
     ).length,
@@ -2244,16 +2381,20 @@ async function handleResponsesRequest(
     }
   }
   const sendResponsesUpstream = () =>
-    fetch(upstreamResponsesUrl(channel.baseUrl), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${channel.apiKey}`,
-        'content-type': request.headers['content-type'] || 'application/json',
-        accept: body.stream === false ? 'application/json' : 'text/event-stream'
-      },
-      body: JSON.stringify(body),
-      signal: upstreamSignal
-    })
+    fetchWithCapacityRetry(
+      () =>
+        fetch(upstreamResponsesUrl(channel.baseUrl), {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${channel.apiKey}`,
+            'content-type': request.headers['content-type'] || 'application/json',
+            accept: body.stream === false ? 'application/json' : 'text/event-stream'
+          },
+          body: JSON.stringify(body),
+          signal: upstreamSignal
+        }),
+      { signal: upstreamSignal }
+    )
   let responsesFallback = null
 
   if (preferredWireApi === 'responses') {
@@ -2272,7 +2413,8 @@ async function handleResponsesRequest(
         /(^|[._-])(shell|shell_command|exec)([._-]|$)/i.test(name)
       ),
       hasComputerUseTool: responseToolNames(body.tools).some(name => /computer.?use/i.test(name)),
-      instructionsLength: String(body.instructions || '').length
+      instructionsLength: String(body.instructions || '').length,
+      forwardedRequestBytes: jsonByteLength(body)
     }
 
     const upstream = await sendResponsesUpstream()
@@ -2286,7 +2428,7 @@ async function handleResponsesRequest(
       reportWireApi('responses')
       if (typeof onDiagnostic === 'function') {
         try {
-          onDiagnostic(diagnostic)
+          onDiagnostic({ ...upstreamDiagnostic(diagnostic, upstream), outcome: 'upstream_accepted' })
         } catch {
           // Diagnostics must never interrupt the model request.
         }
@@ -2299,13 +2441,24 @@ async function handleResponsesRequest(
     if (!endpointCompatibilityFailure(upstream.status, buffer.toString('utf8'))) {
       if (typeof onDiagnostic === 'function') {
         try {
-          onDiagnostic(diagnostic)
+          onDiagnostic({
+            ...upstreamDiagnostic(diagnostic, upstream, buffer.toString('utf8')),
+            outcome: 'upstream_error'
+          })
         } catch {
           // Diagnostics must never interrupt the model request.
         }
       }
-      response.writeHead(upstream.status, headers)
-      response.end(buffer)
+      const failureKind = upstreamFailureKind(upstream.status, buffer.toString('utf8'))
+      const userMessage = userFacingUpstreamFailure(failureKind, Number(upstream.codexRetryDiagnostic?.retryCount || 0))
+
+      if (userMessage) {
+        response.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify({ error: { type: failureKind, message: userMessage } }))
+      } else {
+        response.writeHead(upstream.status, headers)
+        response.end(buffer)
+      }
       return
     }
 
@@ -2313,7 +2466,7 @@ async function handleResponsesRequest(
       from: 'responses',
       to: 'chat',
       status: upstream.status,
-      message: buffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 240)
+      failureKind: upstreamFailureKind(upstream.status, buffer.toString('utf8'))
     }
   }
 
@@ -2336,7 +2489,8 @@ async function handleResponsesRequest(
     forwardedToolNames: forwardedNames,
     hasShellTool: sourceNames.some(name => /(^|[._-])(shell|shell_command|exec)([._-]|$)/i.test(name)),
     hasComputerUseTool: sourceNames.some(name => /computer.?use/i.test(name)),
-    instructionsLength: String(body.instructions || '').length
+    instructionsLength: String(body.instructions || '').length,
+    forwardedRequestBytes: jsonByteLength(converted.request)
   }
 
   if (typeof onDiagnostic === 'function') {
@@ -2347,16 +2501,20 @@ async function handleResponsesRequest(
     }
   }
   const sendUpstream = (payload, signal = upstreamSignal) =>
-    fetch(upstreamChatUrl(channel.baseUrl), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${channel.apiKey}`,
-        'content-type': 'application/json',
-        accept: payload.stream ? 'text/event-stream' : 'application/json'
-      },
-      body: JSON.stringify(payload),
-      signal
-    })
+    fetchWithCapacityRetry(
+      () =>
+        fetch(upstreamChatUrl(channel.baseUrl), {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${channel.apiKey}`,
+            'content-type': 'application/json',
+            accept: payload.stream ? 'text/event-stream' : 'application/json'
+          },
+          body: JSON.stringify(payload),
+          signal
+        }),
+      { signal }
+    )
   const forcePromptToolEmulation = capability.toolTransport === 'prompt-emulated' && forwardedNames.length > 0
   let emulatedStreamState = null
   let upstream = forcePromptToolEmulation
@@ -2372,7 +2530,7 @@ async function handleResponsesRequest(
       from: 'chat',
       to: 'responses',
       status: upstream.status,
-      message: errorBody.replace(/\s+/g, ' ').trim().slice(0, 240)
+      failureKind: upstreamFailureKind(upstream.status, errorBody)
     }
     const fallbackUpstream = await sendResponsesUpstream()
 
@@ -2396,7 +2554,7 @@ async function handleResponsesRequest(
   }
 
   if (!upstream.ok && forwardedNames.length && upstreamRejectsNativeTools(errorBody)) {
-    const nativeToolError = errorBody
+    const nativeToolFailureKind = upstreamFailureKind(upstream.status, errorBody)
     const emulation = toolEmulationRequest(converted.request)
     const fallbackUpstream = await sendUpstream(emulation.payload)
 
@@ -2569,7 +2727,8 @@ async function handleResponsesRequest(
             ...diagnostic,
             toolTransport: 'prompt-emulated',
             forcedByCompatibilityTest: forcePromptToolEmulation,
-            nativeToolError: nativeToolError.slice(0, 300),
+            nativeToolFailureKind,
+            outcome: 'upstream_accepted',
             emulation: upstream.codexToolEmulation || null
           })
         } catch {
@@ -2583,14 +2742,43 @@ async function handleResponsesRequest(
   }
 
   if (!upstream.ok) {
-    response.writeHead(upstream.status, {
-      'content-type': upstream.headers.get('content-type') || 'text/plain; charset=utf-8'
-    })
-    response.end(errorBody)
+    const failureDiagnostic = {
+      ...upstreamDiagnostic(diagnostic, upstream, errorBody),
+      outcome: 'upstream_error'
+    }
+
+    if (typeof onDiagnostic === 'function') {
+      try {
+        onDiagnostic(failureDiagnostic)
+      } catch {
+        // Diagnostics must never interrupt the model request.
+      }
+    }
+    const userMessage = userFacingUpstreamFailure(
+      failureDiagnostic.upstreamFailureKind,
+      failureDiagnostic.upstreamRetryCount
+    )
+
+    if (userMessage) {
+      response.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify({ error: { type: failureDiagnostic.upstreamFailureKind, message: userMessage } }))
+    } else {
+      response.writeHead(upstream.status, {
+        'content-type': upstream.headers.get('content-type') || 'text/plain; charset=utf-8'
+      })
+      response.end(errorBody)
+    }
     return
   }
 
   reportWireApi('chat')
+  if (!upstream.codexToolEmulation && typeof onDiagnostic === 'function') {
+    try {
+      onDiagnostic({ ...upstreamDiagnostic(diagnostic, upstream), outcome: 'upstream_accepted' })
+    } catch {
+      // Diagnostics must never interrupt the model request.
+    }
+  }
   if (converted.request.stream) {
     await pipeChatStreamToResponses(upstream, body, converted.toolNames, response, emulatedStreamState)
   } else {
@@ -2729,10 +2917,12 @@ module.exports = {
   PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES,
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
+  UPSTREAM_CAPACITY_MAX_RETRIES,
   adaptResponsesRequest,
   coalesceAssistantMessages,
   createProtocolProxy,
   endpointCompatibilityFailure,
+  fetchWithCapacityRetry,
   inferredWireApiForModel,
   modelIdentityLabel,
   modelIdentityInstruction,
@@ -2742,6 +2932,8 @@ module.exports = {
   recoveryFailureKindForStatus,
   recoveryFailureMessage,
   runWithAbortTimeout,
+  upstreamFailureKind,
+  upstreamRejectsNativeTools,
   upstreamModelsUrl,
   wireApiForModel,
   responsesRequestToChat

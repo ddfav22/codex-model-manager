@@ -406,6 +406,9 @@ async function main() {
       const updateButton = Array.from(document.querySelectorAll('button')).find(element =>
         /在线更新|检查更新|重启更新/.test(String(element.textContent || '').trim())
       )
+      const runtimeLogButton = Array.from(document.querySelectorAll('button')).find(
+        element => String(element.textContent || '').trim() === '打开运行日志'
+      )
 
       return {
         bridgeMethods: ['getUpdateState', 'checkForUpdates', 'installUpdate', 'onUpdateState'].map(name => ({
@@ -414,7 +417,9 @@ async function main() {
         })),
         stage: state.stage,
         buttonFound: Boolean(updateButton),
-        buttonDisabled: Boolean(updateButton?.disabled)
+        buttonDisabled: Boolean(updateButton?.disabled),
+        runtimeLogBridge: typeof bridge?.openRuntimeLog,
+        runtimeLogButtonFound: Boolean(runtimeLogButton)
       }
     })()`)
     const onlineLoginDialog = await cdp.evaluate(`(async () => {
@@ -658,6 +663,8 @@ async function main() {
       result.updateSurface?.stage === 'unsupported',
       result.updateSurface?.buttonFound === true,
       result.updateSurface?.buttonDisabled === true,
+      result.updateSurface?.runtimeLogBridge === 'function',
+      result.updateSurface?.runtimeLogButtonFound === true,
       result.onlineLoginDialog?.addOpened === true,
       result.onlineLoginDialog?.newApiSelected === true,
       result.onlineLoginDialog?.dialogFound === true,

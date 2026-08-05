@@ -79,7 +79,8 @@ function toUserFacingErrorMessage(error) {
       text: '当前模型没有可用渠道。请检查在线平台的模型分组和渠道状态，或切换其他模型。'
     },
     {
-      pattern: /selected model is at capacity|model.*(?:at capacity|overloaded)|server_is_overloaded/i,
+      pattern:
+        /currently experiencing high demand|high demand|selected model is at capacity|model.*(?:at capacity|overloaded)|server_is_overloaded/i,
       text: '当前模型使用人数较多，暂时无法响应。请稍后重试，或切换其他模型。'
     },
     {

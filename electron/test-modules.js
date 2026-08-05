@@ -9,9 +9,13 @@ const packageMetadata = require('../package.json')
 const manager = require('./codexManager')
 const {
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
+  UPSTREAM_CAPACITY_MAX_RETRIES,
   adaptResponsesRequest,
+  fetchWithCapacityRetry,
   normalizeResponsesToolItemIds,
-  runWithAbortTimeout
+  runWithAbortTimeout,
+  upstreamFailureKind,
+  upstreamRejectsNativeTools
 } = require('./protocolProxy')
 const { RECOVERY_DECISION, parseAgentRecoveryDecision } = require('./protocol/agentRecoveryDecision')
 const runtimeLogger = require('./runtimeLogger')
@@ -725,6 +729,45 @@ async function main() {
   )
   assert.strictEqual(looksLikeStalledToolContinuation('图片已经生成，见附件。'), false)
   assert.strictEqual(PROMPT_TOOL_RECOVERY_MAX_TOKENS, 4096)
+  assert.strictEqual(UPSTREAM_CAPACITY_MAX_RETRIES, 2)
+  assert.strictEqual(upstreamFailureKind(503, 'Currently experiencing high demand'), 'upstream_capacity')
+  assert.strictEqual(upstreamFailureKind(400, 'context_length_exceeded: too many input tokens'), 'context_too_large')
+  assert.strictEqual(upstreamFailureKind(429, 'quota exceeded'), 'upstream_rate_limit')
+  assert.strictEqual(upstreamRejectsNativeTools('Currently experiencing high demand'), false)
+  assert.strictEqual(upstreamRejectsNativeTools('Tool calls are not supported'), true)
+  let capacityAttempts = 0
+  const recoveredCapacityResponse = await fetchWithCapacityRetry(async () => {
+    capacityAttempts += 1
+
+    if (capacityAttempts < 3) {
+      return new Response(JSON.stringify({ error: { message: 'currently experiencing high demand' } }), {
+        status: 503,
+        headers: { 'content-type': 'application/json', 'retry-after': '0' }
+      })
+    }
+
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+
+  assert.strictEqual(recoveredCapacityResponse.ok, true)
+  assert.strictEqual(capacityAttempts, 3)
+  assert.deepStrictEqual(recoveredCapacityResponse.codexRetryDiagnostic, {
+    retryCount: 2,
+    retryDelayMs: 0,
+    failureKind: ''
+  })
+  let contextAttempts = 0
+  const rejectedContextResponse = await fetchWithCapacityRetry(async () => {
+    contextAttempts += 1
+
+    return new Response(JSON.stringify({ error: { message: 'maximum context length exceeded' } }), {
+      status: 400,
+      headers: { 'content-type': 'application/json', 'retry-after': '0' }
+    })
+  })
+
+  assert.strictEqual(contextAttempts, 1)
+  assert.strictEqual(rejectedContextResponse.codexRetryDiagnostic.failureKind, 'context_too_large')
   assert.deepStrictEqual(parseAgentRecoveryDecision('{"decision":"complete","answer":"文件已经保存。"}'), {
     type: RECOVERY_DECISION.COMPLETE,
     content: '文件已经保存。'
