@@ -577,8 +577,10 @@ function toolEmulationRequest(request) {
       ).length,
       removedControlSignalCount,
       shortContinuationAnchored: continuation.anchored,
+      interruptedContinuationAnchored: continuation.anchored && continuation.interrupted,
       continuationTaskLength: continuation.task.length,
-      continuationAssistantStateLength: continuation.assistantState.length
+      continuationAssistantStateLength: continuation.assistantState.length,
+      continuationToolResultCount: continuation.toolResultCount
     }
   }
 }
@@ -790,15 +792,9 @@ async function synthesizeEmulatedToolResponse(
   const initialToolOmission = toolIntentRequired && !toolCall && !awaitsExplicitUserInput(firstContent)
   const initialStalledContinuation = initialNaturalStall || initialMissingCompletionSignal || initialToolOmission
   const stalledAfterToolResult = followsToolResult && initialStalledContinuation
-  const inferredTerminalCandidate =
-    followsToolResult &&
-    initialMissingCompletionSignal &&
-    !initialNaturalStall &&
-    !initialToolOmission &&
-    !awaitsExplicitUserInput(firstContent) &&
-    !isMalformedToolRecovery(firstContent)
-  const unlimitedRecovery = initialStalledContinuation && !inferredTerminalCandidate
-  const maximumRecoveryAttempts = initialStalledContinuation && inferredTerminalCandidate ? 1 : 0
+  const inferredTerminalCandidate = false
+  const unlimitedRecovery = initialStalledContinuation
+  const maximumRecoveryAttempts = 0
   const maximumRecoveryMs = Math.max(0, Number(options.maximumRecoveryMs || 0)) || Infinity
   const recoveryBudgetStartedAt = Date.now()
   let recoveryAssistant = assistant
@@ -808,7 +804,7 @@ async function synthesizeEmulatedToolResponse(
   let currentMissingCompletionSignal = initialMissingCompletionSignal
   let acceptedRetry = false
   let safetyStopTriggered = false
-  let inferredCompletionAccepted = false
+  const inferredCompletionAccepted = false
   let failedRecoveryAttempts = 0
   let consecutiveRecoveryFailures = 0
   let repeatedRecoveryResponses = 0
@@ -961,26 +957,21 @@ async function synthesizeEmulatedToolResponse(
       recoveryTimeBudgetExhausted)
 
   if (!toolCall && exhaustedRecovery) {
-    if (inferredTerminalCandidate) {
-      assistant = initialAssistant
-      inferredCompletionAccepted = true
-    } else {
-      const finalText = recoveryCircuitBreaker
-        ? recoveryCircuitBreaker === 'consecutive_transport_failures'
-          ? '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
-          : '模型连续返回相同的中间计划，自动续接已暂停；回复“继续”即可从当前任务继续。'
-        : isMalformedToolRecovery(initialAssistant.content)
-          ? 'The upstream model did not produce a valid Codex tool call.'
-          : hasAgentCompletionSignal(initialAssistant.content)
-            ? agentCompletionResult(initialAssistant.content)
-            : String(initialAssistant.content || '').trim()
+    const finalText = recoveryCircuitBreaker
+      ? recoveryCircuitBreaker === 'consecutive_transport_failures'
+        ? '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
+        : '模型连续返回相同的中间计划，自动续接已暂停；回复“继续”即可从当前任务继续。'
+      : isMalformedToolRecovery(initialAssistant.content)
+        ? 'The upstream model did not produce a valid Codex tool call.'
+        : hasAgentCompletionSignal(initialAssistant.content)
+          ? agentCompletionResult(initialAssistant.content)
+          : String(initialAssistant.content || '').trim()
 
-      assistant = {
-        ...initialAssistant,
-        content: publishedProgressMessages.has(finalText) ? '' : finalText
-      }
-      safetyStopTriggered = !awaitsExplicitUserInput(initialAssistant.content)
+    assistant = {
+      ...initialAssistant,
+      content: publishedProgressMessages.has(finalText) ? '' : finalText
     }
+    safetyStopTriggered = !awaitsExplicitUserInput(initialAssistant.content)
   }
   const acceptedCompletionSignal = !toolCall && hasAgentCompletionSignal(assistant.content)
 

@@ -158,3 +158,12 @@ npm run test:installer
 - 完整源码门禁随后通过依赖 dry-run、生产审计 0、格式、diff、语法、lint、类型、modules、core/Agent Loop/中文错误/updater、wire 和 production build；安装器及云端发布门禁仍待执行。
 - 本机完整目录随后通过纯净性、图标和 packaged UI 检查：76 个文件、283,147,799 字节，无 `data`、凭据、日志、缓存或开发文件；UI 668 ms 就绪，版本 1.2.69，0 renderer/console/startup error，不自动启动 Codex。
 - 本机 NSIS 安装包 80,652,074 字节，SHA-256 `78BCA7E18BBCE0C59C9052F0779478937FDA21D866B3FE31B6A3A397E4FFFD75`。真实隔离回归通过自选路径安装、纯净启动、卸载、保留 data 重装、原位更新、自动重启、再次 UI、最终卸载和默认路径安装；两轮 UI 484/652 ms 且 0 错误。仍需最终提交的 main CI 和独立 Release runner 通过后才能发布在线更新。
+
+## 2026-08-05：1.2.70 未签名终局与手动中断续接
+
+- v1.2.69 的 `.230` 现场日志证明长任务保留了最多 77 条消息和 32 组工具结果，但两次在模型快速返回未签名文字后，续接确认约 15 秒超时并进入 `inferredCompletionAccepted=true`；这不是 Python 进程或代理网络整体断线。
+- v1.2.70 删除未签名终局的单次推断接受：所有工具结果后的缺少完成信号回答都进入无固定轮数恢复；连续五次传输失败或五次相同停顿仍熔断，防止离线渠道无限请求。
+- Codex 会在手动停止时写入仅供运行时使用的 `<turn_aborted>` developer 控制消息。适配器现在只在该控制消息位于当前用户轮次之前、且用户以“继续/接着/恢复/重试/往下”开头时，锚定原任务、最近助手状态和已有工具结果；若用户改问新任务则不会错误续接。
+- `<turn_aborted>` 在发给上游前被删除，不进入普通回答或恢复上下文。新增单元和 wire 场景覆盖“安装 Python → 工具结果 → 手动中断 → 继续安装并验证”，并断言下一条标准 `exec` 工具调用产生、原任务与工具结果计数存在、控制标记不可见。
+- 修改前备份标签 `backup-v1.2.69-before-interrupt-continuation-20260805` 指向正式 v1.2.69 提交 `4a22bcb7f7a350b7beb0937e5238f9be9ccc4b5e`。
+- 源码门禁已通过：依赖锁 dry-run、生产依赖审计（0 漏洞）、Prettier、diff/JS 语法、ESLint（0 warning/error）、TypeScript、模块边界、核心/Agent Loop/中文错误/更新器、wire 协议集成和 production build。安装器与云端发布门禁仍待执行。

@@ -6,6 +6,7 @@ const RECOVERY_TAIL_MESSAGES = 8
 const RECOVERY_CONVERSATION_ANCHORS = 4
 const RECOVERY_MESSAGE_CHARS = 3500
 const LEGACY_AGENT_FAILURE_TEXT = '上游模型未能完成剩余步骤，请重试本轮任务。'
+const TURN_ABORTED_PATTERN = /<turn_aborted>[\s\S]*?<\/turn_aborted>/gi
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -29,6 +30,16 @@ function stripAgentControlSignals(content) {
     .trim()
 }
 
+function hasTurnAbortedSignal(content) {
+  return /<turn_aborted\b/i.test(String(content || ''))
+}
+
+function stripTurnAbortedSignal(content) {
+  return String(content || '')
+    .replace(TURN_ABORTED_PATTERN, '')
+    .trim()
+}
+
 function isShortContinuationText(content) {
   const text = stripAgentControlSignals(content)
     .replace(/[。！!？?，,；;：:~～\s]+$/g, '')
@@ -39,8 +50,31 @@ function isShortContinuationText(content) {
   return /^(?:继续|接着|继续吧|接着来|继续做|继续执行|然后呢|往下做|go on|continue|keep going|proceed)$/i.test(text)
 }
 
+function isInterruptedContinuationText(content) {
+  const text = stripAgentControlSignals(content)
+    .replace(/[。！!？?，,；;：:~～\s]+$/g, '')
+    .trim()
+
+  if (!text || text.length > 80) return false
+
+  return /^(?:继续|接着|恢复|重试|往下)/i.test(text)
+}
+
+function hasRecentInterruptedTurn(messages, currentIndex) {
+  for (let index = currentIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    const role = String(message?.role || '').toLowerCase()
+
+    if (hasTurnAbortedSignal(message?.content)) return true
+    if (role === 'user' && !isSyntheticChatUserMessage(message)) return false
+  }
+
+  return false
+}
+
 function anchorShortContinuation(messages) {
-  const source = (Array.isArray(messages) ? messages : []).map(sanitizeChatMessage)
+  const rawSource = Array.isArray(messages) ? messages : []
+  const source = rawSource.map(sanitizeChatMessage)
   let currentIndex = -1
 
   for (let index = source.length - 1; index >= 0; index -= 1) {
@@ -50,8 +84,14 @@ function anchorShortContinuation(messages) {
     break
   }
 
-  if (currentIndex < 0 || !isShortContinuationText(source[currentIndex]?.content)) {
-    return { messages: source, anchored: false, task: '', assistantState: '' }
+  const interrupted = currentIndex >= 0 && hasRecentInterruptedTurn(rawSource, currentIndex)
+  const continuationRequested =
+    currentIndex >= 0 &&
+    (isShortContinuationText(source[currentIndex]?.content) ||
+      (interrupted && isInterruptedContinuationText(source[currentIndex]?.content)))
+
+  if (!continuationRequested) {
+    return { messages: source, anchored: false, interrupted: false, task: '', assistantState: '', toolResultCount: 0 }
   }
 
   let task = ''
@@ -61,14 +101,16 @@ function anchorShortContinuation(messages) {
     const message = source[index]
 
     if (String(message?.role || '').toLowerCase() !== 'user' || isSyntheticChatUserMessage(message)) continue
-    if (isShortContinuationText(message?.content)) continue
+    if (isShortContinuationText(message?.content) || isInterruptedContinuationText(message?.content)) continue
 
     task = truncateContextText(message?.content, 3000)
     taskIndex = index
     break
   }
 
-  if (!task) return { messages: source, anchored: false, task: '', assistantState: '' }
+  if (!task) {
+    return { messages: source, anchored: false, interrupted, task: '', assistantState: '', toolResultCount: 0 }
+  }
 
   let assistantState = ''
 
@@ -82,11 +124,19 @@ function anchorShortContinuation(messages) {
     assistantState = text
     break
   }
+  const toolResultCount = source
+    .slice(taskIndex + 1, currentIndex)
+    .filter(message => String(message?.role || '').toLowerCase() === 'tool').length
 
   const anchor = [
-    '[Codex continuation context: the short user message above means resume the unresolved prior task; it is not a new task.]',
+    interrupted
+      ? '[Codex continuation context: the prior turn was manually interrupted and the latest user message means resume that unresolved task; it is not a new task.]'
+      : '[Codex continuation context: the short user message above means resume the unresolved prior task; it is not a new task.]',
     `Original task: ${task}`,
     assistantState ? `Latest visible assistant state: ${assistantState}` : '',
+    toolResultCount
+      ? `Completed tool results already preserved in this conversation: ${toolResultCount}. Continue from the latest result instead of restarting.`
+      : '',
     'Continue from that exact task state. Do not ask the user to repeat information already present in the conversation.'
   ]
     .filter(Boolean)
@@ -97,7 +147,7 @@ function anchorShortContinuation(messages) {
     content: `${String(source[currentIndex].content || '').trim()}\n\n${anchor}`
   }
 
-  return { messages: source, anchored: true, task, assistantState }
+  return { messages: source, anchored: true, interrupted, task, assistantState, toolResultCount }
 }
 
 function sanitizeChatMessage(message) {
@@ -105,12 +155,13 @@ function sanitizeChatMessage(message) {
 
   const sanitized = { ...message }
 
-  if (typeof message.content === 'string') sanitized.content = stripAgentControlSignals(message.content)
-  else if (Array.isArray(message.content)) {
+  if (typeof message.content === 'string') {
+    sanitized.content = stripTurnAbortedSignal(stripAgentControlSignals(message.content))
+  } else if (Array.isArray(message.content)) {
     sanitized.content = message.content.map(part => {
       if (!part || typeof part !== 'object' || typeof part.text !== 'string') return part
 
-      return { ...part, text: stripAgentControlSignals(part.text) }
+      return { ...part, text: stripTurnAbortedSignal(stripAgentControlSignals(part.text)) }
     })
   }
 
@@ -192,7 +243,9 @@ module.exports = {
   RECOVERY_MESSAGE_CHARS,
   RECOVERY_TAIL_MESSAGES,
   anchorShortContinuation,
+  hasTurnAbortedSignal,
   internalAgentSignalCount,
+  isInterruptedContinuationText,
   isShortContinuationText,
   isSyntheticChatUserMessage,
   recoveryConversationContext,

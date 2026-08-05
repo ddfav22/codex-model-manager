@@ -818,19 +818,29 @@ async function main() {
         return
       }
 
-      if (requestBody.model === 'grok-short-continue-anchor') {
+      if (
+        requestBody.model === 'grok-short-continue-anchor' ||
+        requestBody.model === 'grok-interrupted-continue-anchor'
+      ) {
         const requestText = JSON.stringify(requestBody)
 
-        assert.ok(requestText.includes('Original task: 查询今日金价，并把结果写入桌面文件。'))
-        assert.ok(requestText.includes('Latest visible assistant state: 先查询最新金价。'))
-        assert.ok(!requestText.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
+        if (requestBody.model === 'grok-interrupted-continue-anchor') {
+          assert.ok(requestText.includes('prior turn was manually interrupted'))
+          assert.ok(requestText.includes('Original task: 安装 Python，完成后运行 python --version 验证。'))
+          assert.ok(requestText.includes('Completed tool results already preserved in this conversation: 1'))
+          assert.ok(!requestText.includes('turn_aborted'))
+        } else {
+          assert.ok(requestText.includes('Original task: 查询今日金价，并把结果写入桌面文件。'))
+          assert.ok(requestText.includes('Latest visible assistant state: 先查询最新金价。'))
+          assert.ok(!requestText.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
+        }
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache'
         })
         response.write(
           `data: ${JSON.stringify({
-            id: 'chatcmpl-short-continue-anchor',
+            id: `chatcmpl-${requestBody.model}`,
             object: 'chat.completion.chunk',
             created: Math.floor(Date.now() / 1000),
             model: requestBody.model,
@@ -840,7 +850,9 @@ async function main() {
                 delta: {
                   role: 'assistant',
                   content:
-                    '继续执行：\n```json\n{"tool_call":{"tool":"exec","input":"const result = await tools.web__run({search_query:[{q:\\"今日金价\\"}]}); text(result);"}}\n```'
+                    requestBody.model === 'grok-interrupted-continue-anchor'
+                      ? '继续执行：\n```json\n{"tool_call":{"tool":"exec","input":"const result = await tools.shell_command({command:\\"python --version\\"}); text(result);"}}\n```'
+                      : '继续执行：\n```json\n{"tool_call":{"tool":"exec","input":"const result = await tools.web__run({search_query:[{q:\\"今日金价\\"}]}); text(result);"}}\n```'
                 },
                 finish_reason: null
               }
@@ -1381,6 +1393,7 @@ async function main() {
     'grok-internal-transcript-echo',
     'grok-streamed-internal-transcript',
     'grok-short-continue-anchor',
+    'grok-interrupted-continue-anchor',
     'grok-identity-self-report'
   ]
   const modelCapabilities = Object.fromEntries(
@@ -1405,7 +1418,8 @@ async function main() {
           model === 'grok-streamed-plan-progress' ||
           model === 'grok-internal-transcript-echo' ||
           model === 'grok-streamed-internal-transcript' ||
-          model === 'grok-short-continue-anchor'
+          model === 'grok-short-continue-anchor' ||
+          model === 'grok-interrupted-continue-anchor'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : {
               wireApi: model.startsWith('gpt-native') || model === 'gpt-newapi-chat-only' ? 'responses' : undefined
@@ -1946,6 +1960,65 @@ async function main() {
   assert.strictEqual(shortContinueDiagnostic.emulation.contextContinuity.shortContinuationAnchored, true)
   assert.ok(shortContinueDiagnostic.emulation.contextContinuity.continuationTaskLength > 0)
   upstreamRequests.length = 0
+  const interruptedContinueResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-interrupted-continue-anchor',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '安装 Python，完成后运行 python --version 验证。' }]
+        },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '正在下载安装程序。' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_interrupted_python_download',
+          input: 'download installer'
+        },
+        {
+          type: 'custom_tool_call_output',
+          call_id: 'call_interrupted_python_download',
+          output: 'download complete'
+        },
+        {
+          type: 'message',
+          role: 'developer',
+          content: [
+            {
+              type: 'input_text',
+              text: '<turn_aborted>The user intentionally interrupted the previous turn.</turn_aborted>'
+            }
+          ]
+        },
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '继续安装并验证 Python' }]
+        }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const interruptedContinueStream = await interruptedContinueResponse.text()
+  const interruptedContinueDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(interruptedContinueResponse.status, 200)
+  assert.ok(interruptedContinueStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(interruptedContinueStream.includes('python --version'))
+  assert.ok(!interruptedContinueStream.includes('turn_aborted'))
+  assert.strictEqual(interruptedContinueDiagnostic.emulation.toolCallName, 'exec')
+  assert.strictEqual(interruptedContinueDiagnostic.emulation.contextContinuity.shortContinuationAnchored, true)
+  assert.strictEqual(interruptedContinueDiagnostic.emulation.contextContinuity.interruptedContinuationAnchored, true)
+  assert.strictEqual(interruptedContinueDiagnostic.emulation.contextContinuity.continuationToolResultCount, 1)
+  upstreamRequests.length = 0
   const currentLiveDataResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -2219,7 +2292,8 @@ async function main() {
   assert.strictEqual(completionSignalDiagnostic.missingCompletionSignal, true)
   assert.strictEqual(completionSignalDiagnostic.retryAttempted, true)
   assert.strictEqual(completionSignalDiagnostic.recoveryAttempts, 1)
-  assert.strictEqual(completionSignalDiagnostic.maximumRecoveryAttempts, 1)
+  assert.strictEqual(completionSignalDiagnostic.maximumRecoveryAttempts, 0)
+  assert.strictEqual(completionSignalDiagnostic.unlimitedRecovery, true)
   assert.strictEqual(completionSignalDiagnostic.acceptedRetry, true)
   assert.strictEqual(completionSignalDiagnostic.visibleProgressCount, 0)
   assert.strictEqual(completionSignalDiagnostic.exhausted, false)
@@ -2265,22 +2339,25 @@ async function main() {
   const exhaustedCompletionSignalDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
 
   assert.strictEqual(exhaustedCompletionSignalResponse.status, 200)
-  assert.strictEqual(upstreamRequests.length, 2)
-  assert.strictEqual(exhaustedCompletionSignalRecoveryRequests, 1)
+  assert.strictEqual(upstreamRequests.length, 1 + PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
+  assert.strictEqual(exhaustedCompletionSignalRecoveryRequests, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
   assert.ok(!exhaustedCompletionSignalStream.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
   assert.ok(!exhaustedCompletionSignalStream.includes('[CODEX_AGENT_LOOP_SAFETY_STOP]'))
   assert.ok(!exhaustedCompletionSignalStream.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
-  assert.ok(exhaustedCompletionSignalStream.includes('任务已经完成，文件已保存。'))
+  assert.ok(exhaustedCompletionSignalStream.includes('模型连续返回相同的中间计划'))
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.retryAttempted, true)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, 1)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, 1)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, 0)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.repeatedRecoveryResponses, 5)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryCircuitBreaker, 'identical_stalled_responses')
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedRetry, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.exhausted, true)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.safetyStopAppended, false)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.safetyStopTriggered, false)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.safetyStopTriggered, true)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedCompletionSignal, false)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredTerminalCandidate, true)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredCompletionAccepted, true)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredTerminalCandidate, false)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredCompletionAccepted, false)
   upstreamRequests.length = 0
   const recoveryFailureResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

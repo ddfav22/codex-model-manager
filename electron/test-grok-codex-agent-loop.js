@@ -20,6 +20,7 @@ const {
 const { responsesRequestToChat } = require('./protocolProxy')
 const {
   anchorShortContinuation,
+  isInterruptedContinuationText,
   isShortContinuationText,
   recoveryConversationContext,
   stripAgentControlSignals
@@ -288,6 +289,8 @@ assert.strictEqual(
 )
 assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
+assert.strictEqual(isInterruptedContinuationText('继续安装并验证 Python'), true)
+assert.strictEqual(isInterruptedContinuationText('检查另一个新任务'), false)
 assert.strictEqual(partialControlMarkerStart('Ping 已通。\n<codex_tool_cal'), 'Ping 已通。\n'.length)
 assert.strictEqual(partialControlMarkerStart('仍在处理。\n[CODEX_AGENT_LOOP_COM'), '仍在处理。\n'.length)
 assert.strictEqual(
@@ -313,5 +316,25 @@ assert.strictEqual(anchoredContinuation.anchored, true)
 assert.match(anchoredContinuation.messages.at(-1).content, /Original task: 查询今日金价/)
 assert.match(anchoredContinuation.messages.at(-1).content, /Latest visible assistant state: 先查询最新金价/)
 assert.doesNotMatch(anchoredContinuation.messages.at(-1).content, /上游模型未能完成剩余步骤/)
+
+const interruptedContinuation = anchorShortContinuation([
+  { role: 'user', content: '安装 Python，完成后运行 python --version 验证。' },
+  { role: 'assistant', content: '正在下载安装程序。' },
+  { role: 'tool', tool_call_id: 'call_python_download', content: 'download complete' },
+  {
+    role: 'system',
+    content:
+      '<turn_aborted>The user intentionally interrupted the previous turn. Any running tool processes were stopped.</turn_aborted>'
+  },
+  { role: 'user', content: '继续安装并验证 Python' }
+])
+
+assert.strictEqual(interruptedContinuation.anchored, true)
+assert.strictEqual(interruptedContinuation.interrupted, true)
+assert.strictEqual(interruptedContinuation.toolResultCount, 1)
+assert.match(interruptedContinuation.messages.at(-1).content, /prior turn was manually interrupted/)
+assert.match(interruptedContinuation.messages.at(-1).content, /Original task: 安装 Python/)
+assert.match(interruptedContinuation.messages.at(-1).content, /Completed tool results already preserved.*1/)
+assert.ok(interruptedContinuation.messages.every(message => !String(message.content || '').includes('turn_aborted')))
 
 console.log('Grok Codex Agent Loop adapter tests passed')
