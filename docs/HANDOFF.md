@@ -167,3 +167,5 @@ npm run test:installer
 - `<turn_aborted>` 在发给上游前被删除，不进入普通回答或恢复上下文。新增单元和 wire 场景覆盖“安装 Python → 工具结果 → 手动中断 → 继续安装并验证”，并断言下一条标准 `exec` 工具调用产生、原任务与工具结果计数存在、控制标记不可见。
 - 修改前备份标签 `backup-v1.2.69-before-interrupt-continuation-20260805` 指向正式 v1.2.69 提交 `4a22bcb7f7a350b7beb0937e5238f9be9ccc4b5e`。
 - 源码门禁已通过：依赖锁 dry-run、生产依赖审计（0 漏洞）、Prettier、diff/JS 语法、ESLint（0 warning/error）、TypeScript、模块边界、核心/Agent Loop/中文错误/更新器、wire 协议集成和 production build。安装器与云端发布门禁仍待执行。
+- 完整目录随后通过纯净性、图标和 packaged UI 检查：76 个文件、283,152,684 字节，无凭据、数据、日志、缓存或开发文件；UI 512 ms 就绪，版本 1.2.70，0 renderer/console/startup error，不自动启动 Codex。
+- NSIS 安装包 `ChatGPT-Model-Manager-Setup-1.2.70-x64.exe` 为 80,652,482 字节，SHA-256 `818E95C20D5D749163EC118D80CD84A9803C6FF67E6D7511FB1DA8341C3B1B11`。真实隔离回归通过自选路径安装、纯净启动、卸载、保留 data 重装、原位更新、自动重启、再次 UI、最终卸载和默认路径安装；两轮 UI 498/407 ms 且 0 错误。最终 main CI 与独立 Release runner 仍待执行。
