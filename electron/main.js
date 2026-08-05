@@ -2,6 +2,11 @@ const path = require('path')
 const fs = require('fs')
 const { app, BrowserWindow, dialog, shell, Menu, Tray } = require('electron')
 const packageMetadata = require('../package.json')
+
+// Electron GPU subprocesses can fail before the window is created when this portable
+// build runs from a mapped or network drive. The manager UI does not require WebGL.
+app.disableHardwareAcceleration()
+
 const {
   configurePortableStorage,
   legacyDataMigrationEnabled,
@@ -62,6 +67,7 @@ const appUpdater = createAppUpdater({
 logEvent('info', 'process.start', {
   version: app.getVersion(),
   packaged: app.isPackaged,
+  hardwareAcceleration: 'disabled',
   executable: process.execPath,
   dataRoot: portableStorage.dataRoot,
   logPath: runtimeLogPath

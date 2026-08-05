@@ -139,6 +139,16 @@ async function main() {
     'the runtime window icon must remain available in the packaged app'
   )
   assert.match(mainProcessSource, /assets['"],\s*['"]app-icon\.ico['"]/, 'the window must use the custom icon')
+  assert.match(
+    mainProcessSource,
+    /app\.disableHardwareAcceleration\(\)/,
+    'mapped-drive builds must not require a GPU process'
+  )
+  assert.ok(
+    mainProcessSource.indexOf('app.disableHardwareAcceleration()') <
+      mainProcessSource.indexOf('configurePortableStorage({'),
+    'hardware acceleration must be disabled before Electron runtime initialization'
+  )
   assert.strictEqual(packageMetadata.build?.nsis?.oneClick, false, 'installer must use the assisted wizard')
   assert.strictEqual(
     packageMetadata.build?.nsis?.allowToChangeInstallationDirectory,

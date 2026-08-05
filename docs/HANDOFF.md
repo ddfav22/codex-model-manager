@@ -195,3 +195,9 @@ npm run test:installer
 - 源码提交 `a90caa2fbf81247c103f5a6eb3d7e544beaacb36` 已推送维护分支与 main。完整源码门禁通过依赖锁 dry-run、生产审计 0 漏洞、Prettier、diff/语法、ESLint 0 warning/error、TypeScript、modules、core/Agent Loop/中文错误/updater、wire 和 production build。
 - 完整目录 76 个文件、283,176,238 字节，纯净性、图标和 packaged UI 通过；UI 384 ms 就绪、版本 1.2.74、0 renderer/console/startup error，并确认运行日志按钮与桥接方法存在。
 - 本机 NSIS 安装包 `ChatGPT-Model-Manager-Setup-1.2.74-x64.exe` 为 80,655,431 字节，SHA-256 `A9125D43E54456231D04169FAC38B4520E29D6A585812B955AF9C7E370FC9D7D`；真实隔离安装、保留 data 重装、原位更新、自动重启、两轮 UI（370/374 ms）、卸载和默认路径安装全部通过。云端 CI、正式标签、Release 与稳定目录部署仍待完成。
+
+## 2026-08-05：1.2.75 映射盘 GPU 启动兼容
+
+- v1.2.74 发布并原位部署到稳定映射盘后，首次真实启动复现了 Chromium GPU 子进程连续九次 `error_code=18`，随后 `GPU process isn't usable` 致命退出；这解释了新版程序文件存在但进程和新日志缺失的现场症状。
+- v1.2.75 在 Electron 初始化前调用 `app.disableHardwareAcceleration()`。管理器 UI 不依赖 WebGL，该兼容模式不影响 Codex、模型代理、本地工具或用户数据；`process.start` 同时记录 `hardwareAcceleration=disabled`。
+- 新增模块边界断言，确保禁用硬件加速发生在便携数据目录初始化之前。源码、打包、安装器、云端发布和稳定目录启动日志仍待完整复验。
