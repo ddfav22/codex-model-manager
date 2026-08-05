@@ -450,6 +450,7 @@ async function main() {
   let stalledRecoveryRequests = 0
   let currentLiveRecoveryRequests = 0
   let completionSignalRecoveryRequests = 0
+  let splitCompletionSignalRecoveryRequests = 0
   let exhaustedCompletionSignalRecoveryRequests = 0
   let streamedInternalTranscriptRequests = 0
   let formatFallbackRecoveryRequests = 0
@@ -958,6 +959,43 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-split-completion-signal') {
+        const recovering = requestBody.messages?.some(message =>
+          /recovering a stalled Codex agent turn|bounded recovery attempt/i.test(String(message?.content || ''))
+        )
+        const chunks = recovering
+          ? [
+              JSON.stringify({
+                decision: 'tool',
+                name: 'exec',
+                arguments: {
+                  input:
+                    'const result = await tools.shell_command({command:"Write-Output AUTH_CHECKED"}); text(result);'
+                }
+              })
+            ]
+          : ['网络和 SSH 端口都通，接下来用更稳妥的脚本方式排查认证。', '\n[CODEX_AGENT_LOOP_COM', 'PLETE]']
+
+        if (recovering) splitCompletionSignalRecoveryRequests += 1
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const content of chunks) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-split-completion-signal',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'grok-completion-signal-recovery-failure') {
         const recovering = requestBody.messages?.some(message =>
           /omitted the required completion signal|bounded recovery attempt/i.test(String(message?.content || ''))
@@ -1327,6 +1365,7 @@ async function main() {
     'grok-reject-exec-test',
     'grok-forced-emulation',
     'grok-completion-signal',
+    'grok-split-completion-signal',
     'grok-completion-signal-exhausted',
     'grok-completion-signal-recovery-failure',
     'grok-completion-signal-user-input',
@@ -1351,6 +1390,7 @@ async function main() {
         model,
         model === 'grok-forced-emulation' ||
           model === 'grok-completion-signal' ||
+          model === 'grok-split-completion-signal' ||
           model === 'grok-completion-signal-exhausted' ||
           model === 'grok-completion-signal-recovery-failure' ||
           model === 'grok-completion-signal-user-input' ||
@@ -2079,6 +2119,52 @@ async function main() {
   assert.ok(!streamedTranscript.includes('C:\\\\Users\\\\Tester'))
   assert.ok(!streamedTranscript.includes('response.custom_tool_call_input.done'))
   assert.strictEqual(proxyDiagnostics.at(-1).emulation.internalTranscriptSuppressed, true)
+  upstreamRequests.length = 0
+  const splitCompletionSignalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-split-completion-signal',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Continue checking the remote login.' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_split_completion_signal',
+          input: 'previous check'
+        },
+        {
+          type: 'custom_tool_call_output',
+          call_id: 'call_split_completion_signal',
+          output: 'network and port reachable'
+        }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run nested Codex tools.' }]
+    })
+  })
+  const splitCompletionSignalStream = await splitCompletionSignalResponse.text()
+  const splitCompletionSignalDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+
+  assert.strictEqual(splitCompletionSignalResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.strictEqual(splitCompletionSignalRecoveryRequests, 1)
+  assert.ok(splitCompletionSignalStream.includes('网络和 SSH 端口都通'))
+  assert.ok(splitCompletionSignalStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(!splitCompletionSignalStream.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
+  assert.ok(!splitCompletionSignalStream.includes('[CODEX_AGENT_LOOP_SAFETY_STOP]'))
+  assert.ok(!splitCompletionSignalStream.includes('<codex_tool_call'))
+  assert.strictEqual(splitCompletionSignalDiagnostic.naturalStall, true)
+  assert.strictEqual(splitCompletionSignalDiagnostic.completionSignalPresent, true)
+  assert.strictEqual(splitCompletionSignalDiagnostic.inferredTerminalCandidate, false)
+  assert.strictEqual(splitCompletionSignalDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(splitCompletionSignalDiagnostic.recoveryAttempts, 1)
+  assert.strictEqual(splitCompletionSignalDiagnostic.acceptedRetry, true)
+  assert.strictEqual(splitCompletionSignalDiagnostic.retryProducedToolCall, true)
   upstreamRequests.length = 0
   const completionSignalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

@@ -741,7 +741,7 @@ async function synthesizeEmulatedToolResponse(
     const onContentDelta = (_delta, snapshot) => {
       if (closed) return
       buffer = String(snapshot || buffer)
-      const visible = stripInternalToolTranscript(safeText(true))
+      const visible = stripAgentControlSignals(stripInternalToolTranscript(safeText(true)))
 
       if (!streaming) {
         const stalled = looksLikeStalledToolContinuation(visible, { afterToolResult: followsToolResult })

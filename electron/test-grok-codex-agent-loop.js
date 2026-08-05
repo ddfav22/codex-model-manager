@@ -206,6 +206,12 @@ assert.strictEqual(
   ),
   true
 )
+assert.strictEqual(
+  looksLikeStalledToolContinuation('网络和 SSH 端口都通，接下来用更稳妥的脚本方式排查认证。', {
+    afterToolResult: true
+  }),
+  true
+)
 assert.strictEqual(looksLikeStalledToolContinuation(signedResult, { afterToolResult: true }), false)
 assert.strictEqual(
   shouldAcceptContinuationRecovery({
@@ -283,6 +289,11 @@ assert.strictEqual(
 assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
 assert.strictEqual(partialControlMarkerStart('Ping 已通。\n<codex_tool_cal'), 'Ping 已通。\n'.length)
+assert.strictEqual(partialControlMarkerStart('仍在处理。\n[CODEX_AGENT_LOOP_COM'), '仍在处理。\n'.length)
+assert.strictEqual(
+  emulatedToolSyntaxStart(`仍在处理。\n${AGENT_COMPLETION_SIGNAL}`, { includePartial: true }),
+  '仍在处理。\n'.length
+)
 assert.strictEqual(
   emulatedToolSyntaxStart('Ping 已通。\n<codex_tool_call', { includePartial: true }),
   'Ping 已通。\n'.length

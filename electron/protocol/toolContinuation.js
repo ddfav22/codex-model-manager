@@ -182,9 +182,9 @@ function looksLikePendingMultiStepAction(content) {
     /^(?:first|next|then|after that|i(?:'ll| will| am going to)|let me|continuing|preparing to|planning to)\b/i
   const multiStepSequence = /(?:先|首先|first).{0,260}(?:再|然后|随后|接着|并(?:且)?|next|then|after that).{0,260}/i
   const genericFutureCommitment =
-    /(?:^|[。！？!?\n])\s*(?:我)?(?:接下来|下一步|然后|随后|接着|现在)(?:我)?(?:会|将|准备|打算|需要|继续|先|马上|立即)|^(?:next|then|after that)[,:]?\s+i(?:'ll| will| am going to)\b/i
+    /(?:^|[。！？!?，,；;：:\n])\s*(?:我)?(?:接下来|下一步|然后|随后|接着|现在)(?:我)?(?:会|将|准备|打算|需要|继续|先|马上|立即|用|使用|通过|以|改用|换用|转用|采用|尝试)|^(?:next|then|after that)[,:]?\s+i(?:'ll| will| am going to)\b/i
   const methodSwitchCommitment =
-    /(?:^|[。！？!?\n])\s*(?:我)?(?:改用|换用|转用|尝试使用|采用).{0,160}(?:执行|运行|调用|安装|下载|登录|连接|验证|探测|检查|读取|查询|打开|保存|处理|完成|做|进行)/i
+    /(?:^|[。！？!?，,；;：:\n])\s*(?:我)?(?:改用|换用|转用|尝试使用|采用|接下来(?:用|使用|通过|以)).{0,160}(?:执行|运行|调用|安装|下载|登录|连接|认证|验证|探测|排查|测试|检查|读取|查询|打开|保存|处理|完成|做|进行)/i
 
   return (
     genericFutureCommitment.test(text) ||

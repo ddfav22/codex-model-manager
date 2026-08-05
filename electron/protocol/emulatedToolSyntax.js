@@ -1,4 +1,5 @@
 const { internalToolTranscriptStart } = require('./internalToolTranscript')
+const { AGENT_COMPLETION_SIGNAL, AGENT_SAFETY_STOP_SIGNAL } = require('./toolContinuation')
 
 const STREAM_CONTROL_MARKERS = Object.freeze([
   '<codex_tool_call>',
@@ -7,7 +8,9 @@ const STREAM_CONTROL_MARKERS = Object.freeze([
   '<codex_internal_adapter>',
   '[Codex local tool calls]',
   '[Codex local tool result',
-  '[Codex tool adapter:'
+  '[Codex tool adapter:',
+  AGENT_COMPLETION_SIGNAL,
+  AGENT_SAFETY_STOP_SIGNAL
 ])
 
 function partialControlMarkerStart(content) {
@@ -34,8 +37,10 @@ function partialControlMarkerStart(content) {
 
 function emulatedToolSyntaxStart(content, options = {}) {
   const text = String(content || '')
+  const lowerText = text.toLowerCase()
   const candidates = [
     internalToolTranscriptStart(text),
+    ...STREAM_CONTROL_MARKERS.map(marker => lowerText.indexOf(marker.toLowerCase())),
     text.search(/<codex_(?:tool_call|no_tool)\b/i),
     text.search(/```(?:json)?\s*\{/i),
     text.search(/(?:^|\n)\s*\{\s*"?(?:tool_call|function|name|tool|tool_name)"?\s*:/i)
