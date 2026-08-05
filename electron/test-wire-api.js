@@ -234,7 +234,7 @@ function writeHistoryProviderConfig(configPath, model, proxyBaseUrl, modelCatalo
 }
 
 async function main() {
-  assert.strictEqual(PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS, 15000)
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS, 60000)
   assert.strictEqual(PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS, 0)
   let phase = 'discover-codex'
   const watchdog = setTimeout(() => {
@@ -1042,6 +1042,59 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-delayed-recovery-over-legacy-timeout') {
+        const recovering = requestBody.messages?.some(message =>
+          /bounded recovery attempt/i.test(String(message?.content || ''))
+        )
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        if (!recovering) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-delayed-recovery-initial',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: 'assistant', content: '我接下来会运行安装脚本并验证结果。' },
+                  finish_reason: null
+                }
+              ]
+            })}\n\n`
+          )
+          response.end('data: [DONE]\n\n')
+          return
+        }
+
+        setTimeout(() => {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-delayed-recovery-success',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    content: '{"name":"exec","arguments":{"input":"text(\\"RECOVERED_AFTER_LEGACY_TIMEOUT\\")"}}'
+                  },
+                  finish_reason: null
+                }
+              ]
+            })}\n\n`
+          )
+          response.end('data: [DONE]\n\n')
+        }, 16_000)
+        return
+      }
+
       if (requestBody.model === 'grok-stalled-continuation') {
         const recovering = requestBody.messages?.some(message =>
           /recovering a stalled Codex agent turn|bounded recovery attempt/i.test(String(message?.content || ''))
@@ -1380,6 +1433,7 @@ async function main() {
     'grok-split-completion-signal',
     'grok-completion-signal-exhausted',
     'grok-completion-signal-recovery-failure',
+    'grok-delayed-recovery-over-legacy-timeout',
     'grok-completion-signal-user-input',
     'grok-stalled-continuation',
     'grok-repeated-stall-fuse',
@@ -1406,6 +1460,7 @@ async function main() {
           model === 'grok-split-completion-signal' ||
           model === 'grok-completion-signal-exhausted' ||
           model === 'grok-completion-signal-recovery-failure' ||
+          model === 'grok-delayed-recovery-over-legacy-timeout' ||
           model === 'grok-completion-signal-user-input' ||
           model === 'grok-stalled-continuation' ||
           model === 'grok-repeated-stall-fuse' ||
@@ -2393,7 +2448,8 @@ async function main() {
     })
   })
   const recoveryFailureStream = await recoveryFailureResponse.text()
-  const recoveryFailureDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+  const recoveryFailureEmulation = proxyDiagnostics.at(-1).emulation
+  const recoveryFailureDiagnostic = recoveryFailureEmulation.continuationRecovery
   const recoveryFailureDeltas = recoveryFailureStream
     .split(/\r?\n/)
     .filter(line => line.startsWith('data: {'))
@@ -2409,9 +2465,14 @@ async function main() {
   assert.strictEqual((recoveryFailureDeltas.match(/\[CODEX_AGENT_LOOP_SAFETY_STOP\]/g) || []).length, 0)
   assert.strictEqual((recoveryFailureDeltas.match(/上游模型未能完成剩余步骤，请重试本轮任务。/g) || []).length, 0)
   assert.ok(!recoveryFailureDeltas.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
-  assert.ok(recoveryFailureDeltas.includes('模型渠道连续连接失败'))
+  assert.ok(recoveryFailureDeltas.includes('模型渠道服务暂时不可用'))
+  assert.strictEqual(recoveryFailureEmulation.recoveryAttemptTimeoutMs, 60000)
   assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
   assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
+  assert.deepStrictEqual(
+    recoveryFailureDiagnostic.recoveryFailureKinds,
+    Array(PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES).fill('http_server_error')
+  )
   assert.strictEqual(recoveryFailureDiagnostic.maximumRecoveryAttempts, 0)
   assert.strictEqual(recoveryFailureDiagnostic.unlimitedRecovery, true)
   assert.strictEqual(recoveryFailureDiagnostic.recoveryCircuitBreaker, 'consecutive_transport_failures')
@@ -2421,6 +2482,37 @@ async function main() {
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopAppended, false)
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopTriggered, true)
   assert.strictEqual(recoveryFailureDiagnostic.acceptedCompletionSignal, false)
+  upstreamRequests.length = 0
+  const delayedRecoveryStartedAt = Date.now()
+  const delayedRecoveryResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-delayed-recovery-over-legacy-timeout',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Run the installer script and verify the result.' }]
+        }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const delayedRecoveryStream = await delayedRecoveryResponse.text()
+  const delayedRecoveryElapsedMs = Date.now() - delayedRecoveryStartedAt
+  const delayedRecoveryDiagnostic = proxyDiagnostics.at(-1).emulation
+
+  assert.strictEqual(delayedRecoveryResponse.status, 200)
+  assert.ok(delayedRecoveryElapsedMs >= 15_500)
+  assert.ok(delayedRecoveryElapsedMs < PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS)
+  assert.ok(delayedRecoveryStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(delayedRecoveryStream.includes('RECOVERED_AFTER_LEGACY_TIMEOUT'))
+  assert.strictEqual(delayedRecoveryDiagnostic.continuationRecovery.recoveryAttempts, 1)
+  assert.strictEqual(delayedRecoveryDiagnostic.continuationRecovery.failedRecoveryAttempts, 0)
+  assert.deepStrictEqual(delayedRecoveryDiagnostic.continuationRecovery.recoveryFailureKinds, [])
+  assert.strictEqual(delayedRecoveryDiagnostic.continuationRecovery.retryProducedToolCall, true)
   upstreamRequests.length = 0
   const repeatedStallResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

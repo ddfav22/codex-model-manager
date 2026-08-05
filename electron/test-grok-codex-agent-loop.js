@@ -17,7 +17,12 @@ const {
   relayTestReady,
   supportedModelsForProvider
 } = require('./features/modelAdapters')
-const { responsesRequestToChat } = require('./protocolProxy')
+const {
+  recoveryFailureKindForError,
+  recoveryFailureKindForStatus,
+  recoveryFailureMessage,
+  responsesRequestToChat
+} = require('./protocolProxy')
 const {
   anchorShortContinuation,
   isInterruptedContinuationText,
@@ -43,6 +48,13 @@ const nativeCompatibility = {
   toolTransport: 'native',
   wireApi: 'chat'
 }
+
+assert.strictEqual(recoveryFailureKindForStatus(503), 'http_server_error')
+assert.strictEqual(recoveryFailureKindForStatus(429), 'http_rate_limit')
+assert.strictEqual(recoveryFailureKindForStatus(400), 'http_request_rejected')
+assert.strictEqual(recoveryFailureKindForError(new Error('prompt tool recovery timed out')), 'timeout')
+assert.match(recoveryFailureMessage(['timeout']), /等待 60 秒仍未返回/)
+assert.match(recoveryFailureMessage(['http_server_error']), /服务暂时不可用/)
 
 const profile = modelAdapterProfile('grok-4.5', nativeCompatibility)
 

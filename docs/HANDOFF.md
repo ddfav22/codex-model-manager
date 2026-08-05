@@ -169,3 +169,11 @@ npm run test:installer
 - 源码门禁已通过：依赖锁 dry-run、生产依赖审计（0 漏洞）、Prettier、diff/JS 语法、ESLint（0 warning/error）、TypeScript、模块边界、核心/Agent Loop/中文错误/更新器、wire 协议集成和 production build。安装器与云端发布门禁仍待执行。
 - 完整目录随后通过纯净性、图标和 packaged UI 检查：76 个文件、283,152,684 字节，无凭据、数据、日志、缓存或开发文件；UI 512 ms 就绪，版本 1.2.70，0 renderer/console/startup error，不自动启动 Codex。
 - NSIS 安装包 `ChatGPT-Model-Manager-Setup-1.2.70-x64.exe` 为 80,652,482 字节，SHA-256 `818E95C20D5D749163EC118D80CD84A9803C6FF67E6D7511FB1DA8341C3B1B11`。真实隔离回归通过自选路径安装、纯净启动、卸载、保留 data 重装、原位更新、自动重启、再次 UI、最终卸载和默认路径安装；两轮 UI 498/407 ms 且 0 错误。最终 main CI 与独立 Release runner 仍待执行。
+
+## 2026-08-05：1.2.71 Grok 恢复超时修复
+
+- `.230` 的 v1.2.70 日志中两次 `consecutive_transport_failures` 实际集中命中 15 秒固定上限；成功恢复样本也耗时 14.238 秒，因此根因是长上下文推理被过早中止，不是五次明确渠道错误。
+- v1.2.71 将单次恢复等待改为 60 秒，同时在不记录响应正文、地址或凭据的前提下增加 `timeout`、`http_rate_limit`、`http_server_error`、`http_request_rejected` 和 `transport_error` 诊断分类；熔断提示按类别给出中文下一步。
+- 新增真实延迟 16 秒的 wire 场景，断言旧 15 秒边界后仍产生标准 `exec` 工具调用、失败计数为 0、不会触发熔断。修改前备份标签 `backup-v1.2.70-before-recovery-timeout-20260805` 指向正式 v1.2.70 提交 `5f8e2bf7d1f5cdbc5d4fd7bb3ee8738a197b6e44`。
+- 完整源码门禁通过依赖 dry-run、生产审计 0、格式/diff/语法、lint 0、类型、modules、core/Agent Loop/中文错误/updater、50 秒 wire 和 production build。完整目录 76 个文件、283,157,079 字节，纯净性、图标和 packaged UI 通过，UI 371 ms、0 错误、不自动启动 Codex。
+- 本机 NSIS 安装包 80,653,053 字节，SHA-256 `6CC6FB4940636EE5711FAA66874CEE80107C9C5B5B1972A66D7FDFE47A7971EC`；真实隔离安装、保留 data 更新、自动重启、两轮 UI（385/380 ms）与卸载全部通过。远端部署与现场日志验证尚待执行。

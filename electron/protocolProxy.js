@@ -59,11 +59,49 @@ const {
   recoveryDecisionContract
 } = require('./protocol/agentRecoveryDecision')
 
-const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 15_000
+const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 60_000
 const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 0
 const PROMPT_TOOL_RECOVERY_MAX_TOKENS = 4096
 const PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES = 5
 const PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES = 5
+
+function recoveryFailureKindForStatus(status) {
+  const code = Number(status || 0)
+
+  if (code === 408 || code === 504) return 'http_timeout'
+  if (code === 429) return 'http_rate_limit'
+  if (code >= 500) return 'http_server_error'
+  if (code >= 400) return 'http_request_rejected'
+
+  return 'invalid_upstream_response'
+}
+
+function recoveryFailureKindForError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+
+  if (error?.name === 'AbortError' || /timed?\s*out|timeout|aborted/.test(message)) return 'timeout'
+
+  return 'transport_error'
+}
+
+function recoveryFailureMessage(failureKinds) {
+  const kinds = Array.isArray(failureKinds) ? failureKinds : []
+
+  if (kinds.includes('timeout') || kinds.includes('http_timeout')) {
+    return '模型续接等待 60 秒仍未返回，自动重试已暂停；渠道恢复后回复“继续”即可从当前任务继续。'
+  }
+  if (kinds.includes('http_rate_limit')) {
+    return '模型渠道当前请求过多，自动重试已暂停；稍后回复“继续”即可从当前任务继续。'
+  }
+  if (kinds.includes('http_server_error')) {
+    return '模型渠道服务暂时不可用，自动重试已暂停；服务恢复后回复“继续”即可从当前任务继续。'
+  }
+  if (kinds.includes('http_request_rejected')) {
+    return '模型渠道拒绝了续接请求，请检查渠道与模型配置后回复“继续”。'
+  }
+
+  return '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
+}
 
 async function runWithAbortTimeout(parentSignal, timeoutMs, task) {
   const controller = new AbortController()
@@ -811,6 +849,7 @@ async function synthesizeEmulatedToolResponse(
   let previousRecoveryFingerprint = ''
   let recoveryCircuitBreaker = ''
   const recoveryRequestMs = []
+  const recoveryFailureKinds = []
   const recoveryDecisionKinds = []
   const publishProgress = content => {
     const text = visibleAssistantText(content)
@@ -839,6 +878,7 @@ async function synthesizeEmulatedToolResponse(
     if (currentNaturalStall) publishProgress(recoveryAssistant.content)
     recoveryAttempts += 1
     const recoveryStartedAt = Date.now()
+    const failureCountBeforeAttempt = recoveryFailureKinds.length
     const remainingRecoveryMs = Number.isFinite(maximumRecoveryMs)
       ? Math.max(1, maximumRecoveryMs - (recoveryStartedAt - recoveryBudgetStartedAt))
       : 0
@@ -855,12 +895,18 @@ async function synthesizeEmulatedToolResponse(
       unlimitedRecovery,
       consecutiveFailedAttempts: consecutiveRecoveryFailures,
       remainingRecoveryMs,
+      recordFailure: kind => {
+        const normalized = String(kind || '').trim()
+
+        if (normalized) recoveryFailureKinds.push(normalized)
+      },
       onContentDelta: retryProgressObserver.onContentDelta
     })
     retryProgressObserver.finish(retried?.content)
     recoveryRequestMs.push(Date.now() - recoveryStartedAt)
 
     if (!retried) {
+      if (recoveryFailureKinds.length === failureCountBeforeAttempt) recoveryFailureKinds.push('unknown')
       failedRecoveryAttempts += 1
       consecutiveRecoveryFailures += 1
       if (unlimitedRecovery && consecutiveRecoveryFailures >= PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES) {
@@ -959,7 +1005,7 @@ async function synthesizeEmulatedToolResponse(
   if (!toolCall && exhaustedRecovery) {
     const finalText = recoveryCircuitBreaker
       ? recoveryCircuitBreaker === 'consecutive_transport_failures'
-        ? '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
+        ? recoveryFailureMessage(recoveryFailureKinds)
         : '模型连续返回相同的中间计划，自动续接已暂停；回复“继续”即可从当前任务继续。'
       : isMalformedToolRecovery(initialAssistant.content)
         ? 'The upstream model did not produce a valid Codex tool call.'
@@ -1002,6 +1048,7 @@ async function synthesizeEmulatedToolResponse(
     retryContentLength: retryContent.length,
     initialResponseMs,
     recoveryRequestMs,
+    recoveryAttemptTimeoutMs: PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
     totalSynthesisMs: Date.now() - synthesisStartedAt,
     retryStartsWithJson: /^\s*{/.test(retryContent),
     toolCallName: toolCall?.function?.name || '',
@@ -1024,6 +1071,7 @@ async function synthesizeEmulatedToolResponse(
       retryAttempted: recoveryAttempts > 0,
       recoveryAttempts,
       failedRecoveryAttempts,
+      recoveryFailureKinds,
       consecutiveRecoveryFailures,
       maximumRecoveryAttempts,
       unlimitedRecovery,
@@ -2438,7 +2486,10 @@ async function handleResponsesRequest(
                         onContentDelta: retryContext.onContentDelta
                       })
                     }
+                    retryContext.recordFailure?.(recoveryFailureKindForStatus(compatibleRetryUpstream.status))
                     await readResponseTextLimited(compatibleRetryUpstream)
+                  } else {
+                    retryContext.recordFailure?.(recoveryFailureKindForStatus(retryUpstream.status))
                   }
 
                   return null
@@ -2446,6 +2497,7 @@ async function handleResponsesRequest(
               )
             } catch (error) {
               if (upstreamSignal.aborted) throw error
+              retryContext.recordFailure?.(recoveryFailureKindForError(error))
               return null
             }
           },
@@ -2666,6 +2718,9 @@ module.exports = {
   modelIdentityInstruction,
   normalizeCompactionInput,
   normalizeResponsesToolItemIds,
+  recoveryFailureKindForError,
+  recoveryFailureKindForStatus,
+  recoveryFailureMessage,
   runWithAbortTimeout,
   upstreamModelsUrl,
   wireApiForModel,
