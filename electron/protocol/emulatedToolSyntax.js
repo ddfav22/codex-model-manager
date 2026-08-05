@@ -2,6 +2,9 @@ const { internalToolTranscriptStart } = require('./internalToolTranscript')
 const { AGENT_COMPLETION_SIGNAL, AGENT_SAFETY_STOP_SIGNAL } = require('./toolContinuation')
 
 const STREAM_CONTROL_MARKERS = Object.freeze([
+  '<!doctype html',
+  '<html',
+  '<script',
   '<codex_tool_call>',
   '<codex_no_tool>',
   '<codex_internal_tool_history>',

@@ -53,6 +53,7 @@ const {
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
 const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
+const { normalizeVisibleAssistantText, sanitizeVisibleAssistantDelta } = require('./protocol/visibleAssistantText')
 const {
   RECOVERY_DECISION,
   parseAgentRecoveryDecision,
@@ -758,7 +759,8 @@ async function synthesizeEmulatedToolResponse(
   const sourceFollowsToolResult = followsImmediateResponsesToolResult(sourceInput)
   const followsToolResult = convertedFollowsToolResult || sourceFollowsToolResult
   const likelyRequiresTool = requestLikelyRequiresTool(request?.messages, allowed)
-  const visibleAssistantText = content => stripInternalToolTranscript(stripAgentControlSignals(content)).trim()
+  const visibleAssistantText = content =>
+    normalizeVisibleAssistantText(stripInternalToolTranscript(stripAgentControlSignals(content)))
   const rememberProgress = content => {
     const text = visibleAssistantText(content)
 
@@ -781,9 +783,12 @@ async function synthesizeEmulatedToolResponse(
     const onContentDelta = (_delta, snapshot) => {
       if (closed) return
       buffer = String(snapshot || buffer)
-      const visible = stripAgentControlSignals(stripInternalToolTranscript(safeText(true)))
+      const visible = normalizeVisibleAssistantText(
+        stripAgentControlSignals(stripInternalToolTranscript(safeText(true)))
+      )
 
       if (!streaming) {
+        if (!visible) return
         const stalled = looksLikeStalledToolContinuation(visible, { afterToolResult: followsToolResult })
 
         if (!stalled || !onProgressStart || !onProgressDelta || !onProgressEnd) return
@@ -1400,7 +1405,7 @@ function consumeChatChunk(state, chunk) {
 
   for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
     const delta = choice.delta || {}
-    const text = typeof delta.content === 'string' ? delta.content : ''
+    const text = typeof delta.content === 'string' ? sanitizeVisibleAssistantDelta(delta.content) : ''
 
     if (text) {
       ensureTextStarted(state)
@@ -1614,8 +1619,10 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
   const message = chat.choices?.[0]?.message || {}
 
   if (message.content) {
-    state.textStarted = true
-    state.text = typeof message.content === 'string' ? message.content : textFromContent(message.content)
+    state.text = normalizeVisibleAssistantText(
+      typeof message.content === 'string' ? message.content : textFromContent(message.content)
+    )
+    state.textStarted = Boolean(state.text)
   }
   for (const chatTool of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
     const tool = toolStateFor(state, chatTool)

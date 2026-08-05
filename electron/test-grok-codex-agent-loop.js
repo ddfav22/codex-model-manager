@@ -39,6 +39,11 @@ const {
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
 const { emulatedToolSyntaxStart, partialControlMarkerStart } = require('./protocol/emulatedToolSyntax')
+const {
+  decodeRepeatedEscapedLineBreaks,
+  normalizeVisibleAssistantText,
+  stripToolHtmlScaffold
+} = require('./protocol/visibleAssistantText')
 
 const nativeCompatibility = {
   ok: true,
@@ -316,6 +321,33 @@ assert.strictEqual(
 assert.strictEqual(
   emulatedToolSyntaxStart('Ping 已通。\n<codex_tool_call>{"name":"exec"}', { includePartial: false }),
   'Ping 已通。\n'.length
+)
+
+assert.strictEqual(emulatedToolSyntaxStart('<!DOCTYPE html>\n<html>', { includePartial: true }), 0)
+assert.strictEqual(normalizeVisibleAssistantText('\\n\\n\\n\\n'), '')
+assert.strictEqual(normalizeVisibleAssistantText('"\\n\\n\\n\\n"'), '')
+assert.strictEqual(normalizeVisibleAssistantText('first\\n\\n\\nsecond'), 'first\n\nsecond')
+assert.strictEqual(
+  decodeRepeatedEscapedLineBreaks('```js\nconst value = "\\n\\n"\n```'),
+  '```js\nconst value = "\\n\\n"\n```'
+)
+const rawHtmlToolScaffold = `<!DOCTYPE html>
+<html><head><script>async function run() {
+  const tools = globalThis.tools
+  return tools.shell_command({ command: 'python --version' })
+}</script></head><body></body></html>
+VISIBLE_PROGRESS`
+
+assert.strictEqual(stripToolHtmlScaffold(rawHtmlToolScaffold).trim(), 'VISIBLE_PROGRESS')
+assert.strictEqual(
+  normalizeVisibleAssistantText(
+    `${rawHtmlToolScaffold}\n<codex_tool_call>{"name":"exec","arguments":{"input":"text(1)"}}</codex_tool_call>`
+  ),
+  'VISIBLE_PROGRESS'
+)
+assert.strictEqual(
+  normalizeVisibleAssistantText('<!DOCTYPE html><html><body>NORMAL_HTML_ANSWER</body></html>'),
+  '<!DOCTYPE html><html><body>NORMAL_HTML_ANSWER</body></html>'
 )
 
 const anchoredContinuation = anchorShortContinuation([
