@@ -192,3 +192,6 @@ npm run test:installer
 - 两个近期长任务最新单次输入约 124,825/172,263 token，均低于 258,400 上下文窗口；`high demand` 应按上游容量繁忙处理，不能据此断定输入越界。
 - v1.2.74 移除 `high demand` 的工具不兼容误分类，容量错误最多退避重试两次；容量耗尽和上下文过大使用不同中文提示。日志新增脱敏状态、类别、重试与请求大小，并在主界面提供“打开运行日志”。
 - 模块、14 个中文错误案例、TypeScript、ESLint 和 wire 集成测试已通过；wire 覆盖两次容量失败后恢复、三次容量失败后停止，以及上下文过大立即返回且不重试。其余源码、打包、安装器和发布门禁待继续执行。
+- 源码提交 `a90caa2fbf81247c103f5a6eb3d7e544beaacb36` 已推送维护分支与 main。完整源码门禁通过依赖锁 dry-run、生产审计 0 漏洞、Prettier、diff/语法、ESLint 0 warning/error、TypeScript、modules、core/Agent Loop/中文错误/updater、wire 和 production build。
+- 完整目录 76 个文件、283,176,238 字节，纯净性、图标和 packaged UI 通过；UI 384 ms 就绪、版本 1.2.74、0 renderer/console/startup error，并确认运行日志按钮与桥接方法存在。
+- 本机 NSIS 安装包 `ChatGPT-Model-Manager-Setup-1.2.74-x64.exe` 为 80,655,431 字节，SHA-256 `A9125D43E54456231D04169FAC38B4520E29D6A585812B955AF9C7E370FC9D7D`；真实隔离安装、保留 data 重装、原位更新、自动重启、两轮 UI（370/374 ms）、卸载和默认路径安装全部通过。云端 CI、正式标签、Release 与稳定目录部署仍待完成。
