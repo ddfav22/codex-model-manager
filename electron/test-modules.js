@@ -47,6 +47,7 @@ const {
   portableStoragePaths,
   previousPortableDataRoots
 } = require('./runtime/portableStorage')
+const { startupCompatibility, windowsDriveType } = require('./runtime/startupCompatibility')
 const {
   cacheControlForTarget,
   isPathInsideRoot,
@@ -148,6 +149,54 @@ async function main() {
     mainProcessSource.indexOf('app.disableHardwareAcceleration()') <
       mainProcessSource.indexOf('configurePortableStorage({'),
     'hardware acceleration must be disabled before Electron runtime initialization'
+  )
+  assert.match(
+    mainProcessSource,
+    /app\.commandLine\.appendSwitch\(['"]no-sandbox['"]\)/,
+    'network-drive startup must activate the verified Chromium compatibility switch'
+  )
+  assert.ok(
+    mainProcessSource.indexOf("app.commandLine.appendSwitch('no-sandbox')") <
+      mainProcessSource.indexOf('configurePortableStorage({'),
+    'the network-drive sandbox compatibility switch must be set before Electron runtime initialization'
+  )
+
+  const fakeDriveTypeRunner = value => (_command, args, options) => {
+    assert.ok(args.includes('-NoProfile'), 'drive detection must not load the user PowerShell profile')
+    assert.strictEqual(options.windowsHide, true, 'drive detection must not flash a console window')
+    assert.strictEqual(options.timeout, 3000, 'drive detection must have a bounded startup timeout')
+    return { status: 0, stdout: `${value}\n` }
+  }
+  assert.strictEqual(
+    windowsDriveType('K:\\Apps\\Manager.exe', { platform: 'win32', runner: fakeDriveTypeRunner(4) }),
+    4,
+    'Windows network drives must be detected'
+  )
+  assert.deepStrictEqual(
+    startupCompatibility('C:\\Apps\\Manager.exe', { platform: 'win32', runner: fakeDriveTypeRunner(3) }),
+    {
+      driveType: 3,
+      networkDrive: false,
+      disableHardwareAcceleration: true,
+      disableChromiumSandbox: false
+    },
+    'local drives must retain the Chromium sandbox'
+  )
+  assert.strictEqual(
+    startupCompatibility('K:\\Apps\\Manager.exe', {
+      platform: 'win32',
+      runner: fakeDriveTypeRunner(4)
+    }).disableChromiumSandbox,
+    true,
+    'only detected network drives should disable the Chromium sandbox'
+  )
+  assert.strictEqual(
+    startupCompatibility('K:\\Apps\\Manager.exe', {
+      platform: 'win32',
+      runner: () => ({ status: 1, stdout: '' })
+    }).disableChromiumSandbox,
+    false,
+    'drive detection failures must fail closed and retain the Chromium sandbox'
   )
   assert.strictEqual(packageMetadata.build?.nsis?.oneClick, false, 'installer must use the assisted wizard')
   assert.strictEqual(

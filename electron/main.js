@@ -2,10 +2,15 @@ const path = require('path')
 const fs = require('fs')
 const { app, BrowserWindow, dialog, shell, Menu, Tray } = require('electron')
 const packageMetadata = require('../package.json')
+const { startupCompatibility } = require('./runtime/startupCompatibility')
 
 // Electron GPU subprocesses can fail before the window is created when this portable
 // build runs from a mapped or network drive. The manager UI does not require WebGL.
-app.disableHardwareAcceleration()
+const startupMode = startupCompatibility(process.execPath)
+if (startupMode.disableHardwareAcceleration) app.disableHardwareAcceleration()
+// Electron's Chromium child-process sandbox cannot launch from some Windows mapped
+// drives (error_code=18). Keep it enabled everywhere except a detected network drive.
+if (startupMode.disableChromiumSandbox) app.commandLine.appendSwitch('no-sandbox')
 
 const {
   configurePortableStorage,
@@ -67,7 +72,9 @@ const appUpdater = createAppUpdater({
 logEvent('info', 'process.start', {
   version: app.getVersion(),
   packaged: app.isPackaged,
-  hardwareAcceleration: 'disabled',
+  hardwareAcceleration: startupMode.disableHardwareAcceleration ? 'disabled' : 'enabled',
+  chromiumSandbox: startupMode.disableChromiumSandbox ? 'disabled-network-drive' : 'enabled',
+  executableDriveType: startupMode.driveType,
   executable: process.execPath,
   dataRoot: portableStorage.dataRoot,
   logPath: runtimeLogPath
