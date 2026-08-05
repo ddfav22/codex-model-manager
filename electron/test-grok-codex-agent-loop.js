@@ -39,6 +39,7 @@ const {
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
 const { emulatedToolSyntaxStart, partialControlMarkerStart } = require('./protocol/emulatedToolSyntax')
+const { encodedToolFrameStart, parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
 const {
   decodeRepeatedEscapedLineBreaks,
   normalizeVisibleAssistantText,
@@ -349,6 +350,31 @@ assert.strictEqual(
   normalizeVisibleAssistantText('<!DOCTYPE html><html><body>NORMAL_HTML_ANSWER</body></html>'),
   '<!DOCTYPE html><html><body>NORMAL_HTML_ANSWER</body></html>'
 )
+const encodedToolTranscript =
+  'Network ready.0xa0a1e0exec0xa1input0xa2const r = await tools.shell_command({command:"python --version"}); text(r);' +
+  '0xa0a1e1wait0xa1cell_id0xa22000xa1yield-time-ms0xa215000'
+const encodedFrames = parseEncodedToolFrames(encodedToolTranscript)
+
+assert.strictEqual(encodedToolFrameStart(encodedToolTranscript), 'Network ready.'.length)
+assert.strictEqual(emulatedToolSyntaxStart(encodedToolTranscript, { includePartial: true }), 'Network ready.'.length)
+assert.strictEqual(encodedFrames.length, 2)
+assert.deepStrictEqual(encodedFrames[0], {
+  name: 'exec',
+  arguments: {
+    input: 'const r = await tools.shell_command({command:"python --version"}); text(r);'
+  }
+})
+assert.deepStrictEqual(encodedFrames[1], {
+  name: 'wait',
+  arguments: { cell_id: '200', yield_time_ms: 15000 }
+})
+assert.deepStrictEqual(parseEncodedToolFrames('0xa0a1e2wait0xa1cell_id0xa23000xa1terminate0xa2true'), [
+  { name: 'wait', arguments: { cell_id: '300', terminate: true } }
+])
+assert.deepStrictEqual(parseEncodedToolFrames('0xa0a1e0exec'), [])
+assert.deepStrictEqual(parseEncodedToolFrames('0xa0a1e0bad/name0xa1input0xa2ignored'), [])
+assert.strictEqual(normalizeVisibleAssistantText(encodedToolTranscript), 'Network ready.')
+assert.strictEqual(partialControlMarkerStart('Network ready.0xa0a1'), 'Network ready.'.length)
 
 const anchoredContinuation = anchorShortContinuation([
   { role: 'user', content: '查询今日金价，并把结果写入桌面文件。' },

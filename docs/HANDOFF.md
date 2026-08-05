@@ -177,3 +177,9 @@ npm run test:installer
 - 新增真实延迟 16 秒的 wire 场景，断言旧 15 秒边界后仍产生标准 `exec` 工具调用、失败计数为 0、不会触发熔断。修改前备份标签 `backup-v1.2.70-before-recovery-timeout-20260805` 指向正式 v1.2.70 提交 `5f8e2bf7d1f5cdbc5d4fd7bb3ee8738a197b6e44`。
 - 完整源码门禁通过依赖 dry-run、生产审计 0、格式/diff/语法、lint 0、类型、modules、core/Agent Loop/中文错误/updater、50 秒 wire 和 production build。完整目录 76 个文件、283,157,079 字节，纯净性、图标和 packaged UI 通过，UI 371 ms、0 错误、不自动启动 Codex。
 - 本机 NSIS 安装包 80,653,053 字节，SHA-256 `6CC6FB4940636EE5711FAA66874CEE80107C9C5B5B1972A66D7FDFE47A7971EC`；真实隔离安装、保留 data 更新、自动重启、两轮 UI（385/380 ms）与卸载全部通过。远端部署与现场日志验证尚待执行。
+
+## 2026-08-05：1.2.73 编码工具帧兼容
+
+- 上游 `0xa0a1e…0xa1…0xa2…` 内部工具帧现在会被解析为当前请求允许的标准 Codex 工具事件，并在完整/部分 SSE 边界和可见文本层隐藏；不会执行同一答复中预写的后续陈旧步骤。
+- 修复初始草稿把 `input` 贪婪读成 `input0x` 的缺陷。单元测试覆盖 exec/wait、参数类型、无字段和非法名称，wire 测试覆盖四分片工具帧的完整转换与不可见性。
+- 版本递增至 1.2.73；依赖、格式、语法、lint、类型、模块、核心、Agent Loop、中文错误、更新器、wire 与 production build 已通过，安装包和发布门禁仍待执行。

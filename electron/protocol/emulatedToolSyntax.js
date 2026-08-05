@@ -1,7 +1,9 @@
 const { internalToolTranscriptStart } = require('./internalToolTranscript')
 const { AGENT_COMPLETION_SIGNAL, AGENT_SAFETY_STOP_SIGNAL } = require('./toolContinuation')
+const { ENCODED_TOOL_FRAME_MARKERS, encodedToolFrameStart } = require('./encodedToolFrames')
 
 const STREAM_CONTROL_MARKERS = Object.freeze([
+  ...ENCODED_TOOL_FRAME_MARKERS,
   '<!doctype html',
   '<html',
   '<script',
@@ -42,6 +44,7 @@ function emulatedToolSyntaxStart(content, options = {}) {
   const text = String(content || '')
   const lowerText = text.toLowerCase()
   const candidates = [
+    encodedToolFrameStart(text),
     internalToolTranscriptStart(text),
     ...STREAM_CONTROL_MARKERS.map(marker => lowerText.indexOf(marker.toLowerCase())),
     text.search(/<codex_(?:tool_call|no_tool)\b/i),

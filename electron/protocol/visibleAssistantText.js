@@ -45,6 +45,7 @@ function sanitizeVisibleAssistantDelta(content) {
   let text = decodeJsonString(content)
 
   text = stripToolHtmlScaffold(text)
+    .replace(/(?:0x)?a0a1e\d+[a-zA-Z_][\s\S]*$/gi, '')
     .replace(/<codex_tool_call\b[^>]*>[\s\S]*?<\/codex_tool_call\s*>/gi, '')
     .replace(/<codex_tool_call\b[^>]*>[\s\S]*$/gi, '')
     .replace(/<codex_no_tool\b[^>]*>[\s\S]*?<\/codex_no_tool\s*>/gi, '')

@@ -833,6 +833,33 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-encoded-tool-frame') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        const chunks = [
+          '0xa0',
+          'a1e0ex',
+          'ec0xa1in',
+          'put0xa2const result = await tools.shell_command({command:"python --version"}); text(result);'
+        ]
+
+        for (const content of chunks) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-encoded-tool-frame',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'grok-streamed-internal-transcript') {
         streamedInternalTranscriptRequests += 1
         const recovering = streamedInternalTranscriptRequests > 1
@@ -1491,6 +1518,7 @@ async function main() {
     'grok-internal-transcript-echo',
     'grok-escaped-whitespace',
     'grok-html-tool-scaffold',
+    'grok-encoded-tool-frame',
     'grok-streamed-internal-transcript',
     'grok-short-continue-anchor',
     'grok-interrupted-continue-anchor',
@@ -1520,6 +1548,7 @@ async function main() {
           model === 'grok-internal-transcript-echo' ||
           model === 'grok-escaped-whitespace' ||
           model === 'grok-html-tool-scaffold' ||
+          model === 'grok-encoded-tool-frame' ||
           model === 'grok-streamed-internal-transcript' ||
           model === 'grok-short-continue-anchor' ||
           model === 'grok-interrupted-continue-anchor'
@@ -2312,6 +2341,31 @@ async function main() {
   assert.ok(!htmlToolScaffoldStream.includes('python --version'))
   assert.ok(!htmlToolScaffoldStream.includes('<codex_tool_call'))
   assert.ok(!htmlToolScaffoldStream.includes('"phase":"commentary"'))
+  upstreamRequests.length = 0
+  const encodedToolFrameResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-encoded-tool-frame',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Check the installed Python version.' }]
+        }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const encodedToolFrameStream = await encodedToolFrameResponse.text()
+
+  assert.strictEqual(encodedToolFrameResponse.status, 200)
+  assert.ok(encodedToolFrameStream.includes('response.custom_tool_call_input.done'), encodedToolFrameStream)
+  assert.ok(encodedToolFrameStream.includes('python --version'))
+  assert.ok(!encodedToolFrameStream.includes('0xa0a1e'))
+  assert.ok(!encodedToolFrameStream.includes('0xa1input'))
+  assert.strictEqual(proxyDiagnostics.at(-1).emulation.toolCallName, 'exec')
   upstreamRequests.length = 0
   const streamedTranscriptResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

@@ -53,6 +53,7 @@ const {
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
 const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
+const { parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
 const { normalizeVisibleAssistantText, sanitizeVisibleAssistantDelta } = require('./protocol/visibleAssistantText')
 const {
   RECOVERY_DECISION,
@@ -685,6 +686,18 @@ function firstBalancedJsonObject(text) {
 
 function parseEmulatedToolCall(content, allowed) {
   const text = String(content || '').slice(0, 1024 * 1024)
+  const encodedFrame = parseEncodedToolFrames(text).find(frame => allowed.has(frame.name))
+
+  if (encodedFrame) {
+    return {
+      id: `call_${randomUUID().replace(/-/g, '')}`,
+      type: 'function',
+      function: {
+        name: encodedFrame.name,
+        arguments: normalizeEmulatedToolArguments(encodedFrame.name, encodedFrame.arguments).slice(0, 1024 * 1024)
+      }
+    }
+  }
   const marker = text.match(/<codex_tool_call>\s*([\s\S]{1,1048576}?)\s*<\/codex_tool_call>/i)
   const fenced = text.match(/```(?:json)?\s*([\s\S]{1,1048576}?)\s*```/i)
   const candidates = [
