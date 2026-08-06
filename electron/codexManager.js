@@ -41,6 +41,16 @@ const {
   testForModel,
   uniqueModelList
 } = require('./features/modelAdapters')
+const {
+  TASK_RECOVERY_PROMPT,
+  normalizeTaskId,
+  recoveryFailureCategory,
+  recoveryFailureMessage,
+  redactedTaskId,
+  shouldForkAfterFailure,
+  startCodexExecRecovery,
+  taskRecoveryWorkspaceSnapshot
+} = require('./features/taskRecovery')
 const { version: APP_VERSION } = require('../package.json')
 
 const APP_STATE_DIRNAME = 'codex-model-manager'
@@ -85,6 +95,7 @@ const CODEX_AGENT_BASE_INSTRUCTIONS = [
 let codexTargetsCache = { expiresAt: 0, targets: [], appLaunchers: [] }
 let codexInstallationEvidenceCache = { expiresAt: 0, evidence: null }
 const sessionMetaCache = new Map()
+const activeTaskRecoveries = new Map()
 
 function execFileText(file, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -6452,6 +6463,232 @@ function restartCodex(options = {}) {
   return { ok: false, target, targets, appId, afterStopResult, error: restartErrorMessage(lastError) }
 }
 
+async function inspectCodexTaskRecovery(taskId, options = {}) {
+  const normalizedTaskId = normalizeTaskId(taskId)
+  const paths = getPaths(options)
+  const session = listSessions(paths).find(item => String(item.id || '').toLowerCase() === normalizedTaskId)
+
+  if (!session) throw new Error('没有找到这个 Codex 任务的本地记录')
+  if (session.location !== 'active') throw new Error('只能恢复未归档的本地 Codex 任务')
+
+  const codexPath = options.codexCliPath || findCodexCli(options)
+
+  if (!codexPath && !options.runAppServerRequest) throw new Error('没有找到 ChatGPT/Codex 自带的 codex.exe')
+
+  const request = options.runAppServerRequest || runCodexAppServerRequest
+  let runtimeStatus = 'unknown'
+  let lastTurnStatus = 'unknown'
+  let inspectionCategory = ''
+
+  try {
+    const response = await request(
+      codexPath,
+      'thread/read',
+      { threadId: normalizedTaskId, includeTurns: true },
+      {
+        cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
+        env: { ...process.env, CODEX_HOME: paths.codexHome },
+        timeoutMs: options.inspectTimeoutMs || 30000
+      }
+    )
+
+    const thread = response?.result?.thread || {}
+    const turns = Array.isArray(thread.turns) ? thread.turns : []
+    const lastTurn = turns[turns.length - 1]
+
+    runtimeStatus = String(thread.status?.type || 'unknown')
+    lastTurnStatus = String(lastTurn?.status || 'unknown')
+  } catch (error) {
+    inspectionCategory = recoveryFailureCategory(error instanceof Error ? error.message : String(error))
+    if (inspectionCategory !== 'session') throw error
+  }
+
+  if (runtimeStatus === 'active' || /^(?:inprogress|in_progress|running)$/i.test(lastTurnStatus)) {
+    throw new Error('这个任务仍在运行，已拒绝创建重复恢复回合')
+  }
+
+  return {
+    sourceThreadId: normalizedTaskId,
+    sourceThreadRef: redactedTaskId(normalizedTaskId),
+    codexPath,
+    cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
+    runtimeStatus,
+    lastTurnStatus,
+    inspectionCategory,
+    workspace: taskRecoveryWorkspaceSnapshot(session, options)
+  }
+}
+
+function taskRecoveryProgressNotifier(options, sourceThreadId) {
+  const listener = typeof options.onProgress === 'function' ? options.onProgress : () => {}
+
+  return progress => {
+    try {
+      listener({
+        sourceThreadId,
+        sourceThreadRef: redactedTaskId(sourceThreadId),
+        targetThreadId: progress.targetThreadId || sourceThreadId,
+        action: progress.action || 'resume',
+        updatedAt: new Date().toISOString(),
+        ...progress
+      })
+    } catch {
+      // A renderer closing must not interrupt an already confirmed recovery run.
+    }
+  }
+}
+
+async function executeCodexTaskRecovery(inspection, options = {}) {
+  const paths = getPaths(options)
+  const request = options.runAppServerRequest || runCodexAppServerRequest
+  const startRecovery = options.startTaskRecoveryProcess || startCodexExecRecovery
+  const notify = taskRecoveryProgressNotifier(options, inspection.sourceThreadId)
+  let action = 'resume'
+  let targetThreadId = inspection.sourceThreadId
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    notify({
+      stage: action === 'resume' ? 'resuming' : 'fork-resuming',
+      status: 'running',
+      action,
+      targetThreadId,
+      message: action === 'resume' ? '正在恢复原任务' : '原任务无法恢复，正在从已保存历史继续'
+    })
+    let run
+
+    try {
+      run = startRecovery({
+        codexPath: inspection.codexPath,
+        taskId: targetThreadId,
+        cwd: inspection.cwd,
+        env: { ...process.env, CODEX_HOME: paths.codexHome },
+        prompt: TASK_RECOVERY_PROMPT,
+        timeoutMs: options.recoveryTimeoutMs,
+        spawnProcess: options.spawnProcess,
+        onProgress: progress => notify({ ...progress, action, targetThreadId })
+      })
+    } catch (error) {
+      const failureCategory = recoveryFailureCategory(error instanceof Error ? error.message : String(error))
+
+      notify({
+        stage: 'failed',
+        status: 'error',
+        action,
+        targetThreadId,
+        failureCategory,
+        message: recoveryFailureMessage(failureCategory)
+      })
+      return { ok: false, action, targetThreadId, failureCategory }
+    }
+
+    let result
+
+    try {
+      result = await run.completion
+    } catch (error) {
+      const failureCategory = recoveryFailureCategory(error instanceof Error ? error.message : String(error))
+
+      notify({
+        stage: 'failed',
+        status: 'error',
+        action,
+        targetThreadId,
+        failureCategory,
+        message: recoveryFailureMessage(failureCategory)
+      })
+      return { ok: false, action, targetThreadId, failureCategory }
+    }
+
+    if (result.ok) {
+      notify({
+        stage: 'completed',
+        status: 'success',
+        action,
+        targetThreadId,
+        message: action === 'resume' ? '原任务已继续并完成本次恢复回合' : 'Fork 任务已继续并完成本次恢复回合'
+      })
+      return { ok: true, action, targetThreadId, result }
+    }
+
+    if (action === 'resume' && shouldForkAfterFailure(result)) {
+      notify({
+        stage: 'forking',
+        status: 'running',
+        action: 'fork',
+        targetThreadId,
+        message: '原任务记录无法直接恢复，正在创建一次 Fork 兜底'
+      })
+
+      try {
+        const forked = await request(
+          inspection.codexPath,
+          'thread/fork',
+          { threadId: inspection.sourceThreadId },
+          {
+            cwd: inspection.cwd,
+            env: { ...process.env, CODEX_HOME: paths.codexHome },
+            timeoutMs: options.forkTimeoutMs || 60000
+          }
+        )
+
+        targetThreadId = normalizeTaskId(forked?.result?.thread?.id)
+        action = 'fork'
+        continue
+      } catch (error) {
+        const failureCategory = recoveryFailureCategory(error instanceof Error ? error.message : String(error))
+
+        notify({
+          stage: 'failed',
+          status: 'error',
+          action: 'fork',
+          targetThreadId: inspection.sourceThreadId,
+          failureCategory,
+          message: recoveryFailureMessage(failureCategory)
+        })
+        return { ok: false, action: 'fork', targetThreadId: inspection.sourceThreadId, failureCategory }
+      }
+    }
+
+    notify({
+      stage: 'failed',
+      status: 'error',
+      action,
+      targetThreadId,
+      failureCategory: result.failureCategory,
+      message: recoveryFailureMessage(result.failureCategory)
+    })
+    return { ok: false, action, targetThreadId, failureCategory: result.failureCategory }
+  }
+
+  return { ok: false, action, targetThreadId, failureCategory: 'unknown' }
+}
+
+async function recoverCodexTask(taskId, options = {}) {
+  const normalizedTaskId = normalizeTaskId(taskId)
+
+  if (activeTaskRecoveries.has(normalizedTaskId)) throw new Error('这个任务已经在恢复中，请等待当前恢复回合结束')
+
+  const inspection = await inspectCodexTaskRecovery(normalizedTaskId, options)
+  const background = Promise.resolve()
+    .then(() => executeCodexTaskRecovery(inspection, options))
+    .catch(() => ({ ok: false, action: 'resume', targetThreadId: normalizedTaskId, failureCategory: 'unknown' }))
+    .finally(() => activeTaskRecoveries.delete(normalizedTaskId))
+
+  activeTaskRecoveries.set(normalizedTaskId, background)
+
+  if (options.awaitCompletion === true) {
+    return { ok: true, status: 'finished', ...inspection, completion: await background }
+  }
+
+  return {
+    ok: true,
+    status: 'running',
+    action: 'resume',
+    fallback: 'fork-on-session-failure',
+    ...inspection
+  }
+}
+
 async function verifyLocalAgentExecution(options = {}) {
   const codexPath = findCodexCli(options)
 
@@ -6526,11 +6763,13 @@ module.exports = {
   importSkillZip,
   initializeLocalToolRuntime,
   inspectCodexDiskUsage,
+  inspectCodexTaskRecovery,
   inspectLocalToolRuntime,
   maintainCodexDisk,
   migrateManagedProviderAuth,
   repairLocalToolRuntime,
   repairCodexConversationIndex,
+  recoverCodexTask,
   readStatus,
   refreshManagedProviderProxyBaseUrl,
   removeRelay,
@@ -6569,6 +6808,7 @@ module.exports = {
     codexTargetRank,
     captureBundledModelCatalog,
     ensureProjectsFromSessions,
+    executeCodexTaskRecovery,
     syncDesktopProjects,
     normalizeSessionForDesktop,
     preferredCodexTarget,

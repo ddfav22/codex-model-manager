@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.78**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.81**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -13,6 +13,7 @@
 - 在 Codex 内通过原生可见槽位切换已验证模型，并保持真实上游模型路由。
 - 为仅提供 Chat Completions 的 Grok 渠道适配 Responses 事件、工具调用、工具结果与无固定轮数的 Agent Loop 恢复；计划型中间消息按 `commentary` delta 渐进显示，恢复阶段通过“继续工具/确实完成/需要输入”三态决策收口，只有重复内容或连续连接失败才触发熔断，内部工具历史和恢复控制不会出现在对话正文。
 - 保留 Codex 的 `sessions`、Projects、Skills、Agents 和登录配置；历史任务目录会同步为 Codex 桌面端 Local Projects，导入、导出和删除操作包含隔离与失败回滚。
+- 对话管理可粘贴任务 UUID 或从对话行恢复未完成任务：用户确认后先检查最后一轮、工作区和 Git 现场，再继续原任务；只有恢复尚未开始且会话记录不可用时才 Fork 一次。认证、额度、权限、网络或高负载错误不会自动重试。
 - 管理器自己的设置、日志和更新文件只写入客户端目录下的 `data`，发布包不携带开发机数据。
 - 提供中文错误提示、启动进度、关闭行为选择和 GitHub Release 在线更新。
 

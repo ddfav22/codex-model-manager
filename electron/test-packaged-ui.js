@@ -158,12 +158,28 @@ function connectCdp(webSocketUrl) {
       pending.set(id, { resolve, reject })
       socket.send(JSON.stringify({ id, method, params }))
     })
-  const evaluate = expression =>
-    command('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true
-    }).then(result => result.result.value)
+  const evaluate = async expression => {
+    const deadline = Date.now() + 5000
+
+    while (true) {
+      try {
+        const result = await command('Runtime.evaluate', {
+          expression,
+          awaitPromise: true,
+          returnByValue: true
+        })
+
+        return result.result.value
+      } catch (error) {
+        const transientContextLoss = /cannot find default execution context|execution context was destroyed/i.test(
+          error instanceof Error ? error.message : String(error)
+        )
+
+        if (!transientContextLoss || Date.now() >= deadline) throw error
+        await sleep(100)
+      }
+    }
+  }
 
   return { socket, ready, command, evaluate, exceptions, consoleErrors }
 }
@@ -496,6 +512,17 @@ async function main() {
       const conversationOpened = clickControl('对话管理')
 
       await wait(100)
+      const topRecoveryCount = buttonsByLabel('恢复任务').length
+      const recoveryButton = document.querySelector('button[aria-label="恢复未完成任务"]')
+      recoveryButton?.click()
+      await wait(100)
+      const recoveryDialog = document.querySelector('[role="dialog"]')
+      const recoveryText = String(recoveryDialog?.textContent || '')
+      const recoverySubscription = window.codexManager.onTaskRecoveryProgress(() => {})
+
+      recoverySubscription?.()
+      clickControl('取消')
+      await wait(100)
       const conversationTextBeforeReveal = String(document.body?.textContent || '')
       const pathButtons = buttonsByLabel('查看路径')
       const pathInitiallyHidden =
@@ -538,6 +565,15 @@ async function main() {
 
       return {
         conversationOpened,
+        topRecoveryCount,
+        recoveryButtonFound: Boolean(recoveryButton),
+        recoveryDialogFound: Boolean(recoveryDialog),
+        recoveryExplainsResume: recoveryText.includes('继续原任务'),
+        recoveryExplainsFork: recoveryText.includes('Fork'),
+        recoveryConfirmFound: recoveryText.includes('开始恢复'),
+        recoveryBridge: typeof window.codexManager.recoverTask,
+        recoveryProgressBridge: typeof window.codexManager.onTaskRecoveryProgress,
+        recoverySubscription: typeof recoverySubscription === 'function',
         pathControlCount: pathButtons.length,
         pathInitiallyHidden,
         pathRevealWorks,
@@ -701,6 +737,15 @@ async function main() {
       result.onlineLoginDialog?.completeCount === 0,
       result.onlineLoginDialog?.defaultAddressFound === true,
       result.conversationTransferUi?.conversationOpened === true,
+      result.conversationTransferUi?.topRecoveryCount === 1,
+      result.conversationTransferUi?.recoveryButtonFound === true,
+      result.conversationTransferUi?.recoveryDialogFound === true,
+      result.conversationTransferUi?.recoveryExplainsResume === true,
+      result.conversationTransferUi?.recoveryExplainsFork === true,
+      result.conversationTransferUi?.recoveryConfirmFound === true,
+      result.conversationTransferUi?.recoveryBridge === 'function',
+      result.conversationTransferUi?.recoveryProgressBridge === 'function',
+      result.conversationTransferUi?.recoverySubscription === true,
       result.conversationTransferUi?.pathControlCount >= 2,
       result.conversationTransferUi?.pathInitiallyHidden === true,
       result.conversationTransferUi?.pathRevealWorks === true,

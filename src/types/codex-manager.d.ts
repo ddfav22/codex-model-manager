@@ -154,6 +154,38 @@ export type CodexSession = {
   updatedAt: string
 }
 
+export type CodexTaskRecoveryProgress = {
+  sourceThreadId: string
+  sourceThreadRef: string
+  targetThreadId: string
+  action: 'resume' | 'fork'
+  stage: 'resuming' | 'running' | 'forking' | 'fork-resuming' | 'completed' | 'failed'
+  status: 'running' | 'success' | 'error'
+  message: string
+  failureCategory?: 'authentication' | 'capacity' | 'permission' | 'network' | 'session' | 'unknown' | ''
+  updatedAt: string
+}
+
+export type CodexTaskRecoveryResult = {
+  ok: true
+  status: 'running'
+  action: 'resume'
+  fallback: 'fork-on-session-failure'
+  sourceThreadId: string
+  sourceThreadRef: string
+  cwd: string
+  runtimeStatus: string
+  lastTurnStatus: string
+  inspectionCategory: string
+  workspace: {
+    cwdExists: boolean
+    gitRepository: boolean
+    dirtyEntryCount: number
+    sessionBytes: number
+    sessionUpdatedAt: string
+  }
+}
+
 export type CodexProject = {
   path: string
   name: string
@@ -431,6 +463,8 @@ declare global {
       inspectDiskUsage: () => Promise<CodexDiskUsage>
       maintainDisk: () => Promise<CodexDiskMaintenanceResult>
       repairConversationIndex: () => Promise<ConversationIndexRepair>
+      recoverTask: (taskId: string) => Promise<CodexTaskRecoveryResult>
+      onTaskRecoveryProgress: (listener: (progress: CodexTaskRecoveryProgress) => void) => () => void
       openRuntimeLog: () => Promise<{ ok: boolean; path: string; error?: string }>
       testRelay: (payload: RelayInput) => Promise<{ test: RelayTest; channel?: RelayProvider; status: CodexStatus }>
       testSavedRelay: (

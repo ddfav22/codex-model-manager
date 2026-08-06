@@ -99,6 +99,33 @@ function registerIpcHandlers({
     writeRuntimeDiagnostic({ conversationIndexRepair: repair })
     return { ...repair, restart, status: manager.readStatus() }
   })
+  handle('codex:recoverTask', async (event, taskId) => {
+    const sendProgress = progress => {
+      if (!event.sender.isDestroyed()) event.sender.send('codex:taskRecoveryProgress', progress)
+
+      if (progress.status === 'success' || progress.status === 'error') {
+        logEvent(progress.status === 'success' ? 'info' : 'warn', `conversation.recovery.${progress.status}`, {
+          sourceThreadRef: progress.sourceThreadRef,
+          action: progress.action,
+          failureCategory: progress.failureCategory || '',
+          stage: progress.stage
+        })
+      }
+    }
+
+    logEvent('info', 'conversation.recovery.start', { requested: true })
+    const result = await manager.recoverCodexTask(taskId, { onProgress: sendProgress })
+
+    logEvent('info', 'conversation.recovery.accepted', {
+      sourceThreadRef: result.sourceThreadRef,
+      runtimeStatus: result.runtimeStatus,
+      cwdExists: result.workspace?.cwdExists === true,
+      gitRepository: result.workspace?.gitRepository === true,
+      dirtyEntryCount: Number(result.workspace?.dirtyEntryCount || 0),
+      fallback: result.fallback
+    })
+    return result
+  })
   handle('codex:applyRelay', async (event, id, model, operationId) => {
     const safeOperationId = String(operationId || '').slice(0, 96)
     const sendProgress = progress => {

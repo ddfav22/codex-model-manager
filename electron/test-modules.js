@@ -1,9 +1,11 @@
 const assert = require('assert')
 const crypto = require('crypto')
+const { EventEmitter } = require('events')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
 const path = require('path')
+const { PassThrough, Writable } = require('stream')
 const packageMetadata = require('../package.json')
 
 const manager = require('./codexManager')
@@ -27,6 +29,15 @@ const {
 } = require('./protocol/codexDiagnostics')
 const runtimeLogger = require('./runtimeLogger')
 const { allowedGithubDownloadHost, safePackageName } = require('./features/packageArchive')
+const {
+  TASK_RECOVERY_PROMPT,
+  normalizeTaskId,
+  recoveryFailureCategory,
+  redactedTaskId,
+  shouldForkAfterFailure,
+  startCodexExecRecovery,
+  taskRecoveryWorkspaceSnapshot
+} = require('./features/taskRecovery')
 const { canonicalModelFor, modelIdentityInstruction, normalizeReasoningEffort } = require('./protocol/modelRouting')
 const {
   followsImmediateToolResult,
@@ -107,6 +118,133 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  const recoveryTaskId = '019fb755-76b9-7603-bfd6-555e987e9f08'
+
+  assert.strictEqual(normalizeTaskId(recoveryTaskId.toUpperCase()), recoveryTaskId)
+  assert.strictEqual(redactedTaskId(recoveryTaskId), '019fb755…9f08')
+  assert.throws(() => normalizeTaskId('not-a-task'), /任务 ID 格式无效/)
+  assert.strictEqual(recoveryFailureCategory('HTTP 401 unauthorized'), 'authentication')
+  assert.strictEqual(recoveryFailureCategory('high demand, retry later'), 'capacity')
+  assert.strictEqual(recoveryFailureCategory('approval required by sandbox policy'), 'permission')
+  assert.strictEqual(recoveryFailureCategory('fetch failed ECONNRESET'), 'network')
+  assert.strictEqual(recoveryFailureCategory('rollout history is corrupted'), 'session')
+  assert.strictEqual(
+    shouldForkAfterFailure({ ok: false, failureCategory: 'session', turnStarted: false, workStarted: false }),
+    true
+  )
+  assert.strictEqual(
+    shouldForkAfterFailure({ ok: false, failureCategory: 'session', turnStarted: true, workStarted: false }),
+    false
+  )
+  assert.strictEqual(
+    shouldForkAfterFailure({ ok: false, failureCategory: 'authentication', turnStarted: false, workStarted: false }),
+    false
+  )
+
+  const recoveryWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-recovery-workspace-'))
+
+  try {
+    const snapshot = taskRecoveryWorkspaceSnapshot(
+      { cwd: recoveryWorkspace, size: 1234, updatedAt: '2026-08-06T00:00:00.000Z' },
+      { execFileSync: () => ' M tracked-a.js\nM  tracked-b.js\n' }
+    )
+
+    assert.deepStrictEqual(snapshot, {
+      cwdExists: true,
+      gitRepository: true,
+      dirtyEntryCount: 2,
+      sessionBytes: 1234,
+      sessionUpdatedAt: '2026-08-06T00:00:00.000Z'
+    })
+  } finally {
+    fs.rmSync(recoveryWorkspace, { recursive: true, force: true })
+  }
+
+  const fakeRecoverySpawn = ({ events = [], stderr = '', exitCode = 0 }) => {
+    let capturedArgs = null
+    let capturedPrompt = ''
+    const spawnProcess = (_executable, args) => {
+      capturedArgs = args
+      const child = new EventEmitter()
+
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.killed = false
+      child.kill = () => {
+        child.killed = true
+      }
+      child.stdin = new Writable({
+        write(chunk, _encoding, callback) {
+          capturedPrompt += chunk.toString('utf8')
+          callback()
+        },
+        final(callback) {
+          callback()
+          setImmediate(() => {
+            events.forEach(event => child.stdout.write(`${JSON.stringify(event)}\n`))
+            if (stderr) child.stderr.write(stderr)
+            child.emit('exit', exitCode, null)
+          })
+        }
+      })
+
+      return child
+    }
+
+    return {
+      spawnProcess,
+      captured: () => ({ args: capturedArgs, prompt: capturedPrompt })
+    }
+  }
+  const successfulRecoverySpawn = fakeRecoverySpawn({
+    events: [
+      { type: 'thread.started' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { type: 'command_execution' } },
+      { type: 'turn.completed', turn: { status: 'completed' } }
+    ]
+  })
+  const successfulRecovery = startCodexExecRecovery({
+    codexPath: 'codex.exe',
+    taskId: recoveryTaskId,
+    cwd: process.cwd(),
+    spawnProcess: successfulRecoverySpawn.spawnProcess,
+    timeoutMs: 1000
+  })
+  const successfulRecoveryResult = await successfulRecovery.completion
+  const successfulRecoveryInput = successfulRecoverySpawn.captured()
+
+  assert.strictEqual(successfulRecoveryResult.ok, true)
+  assert.strictEqual(successfulRecoveryResult.turnStarted, true)
+  assert.strictEqual(successfulRecoveryResult.workStarted, true)
+  assert.deepStrictEqual(successfulRecoveryInput.args, [
+    'exec',
+    '--json',
+    '--color',
+    'never',
+    '--skip-git-repo-check',
+    'resume',
+    recoveryTaskId,
+    '-'
+  ])
+  assert.strictEqual(successfulRecoveryInput.prompt, TASK_RECOVERY_PROMPT)
+  assert.ok(!successfulRecoveryInput.args.includes(TASK_RECOVERY_PROMPT))
+
+  const failedRecoverySpawn = fakeRecoverySpawn({ stderr: 'rollout history is corrupted', exitCode: 1 })
+  const failedRecovery = startCodexExecRecovery({
+    codexPath: 'codex.exe',
+    taskId: recoveryTaskId,
+    cwd: process.cwd(),
+    spawnProcess: failedRecoverySpawn.spawnProcess,
+    timeoutMs: 1000
+  })
+  const failedRecoveryResult = await failedRecovery.completion
+
+  assert.strictEqual(failedRecoveryResult.ok, false)
+  assert.strictEqual(failedRecoveryResult.failureCategory, 'session')
+  assert.strictEqual(failedRecoveryResult.turnStarted, false)
+  assert.strictEqual(shouldForkAfterFailure(failedRecoveryResult), true)
+
   const codexContext = codexRequestContext({
     client_metadata: {
       'x-codex-turn-metadata': JSON.stringify({

@@ -566,6 +566,213 @@ async function main() {
     'vscode'
   )
 
+  const recoveryTaskId = '019fb755-76b9-7603-bfd6-555e987e9f08'
+  const forkedRecoveryTaskId = '019fb755-76b9-7603-bfd6-555e987e9f09'
+  const recoverySessionPath = path.join(sessionDir, `rollout-${recoveryTaskId}.jsonl`)
+
+  fs.writeFileSync(
+    recoverySessionPath,
+    `${JSON.stringify({
+      type: 'session_meta',
+      payload: { session_id: recoveryTaskId, thread_name: 'Recovery test', cwd: projectDir }
+    })}\n`,
+    'utf8'
+  )
+  await assert.rejects(() => manager.recoverCodexTask('invalid-task-id', options), /任务 ID 格式无效/)
+  await assert.rejects(
+    () =>
+      manager.recoverCodexTask(recoveryTaskId, {
+        ...options,
+        codexCliPath: 'test-codex.exe',
+        runAppServerRequest: async (_codexPath, method, params) => {
+          assert.strictEqual(method, 'thread/read')
+          assert.deepStrictEqual(params, { threadId: recoveryTaskId, includeTurns: true })
+          return {
+            result: {
+              thread: {
+                id: recoveryTaskId,
+                status: { type: 'notLoaded' },
+                turns: [{ id: 'turn-running', status: 'inProgress', items: [{ type: 'userMessage', content: [] }] }]
+              }
+            }
+          }
+        }
+      }),
+    /仍在运行/
+  )
+
+  const recoveryProgress = []
+  let recoveryStartCount = 0
+  const recovered = await manager.recoverCodexTask(recoveryTaskId, {
+    ...options,
+    codexCliPath: 'test-codex.exe',
+    awaitCompletion: true,
+    execFileSync: () => ' M tracked.js\n',
+    onProgress: progress => recoveryProgress.push(progress),
+    runAppServerRequest: async (_codexPath, method) => {
+      assert.strictEqual(method, 'thread/read')
+      return { result: { thread: { id: recoveryTaskId, status: { type: 'idle' } } } }
+    },
+    startTaskRecoveryProcess: input => {
+      recoveryStartCount += 1
+      assert.strictEqual(input.taskId, recoveryTaskId)
+      assert.ok(input.prompt.includes('不要自动循环重试'))
+      assert.ok(!input.prompt.includes('test-api-key'))
+      return {
+        completion: Promise.resolve({
+          ok: true,
+          failureCategory: '',
+          turnStarted: true,
+          workStarted: true,
+          exitCode: 0
+        })
+      }
+    }
+  })
+
+  assert.strictEqual(recoveryStartCount, 1)
+  assert.strictEqual(recovered.completion.ok, true)
+  assert.strictEqual(recovered.completion.action, 'resume')
+  assert.strictEqual(recovered.workspace.gitRepository, true)
+  assert.strictEqual(recovered.workspace.dirtyEntryCount, 1)
+  assert.ok(recoveryProgress.some(progress => progress.stage === 'completed' && progress.status === 'success'))
+  assert.ok(recoveryProgress.every(progress => progress.sourceThreadRef === '019fb755…9f08'))
+
+  let finishPendingRecovery
+  let finishPendingProgress
+  const pendingRecoveryFinished = new Promise(resolve => {
+    finishPendingProgress = resolve
+  })
+  const pendingRecovery = await manager.recoverCodexTask(recoveryTaskId, {
+    ...options,
+    codexCliPath: 'test-codex.exe',
+    execFileSync: () => '',
+    onProgress: progress => {
+      if (progress.status === 'success' || progress.status === 'error') finishPendingProgress()
+    },
+    runAppServerRequest: async () => ({
+      result: { thread: { id: recoveryTaskId, status: { type: 'idle' }, turns: [] } }
+    }),
+    startTaskRecoveryProcess: () => ({
+      completion: new Promise(resolve => {
+        finishPendingRecovery = resolve
+      })
+    })
+  })
+
+  assert.strictEqual(pendingRecovery.status, 'running')
+  await assert.rejects(() => manager.recoverCodexTask(recoveryTaskId, options), /已经在恢复中/)
+  finishPendingRecovery({
+    ok: true,
+    failureCategory: '',
+    turnStarted: true,
+    workStarted: false,
+    exitCode: 0
+  })
+  await pendingRecoveryFinished
+  await new Promise(resolve => setImmediate(resolve))
+
+  const forkProgress = []
+  const forkMethods = []
+  let forkRecoveryStartCount = 0
+  const forkRecovered = await manager.recoverCodexTask(recoveryTaskId, {
+    ...options,
+    codexCliPath: 'test-codex.exe',
+    awaitCompletion: true,
+    execFileSync: () => '',
+    onProgress: progress => forkProgress.push(progress),
+    runAppServerRequest: async (_codexPath, method) => {
+      forkMethods.push(method)
+      if (method === 'thread/read') {
+        return { result: { thread: { id: recoveryTaskId, status: { type: 'systemError' } } } }
+      }
+
+      assert.strictEqual(method, 'thread/fork')
+      return { result: { thread: { id: forkedRecoveryTaskId, forkedFromId: recoveryTaskId } } }
+    },
+    startTaskRecoveryProcess: input => {
+      forkRecoveryStartCount += 1
+      if (forkRecoveryStartCount === 1) {
+        assert.strictEqual(input.taskId, recoveryTaskId)
+        return {
+          completion: Promise.resolve({
+            ok: false,
+            failureCategory: 'session',
+            turnStarted: false,
+            workStarted: false,
+            exitCode: 1
+          })
+        }
+      }
+
+      assert.strictEqual(input.taskId, forkedRecoveryTaskId)
+      return {
+        completion: Promise.resolve({
+          ok: true,
+          failureCategory: '',
+          turnStarted: true,
+          workStarted: false,
+          exitCode: 0
+        })
+      }
+    }
+  })
+
+  assert.strictEqual(forkRecoveryStartCount, 2)
+  assert.deepStrictEqual(forkMethods, ['thread/read', 'thread/fork'])
+  assert.strictEqual(forkRecovered.completion.ok, true)
+  assert.strictEqual(forkRecovered.completion.action, 'fork')
+  assert.strictEqual(forkRecovered.completion.targetThreadId, forkedRecoveryTaskId)
+  assert.ok(forkProgress.some(progress => progress.stage === 'forking'))
+
+  const stoppedRecoveryProgress = []
+  const stoppedRecovery = await manager.recoverCodexTask(recoveryTaskId, {
+    ...options,
+    codexCliPath: 'test-codex.exe',
+    awaitCompletion: true,
+    execFileSync: () => '',
+    onProgress: progress => stoppedRecoveryProgress.push(progress),
+    runAppServerRequest: async (_codexPath, method) => {
+      assert.strictEqual(method, 'thread/read')
+      return { result: { thread: { id: recoveryTaskId, status: { type: 'idle' } } } }
+    },
+    startTaskRecoveryProcess: () => ({
+      completion: Promise.resolve({
+        ok: false,
+        failureCategory: 'authentication',
+        turnStarted: false,
+        workStarted: false,
+        exitCode: 1
+      })
+    })
+  })
+
+  assert.strictEqual(stoppedRecovery.completion.ok, false)
+  assert.strictEqual(stoppedRecovery.completion.failureCategory, 'authentication')
+  assert.ok(stoppedRecoveryProgress.some(progress => progress.stage === 'failed'))
+  assert.ok(!stoppedRecoveryProgress.some(progress => progress.stage === 'forking'))
+
+  const crashedRecoveryProgress = []
+  const crashedRecovery = await manager.recoverCodexTask(recoveryTaskId, {
+    ...options,
+    codexCliPath: 'test-codex.exe',
+    awaitCompletion: true,
+    execFileSync: () => '',
+    onProgress: progress => crashedRecoveryProgress.push(progress),
+    runAppServerRequest: async () => ({
+      result: { thread: { id: recoveryTaskId, status: { type: 'idle' } } }
+    }),
+    startTaskRecoveryProcess: () => ({
+      completion: Promise.reject(new Error('spawned recovery process crashed'))
+    })
+  })
+
+  assert.strictEqual(crashedRecovery.completion.ok, false)
+  assert.strictEqual(crashedRecovery.completion.failureCategory, 'unknown')
+  assert.ok(crashedRecoveryProgress.some(progress => progress.stage === 'failed' && progress.status === 'error'))
+  assert.ok(!crashedRecoveryProgress.some(progress => progress.stage === 'forking'))
+  fs.rmSync(recoverySessionPath, { force: true })
+
   const diskMaintenanceHome = path.join(tempRoot, 'disk-maintenance-home')
   const diskMaintenanceSession = path.join(diskMaintenanceHome, 'sessions', '2026', '07', '27', 'rollout-keep.jsonl')
   const diskMaintenanceFiles = {

@@ -29,6 +29,13 @@ contextBridge.exposeInMainWorld('codexManager', {
   inspectDiskUsage: () => ipcRenderer.invoke('codex:inspectDiskUsage'),
   maintainDisk: () => ipcRenderer.invoke('codex:maintainDisk', { confirmed: true }),
   repairConversationIndex: () => ipcRenderer.invoke('codex:repairConversationIndex'),
+  recoverTask: taskId => ipcRenderer.invoke('codex:recoverTask', taskId),
+  onTaskRecoveryProgress: listener => {
+    const handler = (_event, progress) => listener(progress)
+
+    ipcRenderer.on('codex:taskRecoveryProgress', handler)
+    return () => ipcRenderer.removeListener('codex:taskRecoveryProgress', handler)
+  },
   openRuntimeLog: () => ipcRenderer.invoke('codex:openRuntimeLog'),
   testRelay: payload => ipcRenderer.invoke('codex:testRelay', payload),
   testSavedRelay: (id, model) => ipcRenderer.invoke('codex:testSavedRelay', id, model),

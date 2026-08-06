@@ -36,6 +36,7 @@ import type {
   CodexProject,
   CodexSession,
   CodexStatus,
+  CodexTaskRecoveryProgress,
   ConversationDeleteFilters,
   ConversationTransferKind,
   LocalToolRuntimeStatus,
@@ -109,6 +110,9 @@ const ModelManager = () => {
   const [diskMaintenanceBusy, setDiskMaintenanceBusy] = useState(false)
   const [diskUsage, setDiskUsage] = useState<CodexDiskUsage>()
   const [runtimeDiagnostic, setRuntimeDiagnostic] = useState<RuntimeDiagnosticSummary>()
+  const [taskRecoveries, setTaskRecoveries] = useState<Record<string, CodexTaskRecoveryProgress>>({})
+  const [taskRecoveryOpen, setTaskRecoveryOpen] = useState(false)
+  const [taskRecoveryId, setTaskRecoveryId] = useState('')
 
   const [updateState, setUpdateState] = useState<AppUpdateState>({
     stage: 'idle',
@@ -183,6 +187,12 @@ const ModelManager = () => {
       return inProject && matchesQuery
     })
   }, [conversationProject, conversationQuery, status])
+
+  const taskRecoverySession = useMemo(() => {
+    const taskId = taskRecoveryId.trim().toLowerCase()
+
+    return (status?.sessions || []).find(session => session.id.toLowerCase() === taskId)
+  }, [status, taskRecoveryId])
 
   const requireBridge = () => {
     const bridge = getBridge()
@@ -392,6 +402,21 @@ const ModelManager = () => {
       .catch(() => {})
 
     return bridge.onRuntimeDiagnostic(setRuntimeDiagnostic)
+  }, [])
+
+  useEffect(() => {
+    const bridge = getBridge()
+
+    if (!bridge?.onTaskRecoveryProgress) return
+
+    return bridge.onTaskRecoveryProgress(progress => {
+      setTaskRecoveries(current => ({ ...current, [progress.sourceThreadId]: progress }))
+
+      if (progress.status === 'success' || progress.status === 'error') {
+        setMessage({ type: progress.status === 'success' ? 'success' : 'error', text: progress.message })
+        refresh(false).catch(() => {})
+      }
+    })
   }, [])
 
   useEffect(() => {
@@ -814,6 +839,33 @@ const ModelManager = () => {
       if (!result.ok) throw new Error(result.error || '无法打开位置')
     })
 
+  const openTaskRecovery = (session?: CodexSession) => {
+    setTaskRecoveryId(session?.id || '')
+    setTaskRecoveryOpen(true)
+  }
+
+  const startTaskRecovery = () =>
+    run(async () => {
+      const session = taskRecoverySession
+
+      if (!session) throw new Error('没有找到这个任务的本地记录，请检查任务 ID')
+      if (session.location !== 'active') throw new Error('只能恢复未归档的原始任务')
+
+      const result = await requireBridge().recoverTask(session.id)
+
+      const evidence = result.workspace.gitRepository
+        ? `已发现 Git 工作区，当前有 ${result.workspace.dirtyEntryCount} 项已跟踪改动`
+        : result.workspace.cwdExists
+          ? '工作目录存在，将由恢复任务继续检查现场'
+          : '原工作目录当前不存在，恢复任务可能需要你补充路径'
+
+      setTaskRecoveryOpen(false)
+      setMessage({
+        type: result.workspace.cwdExists ? 'info' : 'warning',
+        text: `恢复请求已交给 Codex；${evidence}。`
+      })
+    })
+
   const deleteSession = (session: CodexSession) =>
     setConfirmDialog({
       title: '永久删除对话',
@@ -1163,6 +1215,15 @@ const ModelManager = () => {
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
             <Button
               variant='outlined'
+              color='primary'
+              disabled={busy}
+              startIcon={<i className='ri-restart-line' />}
+              onClick={() => openTaskRecovery()}
+            >
+              恢复任务
+            </Button>
+            <Button
+              variant='outlined'
               color='secondary'
               disabled={busy}
               startIcon={<i className='ri-database-2-line' />}
@@ -1293,7 +1354,14 @@ const ModelManager = () => {
         ) : (
           filteredSessions.map((session, index) => (
             <Box key={`${session.path}-${session.updatedAt}`}>
-              <SessionRow session={session} busy={busy} onOpen={openPath} onDelete={deleteSession} />
+              <SessionRow
+                session={session}
+                busy={busy}
+                recovering={taskRecoveries[session.id]?.status === 'running'}
+                onOpen={openPath}
+                onRecover={openTaskRecovery}
+                onDelete={deleteSession}
+              />
               {index < filteredSessions.length - 1 && <Divider />}
             </Box>
           ))
@@ -2081,6 +2149,53 @@ const ModelManager = () => {
           </Button>
           <Button color='secondary' disabled={diskMaintenanceBusy} onClick={() => setDiskMaintenanceOpen(false)}>
             关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={taskRecoveryOpen} onClose={() => !busy && setTaskRecoveryOpen(false)} fullWidth maxWidth='sm'>
+        <DialogTitle>恢复未完成任务</DialogTitle>
+        <DialogContent>
+          <Stack spacing={3} sx={{ pt: 1 }}>
+            <TextField
+              fullWidth
+              autoFocus
+              label='Codex 任务 ID'
+              placeholder='00000000-0000-7000-8000-000000000000'
+              value={taskRecoveryId}
+              disabled={busy}
+              onChange={event => setTaskRecoveryId(event.target.value)}
+            />
+            {taskRecoverySession ? (
+              <Alert severity={taskRecoverySession.location === 'active' ? 'info' : 'warning'} variant='outlined'>
+                已找到：{taskRecoverySession.title}。客户端会先检查最后一轮、工作区、Git 差异和最近测试，再继续原任务。
+              </Alert>
+            ) : taskRecoveryId.trim() ? (
+              <Alert severity='warning' variant='outlined'>
+                当前本地记录中没有这个任务，请检查 ID 是否完整。
+              </Alert>
+            ) : null}
+            <Typography color='text.secondary'>
+              只有原任务在恢复尚未启动前确认会话记录损坏或不兼容时，才会创建一次 Fork
+              兜底。认证、额度、权限、网络或服务繁忙错误会直接停止，不会自动重试。
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 6, pb: 5 }}>
+          <Button variant='outlined' color='secondary' disabled={busy} onClick={() => setTaskRecoveryOpen(false)}>
+            取消
+          </Button>
+          <Button
+            variant='contained'
+            disabled={
+              busy ||
+              taskRecoverySession?.location !== 'active' ||
+              taskRecoveries[taskRecoverySession?.id || '']?.status === 'running'
+            }
+            startIcon={busy ? <CircularProgress size={14} color='inherit' /> : <i className='ri-restart-line' />}
+            onClick={startTaskRecovery}
+          >
+            开始恢复
           </Button>
         </DialogActions>
       </Dialog>

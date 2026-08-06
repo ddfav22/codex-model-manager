@@ -14,12 +14,16 @@ import { PathDisclosure } from './PathDisclosure'
 export const SessionRow = ({
   session,
   busy,
+  recovering,
   onOpen,
+  onRecover,
   onDelete
 }: {
   session: CodexSession
   busy: boolean
+  recovering: boolean
   onOpen: (targetPath: string) => void
+  onRecover: (session: CodexSession) => void
   onDelete: (session: CodexSession) => void
 }) => (
   <Box
@@ -38,6 +42,7 @@ export const SessionRow = ({
         <i className='ri-folder-5-line text-[20px] text-primary' />
         <Typography variant='subtitle1'>{session.title}</Typography>
         <Chip size='small' variant='outlined' label={sessionPlace(session)} />
+        {recovering && <Chip size='small' color='info' variant='tonal' label='恢复中' />}
       </Stack>
       <Typography variant='body2' color='text.secondary'>
         {formatDate(session.updatedAt)} · {formatBytes(session.size)}
@@ -45,6 +50,18 @@ export const SessionRow = ({
       {session.cwd && <PathDisclosure path={session.cwd} label='关联项目' />}
     </Stack>
     <Stack direction='row' spacing={1} justifyContent='flex-end'>
+      <Tooltip title={session.location === 'active' ? '恢复未完成任务' : '只有未归档的原始任务可以恢复'}>
+        <span>
+          <IconButton
+            aria-label='恢复未完成任务'
+            color='primary'
+            disabled={busy || recovering || session.location !== 'active'}
+            onClick={() => onRecover(session)}
+          >
+            <i className='ri-restart-line' />
+          </IconButton>
+        </span>
+      </Tooltip>
       <Tooltip title='打开位置'>
         <IconButton disabled={busy} onClick={() => onOpen(session.path)}>
           <i className='ri-folder-open-line' />
