@@ -16,6 +16,7 @@ const {
   modelIdentityLabel,
   normalizeReasoningEffort
 } = require('./protocol/modelRouting')
+const { annotateDiagnostic, codexRequestContext } = require('./protocol/codexDiagnostics')
 const {
   anchorShortContinuation,
   internalAgentSignalCount,
@@ -2453,6 +2454,9 @@ async function handleResponsesRequest(
   requestOptions = {}
 ) {
   const rawBody = await readJsonBody(request)
+  const requestCodexContext = codexRequestContext(rawBody)
+
+  if (typeof requestOptions.onRequestContext === 'function') requestOptions.onRequestContext(requestCodexContext)
   const upstreamSignal = requestOptions.signal || createUpstreamSignal(request, response)
   const requestedModel = String(rawBody.model || '').trim()
   const canonicalModel = canonicalModelFor(channel, requestedModel)
@@ -2531,6 +2535,7 @@ async function handleResponsesRequest(
       item => item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output'
     ).length,
     sourceFollowsToolResult: followsImmediateResponsesToolResult(inputItems),
+    ...requestCodexContext,
     sourceInputTailKinds: inputItems.slice(-6).map(item => ({
       type: String(item?.type || (item?.role ? 'message' : '')),
       role: String(item?.role || '')
@@ -2973,6 +2978,18 @@ function createProtocolProxy({
   if (!/^[a-zA-Z0-9_-]{16,128}$/.test(accessToken)) throw new Error('协议代理访问令牌格式无效')
 
   let lastDiagnostic = null
+  const publishDiagnostic = diagnostic => {
+    const annotated = annotateDiagnostic(diagnostic)
+
+    lastDiagnostic = annotated
+    if (typeof onDiagnostic === 'function') {
+      try {
+        onDiagnostic(annotated)
+      } catch {
+        // A diagnostic sink must never interrupt model, image, or MCP traffic.
+      }
+    }
+  }
   const runtimeWireApis = new Map()
   const activeImageChannels = new Set()
   const acquireImageCall = channelId => {
@@ -2983,6 +3000,9 @@ function createProtocolProxy({
   }
   const routePrefix = `/proxy/${accessToken}`
   const server = http.createServer(async (request, response) => {
+    let requestChannelId = ''
+    let requestCodexContext = {}
+
     try {
       const url = new URL(request.url || '/', 'http://127.0.0.1')
 
@@ -3016,28 +3036,20 @@ function createProtocolProxy({
       }
 
       const channelId = decodeURIComponent((responsesMatch || modelsMatch || imagesMatch || imageMcpMatch)[1])
+
+      requestChannelId = channelId
       const channel = resolveChannel(channelId)
       const learnedWireApis = runtimeWireApis.get(channelId) || {}
 
       if (!channel?.baseUrl || !channel?.apiKey) throw new Error('渠道或 API Key 不可用，请在管理器中重新保存渠道')
       if (modelsMatch) {
-        await handleModelsRequest(response, { ...channel, id: channel.id || channelId }, diagnostic => {
-          lastDiagnostic = diagnostic
-          if (typeof onDiagnostic === 'function') onDiagnostic(diagnostic)
-        })
+        await handleModelsRequest(response, { ...channel, id: channel.id || channelId }, publishDiagnostic)
         return
       }
       if (imagesMatch) {
-        await handleImagesRequest(
-          request,
-          response,
-          { ...channel, id: channel.id || channelId },
-          diagnostic => {
-            lastDiagnostic = diagnostic
-            if (typeof onDiagnostic === 'function') onDiagnostic(diagnostic)
-          },
-          { acquireImageCall: () => acquireImageCall(channelId) }
-        )
+        await handleImagesRequest(request, response, { ...channel, id: channel.id || channelId }, publishDiagnostic, {
+          acquireImageCall: () => acquireImageCall(channelId)
+        })
         return
       }
       if (imageMcpMatch) {
@@ -3050,8 +3062,7 @@ function createProtocolProxy({
           {
             acquireImageCall: () => acquireImageCall(channelId),
             onDiagnostic: diagnostic => {
-              lastDiagnostic = { channelId, ...diagnostic }
-              if (typeof onDiagnostic === 'function') onDiagnostic(lastDiagnostic)
+              publishDiagnostic({ channelId, ...diagnostic })
             },
             readJsonBody,
             serverVersion: APP_VERSION,
@@ -3064,10 +3075,7 @@ function createProtocolProxy({
         request,
         response,
         { ...channel, id: channel.id || channelId, runtimeModelWireApis: learnedWireApis },
-        diagnostic => {
-          lastDiagnostic = diagnostic
-          if (typeof onDiagnostic === 'function') onDiagnostic(diagnostic)
-        },
+        publishDiagnostic,
         (model, wireApi) => {
           if (!model || !['responses', 'chat'].includes(wireApi)) return
 
@@ -3076,9 +3084,22 @@ function createProtocolProxy({
 
           runtimeWireApis.set(channelId, { ...current, [matchedKey || model]: wireApi })
         },
-        { compactV1: responsesMatch[2] === '/compact' }
+        {
+          compactV1: responsesMatch[2] === '/compact',
+          onRequestContext: context => {
+            requestCodexContext = context
+          }
+        }
       )
     } catch (error) {
+      publishDiagnostic({
+        capturedAt: new Date().toISOString(),
+        channelId: requestChannelId,
+        ...requestCodexContext,
+        outcome: 'proxy_error',
+        errorName: String(error?.name || 'Error'),
+        errorCode: String(error?.code || '')
+      })
       if (response.headersSent) {
         if (!response.writableEnded) response.end()
         return

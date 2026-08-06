@@ -640,6 +640,11 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-transport-error') {
+        response.destroy()
+        return
+      }
+
       if (requestBody.model === 'grok-newapi-strict-tool-compat') {
         newApiStrictToolRequests += 1
         if (requestBody.stream_options) {
@@ -1640,6 +1645,7 @@ async function main() {
   const testOnlyModels = [
     'gpt-native-responses-test',
     'grok-custom-proxy-test',
+    'grok-transport-error',
     'grok-reject-tools-test',
     'grok-reject-exec-test',
     'grok-forced-emulation',
@@ -1896,6 +1902,8 @@ async function main() {
   assert.strictEqual(highDemandRetryRequests, 3)
   assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_accepted')
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 2)
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'upstream_recovered')
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'info')
   assert.ok(proxyDiagnostics.at(-1).sourceRequestBytes > 0)
   assert.ok(proxyDiagnostics.at(-1).forwardedRequestBytes > 0)
   upstreamRequests.length = 0
@@ -1916,6 +1924,8 @@ async function main() {
   assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_error')
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamFailureKind, 'upstream_capacity')
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 2)
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'upstream_capacity')
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
   upstreamRequests.length = 0
   const contextTooLarge = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2275,6 +2285,13 @@ async function main() {
     body: JSON.stringify({
       model: 'grok-custom-proxy-test',
       stream: true,
+      client_metadata: {
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: '019fd600-8202-7ff0-91b7-6eb858a9f684',
+          turn_id: '019fd601-1111-7222-8333-444444444444',
+          private_prompt: 'must-not-enter-diagnostics'
+        })
+      },
       input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Call exec.' }] }],
       tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
     })
@@ -2293,6 +2310,34 @@ async function main() {
   assert.strictEqual(customDiagnostic.forwardedToolCount, 1)
   assert.ok(customDiagnostic.sourceToolNames.includes('exec'))
   assert.strictEqual(customDiagnostic.hasShellTool, true)
+  assert.strictEqual(customDiagnostic.codexThreadId, '019fd600-8202-7ff0-91b7-6eb858a9f684')
+  assert.strictEqual(customDiagnostic.codexTurnId, '019fd601-1111-7222-8333-444444444444')
+  assert.doesNotMatch(JSON.stringify(customDiagnostic), /must-not-enter-diagnostics/)
+  upstreamRequests.length = 0
+  const transportFailure = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-transport-error',
+      stream: true,
+      client_metadata: {
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: '019fd610-8202-7ff0-91b7-6eb858a9f684',
+          turn_id: '019fd611-1111-7222-8333-444444444444'
+        })
+      },
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Transport test.' }] }]
+    })
+  })
+  const transportFailureBody = await transportFailure.json()
+  const transportFailureDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(transportFailure.status, 502)
+  assert.strictEqual(transportFailureBody.error.type, 'protocol_proxy_error')
+  assert.strictEqual(transportFailureDiagnostic.diagnosticKind, 'proxy_transport_error')
+  assert.strictEqual(transportFailureDiagnostic.diagnosticSeverity, 'error')
+  assert.strictEqual(transportFailureDiagnostic.codexThreadId, '019fd610-8202-7ff0-91b7-6eb858a9f684')
+  assert.strictEqual(transportFailureDiagnostic.codexTurnId, '019fd611-1111-7222-8333-444444444444')
   upstreamRequests.length = 0
   const delayedPlainResponsePromise = fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2942,6 +2987,8 @@ async function main() {
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedCompletionSignal, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredTerminalCandidate, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredCompletionAccepted, false)
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'agent_loop_repeated_stall')
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
   upstreamRequests.length = 0
   const recoveryFailureResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -3011,6 +3058,8 @@ async function main() {
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopAppended, false)
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopTriggered, true)
   assert.strictEqual(recoveryFailureDiagnostic.acceptedCompletionSignal, false)
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'agent_loop_transport_stalled')
+  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
   upstreamRequests.length = 0
   const delayedRecoveryStartedAt = Date.now()
   const delayedRecoveryResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {

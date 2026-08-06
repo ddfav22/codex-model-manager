@@ -16,6 +16,7 @@ function assertTrustedSender(event, getMainWindow) {
 
 function registerIpcHandlers({
   getMainWindow,
+  getRuntimeDiagnosticSummary,
   getRuntimeReadyPromise,
   logError,
   logEvent,
@@ -61,6 +62,7 @@ function registerIpcHandlers({
   handle('codex:getStatus', (_event, forceCodexTargetScan = false) =>
     manager.readStatus({ forceCodexTargetScan: forceCodexTargetScan === true })
   )
+  handle('codex:getRuntimeDiagnosticSummary', () => getRuntimeDiagnosticSummary?.() || null)
   handle('codex:getUpdateState', () => updater.getState())
   handle('codex:checkForUpdates', (_event, manual = true) =>
     updater.check({ manual: manual === true, autoDownload: true })

@@ -32,6 +32,7 @@ const { createAppUpdater, repositoryFromPackageMetadata } = require('./features/
 const { toUserFacingErrorMessage } = require('./features/userFacingErrors')
 const manager = require('./codexManager')
 const { createProtocolProxy } = require('./protocolProxy')
+const { publicDiagnosticSummary } = require('./protocol/codexDiagnostics')
 const { registerIpcHandlers } = require('./runtime/ipcHandlers')
 const { rememberManagerExecutableAfterScan, stopLegacyManagerInstances } = require('./runtime/legacyInstanceGuard')
 const { startStaticUiServer } = require('./runtime/staticUiServer')
@@ -339,6 +340,7 @@ function registerIpc() {
     logError,
     logEvent,
     manager,
+    getRuntimeDiagnosticSummary: () => publicDiagnosticSummary(runtimeDiagnostic.lastProxyRequest),
     openRuntimeLog,
     updater: appUpdater,
     writeRuntimeDiagnostic
@@ -362,9 +364,24 @@ async function initializeProtocolRuntime() {
     resolveChannel: id => manager.getRelayRuntime(id),
     onDiagnostic: diagnostic => {
       writeRuntimeDiagnostic({ lastProxyRequest: diagnostic }, { lightweight: true })
-      const failed = diagnostic?.outcome === 'upstream_error'
+      const publicSummary = publicDiagnosticSummary(diagnostic)
 
-      logEvent(failed ? 'warn' : 'info', failed ? 'proxy.upstreamError' : 'proxy.request', diagnostic)
+      if (publicSummary && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('codex:runtimeDiagnostic', publicSummary)
+      }
+      const severity = ['info', 'warn', 'error'].includes(diagnostic?.diagnosticSeverity)
+        ? diagnostic.diagnosticSeverity
+        : 'info'
+      const event =
+        severity === 'error'
+          ? 'proxy.transportError'
+          : String(diagnostic?.diagnosticKind || '').startsWith('agent_loop_') && severity === 'warn'
+            ? 'proxy.agentLoopStalled'
+            : diagnostic?.outcome === 'upstream_error'
+              ? 'proxy.upstreamError'
+              : 'proxy.request'
+
+      logEvent(severity, event, diagnostic)
     }
   })
   process.env.CODEX_MM_PROXY_BASE_URL = protocolProxy.baseUrl

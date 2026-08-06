@@ -378,10 +378,25 @@ export type AppUpdateState = {
   releaseNotes: string
 }
 
+export type RuntimeDiagnosticSummary = {
+  capturedAt: string
+  severity: 'warn' | 'error'
+  kind: string
+  message: string
+  channelId: string
+  model: string
+  codexThreadId: string
+  codexTurnId: string
+  upstreamStatus: number
+  upstreamRetryCount: number
+}
+
 declare global {
   interface Window {
     codexManager?: {
       getStatus: (forceCodexTargetScan?: boolean) => Promise<CodexStatus>
+      getRuntimeDiagnosticSummary: () => Promise<RuntimeDiagnosticSummary | null>
+      onRuntimeDiagnostic: (listener: (diagnostic: RuntimeDiagnosticSummary) => void) => () => void
       getUpdateState: () => Promise<AppUpdateState>
       checkForUpdates: (manual?: boolean) => Promise<AppUpdateState>
       installUpdate: () => Promise<{ ok: boolean; latestVersion: string }>

@@ -40,7 +40,8 @@ import type {
   ConversationTransferKind,
   LocalToolRuntimeStatus,
   RelayInput,
-  RelayProvider
+  RelayProvider,
+  RuntimeDiagnosticSummary
 } from '@/types/codex-manager'
 import {
   APP_VERSION,
@@ -107,6 +108,7 @@ const ModelManager = () => {
   const [diskMaintenanceOpen, setDiskMaintenanceOpen] = useState(false)
   const [diskMaintenanceBusy, setDiskMaintenanceBusy] = useState(false)
   const [diskUsage, setDiskUsage] = useState<CodexDiskUsage>()
+  const [runtimeDiagnostic, setRuntimeDiagnostic] = useState<RuntimeDiagnosticSummary>()
 
   const [updateState, setUpdateState] = useState<AppUpdateState>({
     stage: 'idle',
@@ -376,6 +378,19 @@ const ModelManager = () => {
         setMessage({ type: 'info', text: `新版本 ${nextState.latestVersion} 已下载，点击“重启更新”即可安装。` })
       }
     })
+  }, [])
+
+  useEffect(() => {
+    const bridge = getBridge()
+
+    if (!bridge?.getRuntimeDiagnosticSummary || !bridge.onRuntimeDiagnostic) return
+
+    bridge
+      .getRuntimeDiagnosticSummary()
+      .then(diagnostic => setRuntimeDiagnostic(diagnostic || undefined))
+      .catch(() => {})
+
+    return bridge.onRuntimeDiagnostic(setRuntimeDiagnostic)
   }, [])
 
   useEffect(() => {
@@ -1480,6 +1495,34 @@ const ModelManager = () => {
           {issue}
         </Alert>
       ))}
+
+      {runtimeDiagnostic && (
+        <Alert
+          severity={runtimeDiagnostic.severity === 'error' ? 'error' : 'warning'}
+          variant='outlined'
+          onClose={() => setRuntimeDiagnostic(undefined)}
+          action={
+            <Button color='inherit' size='small' onClick={openRuntimeLog}>
+              查看日志
+            </Button>
+          }
+        >
+          <Stack spacing={0.5}>
+            <Typography variant='body2' fontWeight={600}>
+              {runtimeDiagnostic.message}
+            </Typography>
+            <Typography variant='caption' color='text.secondary'>
+              {[
+                runtimeDiagnostic.model && `模型 ${runtimeDiagnostic.model}`,
+                runtimeDiagnostic.codexThreadId && `任务 ${runtimeDiagnostic.codexThreadId}`,
+                runtimeDiagnostic.capturedAt && new Date(runtimeDiagnostic.capturedAt).toLocaleString()
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </Typography>
+          </Stack>
+        </Alert>
+      )}
 
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '260px 1fr' }, gap: 4, alignItems: 'start' }}>
         <Card>

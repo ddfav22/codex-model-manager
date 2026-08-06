@@ -19,6 +19,12 @@ const {
   upstreamRejectsNativeTools
 } = require('./protocolProxy')
 const { RECOVERY_DECISION, parseAgentRecoveryDecision } = require('./protocol/agentRecoveryDecision')
+const {
+  annotateDiagnostic,
+  codexRequestContext,
+  diagnosticClassification,
+  publicDiagnosticSummary
+} = require('./protocol/codexDiagnostics')
 const runtimeLogger = require('./runtimeLogger')
 const { allowedGithubDownloadHost, safePackageName } = require('./features/packageArchive')
 const { canonicalModelFor, modelIdentityInstruction, normalizeReasoningEffort } = require('./protocol/modelRouting')
@@ -97,6 +103,71 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  const codexContext = codexRequestContext({
+    client_metadata: {
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: '019fd600-8202-7ff0-91b7-6eb858a9f684',
+        turn_id: '019fd601-1111-7222-8333-444444444444',
+        session_id: '019fd602-aaaa-7bbb-8ccc-dddddddddddd',
+        user_text: 'must-not-enter-diagnostics'
+      })
+    }
+  })
+
+  assert.deepStrictEqual(codexContext, {
+    codexThreadId: '019fd600-8202-7ff0-91b7-6eb858a9f684',
+    codexTurnId: '019fd601-1111-7222-8333-444444444444',
+    codexSessionId: '019fd602-aaaa-7bbb-8ccc-dddddddddddd'
+  })
+  assert.doesNotMatch(JSON.stringify(codexContext), /must-not-enter-diagnostics/)
+  assert.deepStrictEqual(codexRequestContext({ client_metadata: { 'x-codex-turn-metadata': '{malformed-secret' } }), {
+    codexThreadId: '',
+    codexTurnId: '',
+    codexSessionId: ''
+  })
+  assert.deepStrictEqual(
+    diagnosticClassification({
+      emulation: {
+        continuationRecovery: { exhausted: true, recoveryCircuitBreaker: 'identical_stalled_responses' }
+      }
+    }),
+    { diagnosticKind: 'agent_loop_repeated_stall', diagnosticSeverity: 'warn' }
+  )
+  assert.deepStrictEqual(annotateDiagnostic({ outcome: 'upstream_error', upstreamFailureKind: 'upstream_capacity' }), {
+    outcome: 'upstream_error',
+    upstreamFailureKind: 'upstream_capacity',
+    diagnosticKind: 'upstream_capacity',
+    diagnosticSeverity: 'warn'
+  })
+  assert.deepStrictEqual(
+    diagnosticClassification({ outcome: 'upstream_error', upstreamFailureKind: 'upstream_timeout' }),
+    { diagnosticKind: 'upstream_timeout', diagnosticSeverity: 'warn' }
+  )
+  assert.deepStrictEqual(
+    diagnosticClassification({
+      emulation: {
+        continuationRecovery: { exhausted: true, recoveryCircuitBreaker: 'consecutive_transport_failures' }
+      }
+    }),
+    { diagnosticKind: 'agent_loop_transport_stalled', diagnosticSeverity: 'warn' }
+  )
+  const publicDiagnostic = publicDiagnosticSummary({
+    capturedAt: '2026-08-06T00:00:00.000Z',
+    diagnosticSeverity: 'warn',
+    diagnosticKind: 'upstream_capacity',
+    channelId: 'test-channel',
+    model: 'grok-test',
+    codexThreadId: '019fd600-8202-7ff0-91b7-6eb858a9f684',
+    codexTurnId: '019fd601-1111-7222-8333-444444444444',
+    upstreamStatus: 503,
+    upstreamRetryCount: 2,
+    privatePrompt: 'must-not-enter-public-diagnostics'
+  })
+
+  assert.strictEqual(publicDiagnostic.kind, 'upstream_capacity')
+  assert.strictEqual(publicDiagnostic.upstreamRetryCount, 2)
+  assert.doesNotMatch(JSON.stringify(publicDiagnostic), /must-not-enter-public-diagnostics/)
+  assert.strictEqual(publicDiagnosticSummary({ diagnosticSeverity: 'info' }), null)
   assert.strictEqual(upstreamImagesUrl('https://ainiubi.org'), 'https://ainiubi.org/v1/images/generations')
   assert.strictEqual(upstreamImagesUrl('https://ainiubi.org/v1'), 'https://ainiubi.org/v1/images/generations')
   assert.strictEqual(

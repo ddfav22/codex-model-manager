@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-model-manager",
-  "version": "1.2.77",
+  "version": "1.2.78",
   "description": "Windows desktop manager for ChatGPT model providers and relay channels.",
   "author": "ChatGPT Model Manager",
   "license": "MIT",

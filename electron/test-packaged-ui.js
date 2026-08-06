@@ -409,6 +409,11 @@ async function main() {
       const runtimeLogButton = Array.from(document.querySelectorAll('button')).find(
         element => String(element.textContent || '').trim() === '打开运行日志'
       )
+      const runtimeDiagnostic = await bridge.getRuntimeDiagnosticSummary()
+      const unsubscribeRuntimeDiagnostic = bridge.onRuntimeDiagnostic(() => {})
+      const runtimeDiagnosticSubscription = typeof unsubscribeRuntimeDiagnostic === 'function'
+
+      unsubscribeRuntimeDiagnostic?.()
 
       return {
         bridgeMethods: ['getUpdateState', 'checkForUpdates', 'installUpdate', 'onUpdateState'].map(name => ({
@@ -416,6 +421,12 @@ async function main() {
           type: typeof bridge?.[name]
         })),
         stage: state.stage,
+        runtimeDiagnosticBridgeMethods: ['getRuntimeDiagnosticSummary', 'onRuntimeDiagnostic'].map(name => ({
+          name,
+          type: typeof bridge?.[name]
+        })),
+        runtimeDiagnostic,
+        runtimeDiagnosticSubscription,
         buttonFound: Boolean(updateButton),
         buttonDisabled: Boolean(updateButton?.disabled),
         runtimeLogBridge: typeof bridge?.openRuntimeLog,
@@ -661,6 +672,9 @@ async function main() {
       result.removedGrokOAuthSurface?.activationProgressSubscription === true,
       result.updateSurface?.bridgeMethods?.every(item => item.type === 'function'),
       result.updateSurface?.stage === 'unsupported',
+      result.updateSurface?.runtimeDiagnosticBridgeMethods?.every(item => item.type === 'function'),
+      result.updateSurface?.runtimeDiagnostic === null,
+      result.updateSurface?.runtimeDiagnosticSubscription === true,
       result.updateSurface?.buttonFound === true,
       result.updateSurface?.buttonDisabled === true,
       result.updateSurface?.runtimeLogBridge === 'function',

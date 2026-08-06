@@ -2,6 +2,13 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('codexManager', {
   getStatus: (forceCodexTargetScan = false) => ipcRenderer.invoke('codex:getStatus', forceCodexTargetScan),
+  getRuntimeDiagnosticSummary: () => ipcRenderer.invoke('codex:getRuntimeDiagnosticSummary'),
+  onRuntimeDiagnostic: listener => {
+    const handler = (_event, diagnostic) => listener(diagnostic)
+
+    ipcRenderer.on('codex:runtimeDiagnostic', handler)
+    return () => ipcRenderer.removeListener('codex:runtimeDiagnostic', handler)
+  },
   getUpdateState: () => ipcRenderer.invoke('codex:getUpdateState'),
   checkForUpdates: (manual = true) => ipcRenderer.invoke('codex:checkForUpdates', manual),
   installUpdate: () => ipcRenderer.invoke('codex:installUpdate'),
