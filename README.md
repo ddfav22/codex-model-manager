@@ -25,7 +25,7 @@
 
 ## 安装
 
-从仓库的 Releases 页面下载 `ChatGPT-Model-Manager-Setup-<版本>-x64.exe`。安装向导允许自行选择安装目录；静默在线更新会继续覆盖当前程序目录并保留其中的 `data` 用户数据。
+从仓库的 Releases 页面下载 `ChatGPT-Model-Manager-Setup-<版本>-x64.exe`。安装向导允许自行选择安装目录；静默在线更新会继续覆盖当前程序目录并保留其中的 `data` 用户数据。1.2.79 起，兼容的后续版本优先下载约 2–3 MB 的 `app.asar` 轻量补丁；补丁缺失、校验失败、运行时不兼容或启动回滚时自动改用完整安装包。
 
 Windows 可能会对未签名的安装包显示 SmartScreen 提示。当前项目没有商业代码签名证书，请只从本仓库的 Release 下载，并核对 Release 资产信息。
 

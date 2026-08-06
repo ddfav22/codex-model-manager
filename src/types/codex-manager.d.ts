@@ -371,6 +371,7 @@ export type AppUpdateState = {
   latestVersion: string
   message: string
   manual: boolean
+  deliveryType: '' | 'patch' | 'installer'
   downloadPercent: number
   downloadedBytes: number
   totalBytes: number

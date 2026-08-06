@@ -95,6 +95,12 @@ Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。�
 
 更新器必须把当前 `process.execPath` 所在目录作为最后一个 `/D=...` 参数，并同时传 `--updated`、`--force-run`、`--keep-shortcuts`：更新模式负责等待或关闭旧进程、保留 `data`，强制运行标志负责在静默安装结束后启动新 EXE。`/D` 是 NSIS 特殊参数，必须位于参数列表最后。安装器回归必须验证旧程序文件被替换、数据标记保留，以及重启进程仍来自同一个稳定目录。
 
+### 轻量补丁必须保留完整包兜底
+
+1.2.79 起，更新器优先精确匹配 `ChatGPT-Model-Manager-Patch-<from>-to-<to>-<updateRuntimeId>-x64.asar`。只有相邻版本的 `updateRuntimeId` 相同，发布脚本才会生成补丁；Electron、原生运行时、打包结构或外部资源变化时必须先更新该 ID，强制客户端走完整 NSIS。
+
+补丁和完整安装包都必须来自当前仓库 GitHub Release 并具有 GitHub 资产 SHA-256。补丁辅助进程只可替换当前安装目录的 `resources/app.asar`，替换前保留备份；新版本窗口创建后回写健康状态，超时则恢复旧版。补丁损坏、缺失、曾被回滚或运行时不兼容时必须自动选择完整安装包。
+
 ### 启动慢不一定是代理慢
 
 代理通常只占很小一段时间。记录静态服务启动、页面 `loadURL`、`ready-to-show` 等分段耗时后再优化。指纹静态资源可长期缓存，HTML 需要重新验证。

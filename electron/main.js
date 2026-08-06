@@ -29,6 +29,7 @@ process.env.CODEX_MANAGER_STATE_DIR = portableStorage.managerState
 
 const { configureRuntimeLogger, getRuntimeLogPath, logError, logEvent } = require('./runtimeLogger')
 const { createAppUpdater, repositoryFromPackageMetadata } = require('./features/appUpdater')
+const { completePendingPatch } = require('./features/patchInstaller')
 const { toUserFacingErrorMessage } = require('./features/userFacingErrors')
 const manager = require('./codexManager')
 const { createProtocolProxy } = require('./protocolProxy')
@@ -54,6 +55,9 @@ const updateRepository = process.env.CODEX_MM_UPDATE_REPOSITORY || repositoryFro
 const appUpdater = createAppUpdater({
   currentVersion: app.getVersion(),
   currentExecutablePath: process.execPath,
+  currentResourcesPath: process.resourcesPath,
+  currentProcessId: process.pid,
+  runtimeId: packageMetadata.updateRuntimeId,
   repository: updateRepository,
   updatesRoot: portableStorage.updates,
   enabled: app.isPackaged && process.env.CODEX_MM_DISABLE_UPDATE_CHECK !== '1',
@@ -481,7 +485,15 @@ if (!lock) {
       app.setAppUserModelId('cn.chatgpt.manager')
       registerIpc()
       runtimeReadyPromise = initializeProtocolRuntime()
-      const [, runtime] = await Promise.all([createWindow(), runtimeReadyPromise])
+      const patchHealthToken = String(
+        process.argv.find(argument => argument.startsWith('--patch-health-token=')) || ''
+      ).slice('--patch-health-token='.length)
+      const windowPromise = createWindow().then(() => {
+        const patchCompletion = completePendingPatch({ updatesRoot: portableStorage.updates, token: patchHealthToken })
+
+        if (patchCompletion.completed) logEvent('info', 'update.patch.healthy', patchCompletion)
+      })
+      const [, runtime] = await Promise.all([windowPromise, runtimeReadyPromise])
 
       logEvent('info', 'app.startup.complete', {
         durationMs: Date.now() - processStartedAt,

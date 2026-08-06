@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -26,6 +28,7 @@ jobs:
       - run: npm run test:wire
       - run: npm run dist
       - run: npm run test:packaged-ui
+      - run: npm run test:packaged-patch
       - run: npm run dist:installer
       - run: npm run test:installer
       - name: Verify tag and package version
@@ -35,6 +38,14 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$packageVersion") {
             throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion"
           }
+      - name: Build compatible lightweight patch
+        shell: pwsh
+        run: |
+          $previousTag = git tag --list "v*.*.*" --sort=-v:refname |
+            Where-Object { $_ -ne $env:GITHUB_REF_NAME -and $_ -match '^v\d+\.\d+\.\d+$' } |
+            Select-Object -First 1
+          if (-not $previousTag) { throw "Previous release tag not found" }
+          npm run dist:patch -- --from $previousTag.Substring(1)
       - name: Publish GitHub Release
         shell: pwsh
         env:
@@ -43,4 +54,8 @@ jobs:
           $packageVersion = node -p "require('./package.json').version"
           $installer = "release/ChatGPT-Model-Manager-Setup-$packageVersion-x64.exe"
           if (-not (Test-Path -LiteralPath $installer)) { throw "Installer not found: $installer" }
-          gh release create $env:GITHUB_REF_NAME $installer --generate-notes --verify-tag --title "v$packageVersion"
+          $assets = @($installer)
+          $patches = @(Get-ChildItem -LiteralPath release -Filter "ChatGPT-Model-Manager-Patch-*-to-$packageVersion-*-x64.asar")
+          if ($patches.Count -gt 1) { throw "Multiple patch artifacts found for $packageVersion" }
+          if ($patches.Count -eq 1) { $assets += $patches[0].FullName }
+          gh release create $env:GITHUB_REF_NAME @assets --generate-notes --verify-tag --title "v$packageVersion"

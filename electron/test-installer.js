@@ -254,7 +254,11 @@ async function selfUpdate(installerPath, installDirectory, markerPath) {
   const ready = await updater.check({ manual: true, autoDownload: true })
 
   assert.strictEqual(ready.stage, 'ready', '本地更新包应进入可安装状态')
-  assert.deepStrictEqual(await updater.install(), { ok: true, latestVersion: packageMetadata.version })
+  assert.deepStrictEqual(await updater.install(), {
+    ok: true,
+    latestVersion: packageMetadata.version,
+    deliveryType: 'installer'
+  })
   assert.strictEqual(beforeInstallCalls, 1, '启动安装器后必须触发主程序退出回调')
   assert.ok(
     waitFor(() => !fs.existsSync(obsoleteProgramFile), 120000),

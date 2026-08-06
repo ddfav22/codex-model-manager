@@ -6,10 +6,12 @@ const path = require('path')
 const { Readable } = require('stream')
 const { EventEmitter } = require('events')
 const packageMetadata = require('../package.json')
+const { PATCH_STATE_NAME } = require('./features/patchInstaller')
 
 const {
   compareVersionStrings,
   createAppUpdater,
+  expectedPatchName,
   normalizeVersion,
   releaseAssetUrlAllowed,
   repositoryFromPackageMetadata,
@@ -46,6 +48,10 @@ async function main() {
     repository
   )
   assert.strictEqual(repositoryFromPackageMetadata(packageMetadata), productionRepository)
+  assert.strictEqual(
+    expectedPatchName('1.2.79', '1.2.80', 'electron-33-win-x64-v1'),
+    'ChatGPT-Model-Manager-Patch-1.2.79-to-1.2.80-electron-33-win-x64-v1-x64.asar'
+  )
   const packageVersionParts = String(packageMetadata.version).split('.').map(Number)
 
   assert.strictEqual(packageVersionParts.length, 3)
@@ -148,7 +154,7 @@ async function main() {
 
   const installResult = await updater.install()
 
-  assert.deepStrictEqual(installResult, { ok: true, latestVersion: '1.2.53' })
+  assert.deepStrictEqual(installResult, { ok: true, latestVersion: '1.2.53', deliveryType: 'installer' })
   assert.strictEqual(spawnCalls.length, 1)
   assert.strictEqual(spawnCalls[0].file, path.join(tempRoot, installerName))
   assert.deepStrictEqual(spawnCalls[0].args, [
@@ -162,6 +168,203 @@ async function main() {
   assert.strictEqual(spawnCalls[0].options.detached, true)
   assert.strictEqual(spawnCalls[0].unrefCalled, true)
   assert.strictEqual(beforeInstallCalls, 1)
+
+  const patchRoot = path.join(tempRoot, 'patch-update')
+  const patchInstallRoot = path.join(patchRoot, 'installed')
+  const patchResourcesRoot = path.join(patchInstallRoot, 'resources')
+  const patchExecutable = path.join(patchInstallRoot, 'ChatGPT Model Manager.exe')
+  const runtimeId = 'electron-33-win-x64-v1'
+  const patchName = expectedPatchName('1.2.79', '1.2.80', runtimeId)
+  const patchBytes = Buffer.from('verified app.asar patch fixture')
+  const patchDigest = crypto.createHash('sha256').update(patchBytes).digest('hex')
+  const patchUrl = `https://github.com/${repository}/releases/download/v1.2.80/${patchName}`
+  const nextInstallerName = 'ChatGPT-Model-Manager-Setup-1.2.80-x64.exe'
+  const nextInstallerUrl = `https://github.com/${repository}/releases/download/v1.2.80/${nextInstallerName}`
+  const patchSpawnCalls = []
+
+  fs.mkdirSync(patchResourcesRoot, { recursive: true })
+  const patchUpdater = createAppUpdater({
+    currentVersion: '1.2.79',
+    currentExecutablePath: patchExecutable,
+    currentResourcesPath: patchResourcesRoot,
+    currentProcessId: 4321,
+    runtimeId,
+    repository,
+    updatesRoot: patchRoot,
+    fetchFn: async url => {
+      if (url.includes('/releases/latest')) {
+        return mockResponse({
+          json: {
+            tag_name: 'v1.2.80',
+            draft: false,
+            prerelease: false,
+            assets: [
+              {
+                name: patchName,
+                browser_download_url: patchUrl,
+                size: patchBytes.length,
+                digest: `sha256:${patchDigest}`
+              },
+              {
+                name: nextInstallerName,
+                browser_download_url: nextInstallerUrl,
+                size: updateBytes.length,
+                digest: `sha256:${updateDigest}`
+              }
+            ]
+          }
+        })
+      }
+      if (url === patchUrl) {
+        return mockResponse({
+          body: Readable.from([patchBytes]),
+          headers: { 'content-length': String(patchBytes.length) }
+        })
+      }
+
+      throw new Error(`unexpected URL: ${url}`)
+    },
+    spawnFn: (file, args, options) => {
+      const call = { file, args, options, unrefCalled: false }
+      const child = new EventEmitter()
+
+      patchSpawnCalls.push(call)
+      child.unref = () => {
+        call.unrefCalled = true
+      }
+      setImmediate(() => child.emit('spawn'))
+
+      return child
+    }
+  })
+  const patchReady = await patchUpdater.check({ manual: true })
+
+  assert.strictEqual(patchReady.stage, 'ready')
+  assert.strictEqual(patchReady.deliveryType, 'patch')
+  assert.strictEqual(patchReady.totalBytes, patchBytes.length)
+  assert.strictEqual(fs.readFileSync(path.join(patchRoot, patchName), 'utf8'), patchBytes.toString('utf8'))
+  assert.deepStrictEqual(await patchUpdater.install(), {
+    ok: true,
+    latestVersion: '1.2.80',
+    deliveryType: 'patch'
+  })
+  assert.strictEqual(patchSpawnCalls.length, 1)
+  assert.strictEqual(patchSpawnCalls[0].file, patchExecutable)
+  assert.strictEqual(path.basename(patchSpawnCalls[0].args[0]), 'app-asar-patch-installer.js')
+  assert.ok(patchSpawnCalls[0].args.includes('--resources-root'))
+  assert.ok(patchSpawnCalls[0].args.includes(patchResourcesRoot))
+  assert.strictEqual(patchSpawnCalls[0].options.env.ELECTRON_RUN_AS_NODE, '1')
+  assert.strictEqual(patchSpawnCalls[0].unrefCalled, true)
+
+  const fallbackRoot = path.join(tempRoot, 'patch-fallback')
+  const fallbackUpdater = createAppUpdater({
+    currentVersion: '1.2.79',
+    currentExecutablePath: path.join(fallbackRoot, 'installed', 'ChatGPT Model Manager.exe'),
+    currentResourcesPath: path.join(fallbackRoot, 'installed', 'resources'),
+    runtimeId,
+    repository,
+    updatesRoot: fallbackRoot,
+    fetchFn: async url => {
+      if (url.includes('/releases/latest')) {
+        return mockResponse({
+          json: {
+            tag_name: 'v1.2.80',
+            draft: false,
+            prerelease: false,
+            assets: [
+              {
+                name: patchName,
+                browser_download_url: patchUrl,
+                size: patchBytes.length,
+                digest: `sha256:${'0'.repeat(64)}`
+              },
+              {
+                name: nextInstallerName,
+                browser_download_url: nextInstallerUrl,
+                size: updateBytes.length,
+                digest: `sha256:${updateDigest}`
+              }
+            ]
+          }
+        })
+      }
+      if (url === patchUrl) {
+        return mockResponse({
+          body: Readable.from([patchBytes]),
+          headers: { 'content-length': String(patchBytes.length) }
+        })
+      }
+      if (url === nextInstallerUrl) {
+        return mockResponse({
+          body: Readable.from([updateBytes]),
+          headers: { 'content-length': String(updateBytes.length) }
+        })
+      }
+
+      throw new Error(`unexpected URL: ${url}`)
+    }
+  })
+  const fallbackReady = await fallbackUpdater.check({ manual: true })
+
+  assert.strictEqual(fallbackReady.stage, 'ready')
+  assert.strictEqual(fallbackReady.deliveryType, 'installer')
+  assert.strictEqual(fs.existsSync(path.join(fallbackRoot, `${patchName}.part`)), false)
+  assert.strictEqual(fs.readFileSync(path.join(fallbackRoot, nextInstallerName), 'utf8'), updateBytes.toString('utf8'))
+
+  const rolledBackRoot = path.join(tempRoot, 'patch-rolled-back')
+  let rolledBackPatchRequests = 0
+
+  fs.mkdirSync(rolledBackRoot, { recursive: true })
+  fs.writeFileSync(
+    path.join(rolledBackRoot, PATCH_STATE_NAME),
+    JSON.stringify({ status: 'rolled-back', fromVersion: '1.2.79', toVersion: '1.2.80' })
+  )
+  const rolledBackUpdater = createAppUpdater({
+    currentVersion: '1.2.79',
+    currentExecutablePath: path.join(rolledBackRoot, 'installed', 'ChatGPT Model Manager.exe'),
+    currentResourcesPath: path.join(rolledBackRoot, 'installed', 'resources'),
+    runtimeId,
+    repository,
+    updatesRoot: rolledBackRoot,
+    fetchFn: async url => {
+      if (url.includes('/releases/latest')) {
+        return mockResponse({
+          json: {
+            tag_name: 'v1.2.80',
+            draft: false,
+            prerelease: false,
+            assets: [
+              {
+                name: patchName,
+                browser_download_url: patchUrl,
+                size: patchBytes.length,
+                digest: `sha256:${patchDigest}`
+              },
+              {
+                name: nextInstallerName,
+                browser_download_url: nextInstallerUrl,
+                size: updateBytes.length,
+                digest: `sha256:${updateDigest}`
+              }
+            ]
+          }
+        })
+      }
+      if (url === patchUrl) rolledBackPatchRequests += 1
+      if (url === nextInstallerUrl) {
+        return mockResponse({
+          body: Readable.from([updateBytes]),
+          headers: { 'content-length': String(updateBytes.length) }
+        })
+      }
+
+      throw new Error(`unexpected URL: ${url}`)
+    }
+  })
+  const rolledBackReady = await rolledBackUpdater.check({ manual: true })
+
+  assert.strictEqual(rolledBackReady.deliveryType, 'installer')
+  assert.strictEqual(rolledBackPatchRequests, 0)
 
   const currentUpdater = createAppUpdater({
     currentVersion: '1.2.53',

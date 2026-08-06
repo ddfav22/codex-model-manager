@@ -116,6 +116,7 @@ const ModelManager = () => {
     latestVersion: '',
     message: '尚未检查更新',
     manual: false,
+    deliveryType: '',
     downloadPercent: 0,
     downloadedBytes: 0,
     totalBytes: 0,

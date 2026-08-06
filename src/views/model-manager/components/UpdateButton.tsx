@@ -16,14 +16,15 @@ export const UpdateButton = ({
   const working = ['checking', 'downloading', 'installing'].includes(state.stage)
   const ready = state.stage === 'ready'
   const unsupported = state.stage === 'unsupported'
+  const deliveryLabel = state.deliveryType === 'patch' ? '轻量补丁' : '完整更新'
 
   const label =
     state.stage === 'checking'
       ? '检查更新中'
       : state.stage === 'downloading'
-        ? `下载更新 ${state.downloadPercent}%`
+        ? `${deliveryLabel} ${state.downloadPercent}%`
         : state.stage === 'ready'
-          ? `重启更新 ${state.latestVersion}`
+          ? `${deliveryLabel}已就绪 ${state.latestVersion}`
           : state.stage === 'installing'
             ? '正在启动更新'
             : state.stage === 'error'
@@ -33,7 +34,9 @@ export const UpdateButton = ({
                 : '在线更新'
 
   return (
-    <Tooltip title={unsupported ? state.message : ready ? '更新包已经安全下载，重启程序即可完成安装' : state.message}>
+    <Tooltip
+      title={unsupported ? state.message : ready ? `${deliveryLabel}已经安全下载，重启程序即可完成安装` : state.message}
+    >
       <span>
         <Button
           variant={ready ? 'contained' : 'outlined'}
