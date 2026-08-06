@@ -403,9 +403,17 @@ async function main() {
     const updateSurface = await cdp.evaluate(`(async () => {
       const bridge = window.codexManager
       const state = await bridge.getUpdateState()
-      const updateButton = Array.from(document.querySelectorAll('button')).find(element =>
-        /在线更新|检查更新|重启更新/.test(String(element.textContent || '').trim())
-      )
+      const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
+      const findUpdateButton = () =>
+        Array.from(document.querySelectorAll('button')).find(element =>
+          /在线更新|检查更新|重启更新/.test(String(element.textContent || '').trim())
+        )
+      let updateButton = findUpdateButton()
+
+      for (let attempt = 0; attempt < 40 && (!updateButton || !updateButton.disabled); attempt += 1) {
+        await wait(50)
+        updateButton = findUpdateButton()
+      }
       const runtimeLogButton = Array.from(document.querySelectorAll('button')).find(
         element => String(element.textContent || '').trim() === '打开运行日志'
       )
@@ -434,30 +442,37 @@ async function main() {
       }
     })()`)
     const onlineLoginDialog = await cdp.evaluate(`(async () => {
-      const clickButton = label => {
-        const button = Array.from(document.querySelectorAll('button')).find(
+      const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
+      const findButton = label =>
+        Array.from(document.querySelectorAll('button')).find(
           element => String(element.textContent || '').trim() === label
         )
-        button?.click()
-        return Boolean(button)
+      const waitFor = async getValue => {
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          const value = getValue()
+
+          if (value) return value
+          await wait(50)
+        }
+
+        return null
       }
-      const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
-      const addOpened = clickButton('添加渠道')
-      await wait(100)
-      const newApiSelected = clickButton('从 NewAPI 添加')
-      await wait(100)
-      const dialog = document.querySelector('[role="dialog"]')
+      const addButton = await waitFor(() => findButton('添加渠道'))
+      addButton?.click()
+      const newApiButton = await waitFor(() => findButton('从 NewAPI 添加'))
+      newApiButton?.click()
+      const dialog = await waitFor(() => document.querySelector('[role="dialog"]'))
       const buttons = dialog
         ? Array.from(dialog.querySelectorAll('button')).map(element => String(element.textContent || '').trim())
         : []
       const newApiAddressValues = dialog
         ? Array.from(dialog.querySelectorAll('input')).map(element => String(element.value || '').trim())
         : []
-      clickButton('取消')
+      findButton('取消')?.click()
 
       return {
-        addOpened,
-        newApiSelected,
+        addOpened: Boolean(addButton),
+        newApiSelected: Boolean(newApiButton),
         dialogFound: Boolean(dialog),
         loginAndSyncCount: buttons.filter(text => text === '登录并同步').length,
         completeCount: buttons.filter(text => text === '完成').length,
