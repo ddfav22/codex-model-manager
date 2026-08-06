@@ -1,12 +1,20 @@
 const { readResponseTextLimited } = require('./upstreamRequest')
 
-const DEFAULT_IMAGE_MODEL = 'grok-imagine-image'
+const DEFAULT_IMAGE_MODEL = 'grok-imagine-image-quality'
 const IMAGE_TOOL_NAME = 'generate_image'
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const MAX_IMAGE_ERROR_BYTES = 64 * 1024
 const MAX_IMAGE_PROMPT_LENGTH = 8000
 const MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 const SUPPORTED_MCP_PROTOCOLS = new Set(['2025-06-18', '2025-03-26', '2024-11-05'])
+const PREFERRED_IMAGE_MODELS = [
+  'grok-imagine-image-quality',
+  'grok-imagine-image',
+  'gpt-image-2',
+  'gpt-image-1.5',
+  'gpt-image-1',
+  'dall-e-3'
+]
 
 class ImageGenerationValidationError extends Error {
   constructor(message) {
@@ -30,6 +38,31 @@ function upstreamImagesUrl(baseUrl) {
   url.hash = ''
 
   return url.toString()
+}
+
+function isImageGenerationModel(value) {
+  const model = String(value || '').trim()
+
+  return Boolean(
+    model &&
+    (/(?:^|[-_.:/])(?:image|imagine|imagen|flux|sdxl)(?:$|[-_.:/])/i.test(model) ||
+      /^dall-e(?:$|-)/i.test(model) ||
+      /^gpt-image(?:$|-)/i.test(model))
+  )
+}
+
+function preferredImageGenerationModel(models) {
+  const candidates = [
+    ...new Set((Array.isArray(models) ? models : []).map(model => String(model || '').trim()))
+  ].filter(isImageGenerationModel)
+
+  for (const preferred of PREFERRED_IMAGE_MODELS) {
+    const matched = candidates.find(model => model.toLowerCase() === preferred)
+
+    if (matched) return matched
+  }
+
+  return candidates[0] || ''
 }
 
 function boundedString(value, field, { maximum, pattern } = {}) {
@@ -209,7 +242,7 @@ function imageToolResult(payload) {
   }
 }
 
-function redactedUpstreamError(text, status) {
+function redactedUpstreamError(text, status, model = '') {
   let message = ''
 
   try {
@@ -226,21 +259,32 @@ function redactedUpstreamError(text, status) {
     .trim()
     .slice(0, 1000)
 
+  if (/\b(?:has no access|no access|not authorized|permission denied)\b/i.test(message) && /\bmodel\b/i.test(message)) {
+    return `当前 NewAPI Token 没有图片模型 ${model || '所选模型'} 的访问权限；请在 NewAPI 控制台为该 Token 开通图片模型后重新同步密钥。`
+  }
+
   return message || `图片生成上游返回 HTTP ${status}`
 }
 
 async function generateNewApiImage(channel, argumentsValue, options = {}) {
   if (!channel?.baseUrl || !channel?.apiKey) throw new Error('图片生成渠道或 API Key 不可用')
 
-  const payload = imageGenerationPayload(argumentsValue, options)
+  const imageRuntime =
+    channel.imageGeneration && typeof channel.imageGeneration === 'object' ? channel.imageGeneration : {}
+  const imageBaseUrl = imageRuntime.baseUrl || channel.baseUrl
+  const imageApiKey = imageRuntime.apiKey || channel.apiKey
+  const payload = imageGenerationPayload(argumentsValue, {
+    ...options,
+    defaultModel: options.defaultModel || imageRuntime.defaultModel || DEFAULT_IMAGE_MODEL
+  })
   const startedAt = Date.now()
   let upstream
 
   try {
-    upstream = await (options.fetchImpl || fetch)(upstreamImagesUrl(channel.baseUrl), {
+    upstream = await (options.fetchImpl || fetch)(upstreamImagesUrl(imageBaseUrl), {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${channel.apiKey}`,
+        authorization: `Bearer ${imageApiKey}`,
         'content-type': 'application/json',
         accept: 'application/json'
       },
@@ -272,7 +316,7 @@ async function generateNewApiImage(channel, argumentsValue, options = {}) {
       promptLength: payload.prompt.length,
       durationMs: Date.now() - startedAt
     })
-    throw new Error(redactedUpstreamError(responseText, upstream.status))
+    throw new Error(redactedUpstreamError(responseText, upstream.status, payload.model))
   }
 
   let responsePayload
@@ -446,6 +490,8 @@ module.exports = {
   imageToolDefinition,
   imageToolResult,
   ImageGenerationValidationError,
+  isImageGenerationModel,
   isAllowedMcpOrigin,
+  preferredImageGenerationModel,
   upstreamImagesUrl
 }

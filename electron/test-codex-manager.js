@@ -2150,6 +2150,7 @@ async function main() {
   const newApiRequests = []
   const newApiWorkKeyModels = [
     'gpt-5.6',
+    'grok-imagine-image-quality',
     'grok-4.5',
     'claude-sonnet-5',
     'gemini-3.5-flash',
@@ -2269,6 +2270,11 @@ async function main() {
     assert.strictEqual(process.env[onlineProviders[0].envKey], 'sk-newapi-full')
     manager.applyRelay(onlineProviders[0].id, 'grok-4.5', options)
     assert.strictEqual(process.env[onlineProviders[0].envKey], 'sk-fixture-grok')
+    const runtimeWithDedicatedImageKey = manager.getRelayRuntime(onlineProviders[0].id, options)
+
+    assert.strictEqual(runtimeWithDedicatedImageKey.apiKey, 'sk-fixture-grok')
+    assert.strictEqual(runtimeWithDedicatedImageKey.imageGeneration.apiKey, 'sk-newapi-full')
+    assert.strictEqual(runtimeWithDedicatedImageKey.imageGeneration.defaultModel, 'grok-imagine-image-quality')
     const switchedBackToWorkKey = await manager.selectNewApiKey(onlineProviders[0].id, 7, options)
 
     assert.deepStrictEqual(switchedBackToWorkKey.models, newApiWorkKeyModels)

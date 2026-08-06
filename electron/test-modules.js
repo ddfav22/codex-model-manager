@@ -46,7 +46,9 @@ const {
   generateNewApiImage,
   imageGenerationPayload,
   imageToolResult,
+  isImageGenerationModel,
   isAllowedMcpOrigin,
+  preferredImageGenerationModel,
   upstreamImagesUrl
 } = require('./protocol/newApiImageGeneration')
 const {
@@ -106,6 +108,13 @@ async function main() {
     prompt: 'sunrise',
     n: 1
   })
+  assert.strictEqual(DEFAULT_IMAGE_MODEL, 'grok-imagine-image-quality')
+  assert.strictEqual(isImageGenerationModel('grok-imagine-image-quality'), true)
+  assert.strictEqual(isImageGenerationModel('grok-4.5'), false)
+  assert.strictEqual(
+    preferredImageGenerationModel(['grok-4.5', 'gpt-image-1', 'grok-imagine-image-quality']),
+    'grok-imagine-image-quality'
+  )
   assert.deepStrictEqual(
     imageGenerationPayload({
       prompt: 'poster',
@@ -165,6 +174,29 @@ async function main() {
   assert.strictEqual(generatedImage.result.content[0].type, 'image')
   assert.strictEqual(imageDiagnostics[0].promptLength, 'module prompt'.length)
   assert.doesNotMatch(JSON.stringify(imageDiagnostics), /module prompt|sk-module-secret/)
+  let observedDedicatedImageRequest = null
+
+  await generateNewApiImage(
+    {
+      baseUrl: 'https://ainiubi.org/v1',
+      apiKey: 'sk-chat-secret',
+      imageGeneration: {
+        baseUrl: 'https://ainiubi.org/v1',
+        apiKey: 'sk-image-secret',
+        defaultModel: 'grok-imagine-image-quality'
+      }
+    },
+    { prompt: 'dedicated image token' },
+    {
+      fetchImpl: async (url, request) => {
+        observedDedicatedImageRequest = { url, request, body: JSON.parse(request.body) }
+
+        return new Response(JSON.stringify({ data: [{ b64_json: inlinePng }] }), { status: 200 })
+      }
+    }
+  )
+  assert.strictEqual(observedDedicatedImageRequest.request.headers.authorization, 'Bearer sk-image-secret')
+  assert.strictEqual(observedDedicatedImageRequest.body.model, 'grok-imagine-image-quality')
   await assert.rejects(
     generateNewApiImage(
       { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
@@ -175,6 +207,26 @@ async function main() {
       }
     ),
     error => /\[redacted\]/.test(error.message) && !/sk-upstream-secret|private prompt/.test(error.message)
+  )
+  await assert.rejects(
+    generateNewApiImage(
+      { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
+      { prompt: 'permission check' },
+      {
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              error: {
+                message: 'This token has no access to model grok-imagine-image-quality (request id: private-request-id)'
+              }
+            }),
+            { status: 403 }
+          )
+      }
+    ),
+    error =>
+      /没有图片模型 grok-imagine-image-quality 的访问权限/.test(error.message) &&
+      !/private-request-id/.test(error.message)
   )
 
   assert.strictEqual(normalizeToolArguments({ command: 'echo ok' }), '{"command":"echo ok"}')

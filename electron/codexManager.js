@@ -13,6 +13,7 @@ const {
   isTransientResponsesProbeFailure,
   responsesProbeRuntimeOptions
 } = require('./protocol/probeRequests')
+const { preferredImageGenerationModel } = require('./protocol/newApiImageGeneration')
 const {
   compressDirectoryZip,
   compressZip,
@@ -2169,6 +2170,33 @@ function selectedNewApiKey(channel) {
   const selected = keys.find(item => String(item.id) === String(selectedTokenId))
 
   return selected?.envKey ? readUserEnvVar(selected.envKey) : ''
+}
+
+function newApiImageGenerationRuntime(channel) {
+  if (channel?.keySource !== 'newapi') return null
+
+  const keys = Array.isArray(channel.newApi?.keys) ? channel.newApi.keys : []
+  const selectedTokenId = channel.newApi?.selectedTokenId ?? channel.newApi?.tokenId
+  const orderedKeys = [
+    ...keys.filter(item => String(item?.id) === String(selectedTokenId)),
+    ...keys.filter(item => String(item?.id) !== String(selectedTokenId))
+  ]
+
+  for (const item of orderedKeys) {
+    if (item?.status !== undefined && Number(item.status) !== 1) continue
+    const defaultModel = preferredImageGenerationModel(item?.models)
+    const apiKey = item?.envKey ? readUserEnvVar(item.envKey) : ''
+
+    if (defaultModel && apiKey) {
+      return {
+        apiKey,
+        baseUrl: channel.baseUrl,
+        defaultModel
+      }
+    }
+  }
+
+  return null
 }
 
 async function postChatCompletion(endpoint, apiKey, body, signal) {
@@ -4394,6 +4422,7 @@ function getRelayRuntime(id, options = {}) {
     modelAliases: aliases,
     modelCapabilities: capabilities,
     modelCatalog,
+    imageGeneration: newApiImageGenerationRuntime(channel),
     wireApi: channel.wireApi || 'chat',
     modelWireApis: modelWireApiMap(channel),
     modelTests: channel.modelTests && typeof channel.modelTests === 'object' ? channel.modelTests : {}

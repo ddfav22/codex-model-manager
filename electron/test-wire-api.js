@@ -4,7 +4,9 @@ const http = require('http')
 const os = require('os')
 const path = require('path')
 const { spawn } = require('child_process')
+const { version: APP_VERSION } = require('../package.json')
 const manager = require('./codexManager')
+const { DEFAULT_IMAGE_MODEL } = require('./protocol/newApiImageGeneration')
 const {
   createProtocolProxy,
   endpointCompatibilityFailure,
@@ -1837,7 +1839,7 @@ async function main() {
 
   assert.strictEqual(mcpInitializeResponse.status, 200)
   assert.strictEqual(mcpInitialize.result.protocolVersion, '2025-06-18')
-  assert.strictEqual(mcpInitialize.result.serverInfo.version, '1.2.76')
+  assert.strictEqual(mcpInitialize.result.serverInfo.version, APP_VERSION)
   const mcpToolsResponse = await fetch(imageMcpUrl, {
     method: 'POST',
     headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -1866,7 +1868,7 @@ async function main() {
   assert.strictEqual(mcpImage.result.content[0].mimeType, 'image/png')
   assert.strictEqual(mcpImage.result.structuredContent.images[0].kind, 'inline')
   assert.strictEqual(upstreamRequests[0].url, '/v1/images/generations')
-  assert.strictEqual(upstreamRequests[0].body.model, 'grok-imagine-image')
+  assert.strictEqual(upstreamRequests[0].body.model, DEFAULT_IMAGE_MODEL)
   assert.strictEqual(upstreamRequests[0].body.prompt, 'wire-inline-image')
   assert.doesNotMatch(JSON.stringify(proxyDiagnostics.at(-1)), /wire-inline-image|test-key/)
   const rejectedMcpOrigin = await fetch(imageMcpUrl, {
