@@ -750,6 +750,7 @@ function imageGenerationToolContract(catalog) {
 
   return [
     `For an image-generation request, call the allowed ${imageTool.name} tool; do not stop after reading an image skill.`,
+    'After the image tool succeeds, include the Markdown image expression returned by the tool verbatim in the final answer so the generated image is visible in the conversation.',
     `Example: <codex_tool_call>{"name":${JSON.stringify(imageTool.name)},"arguments":{"prompt":"the user requested image"}}</codex_tool_call>`
   ].join('\n')
 }
@@ -2972,7 +2973,10 @@ function createProtocolProxy({
   resolveChannel,
   onDiagnostic,
   port = DEFAULT_PROTOCOL_PROXY_PORT,
-  accessToken = randomUUID().replace(/-/g, '')
+  accessToken = randomUUID().replace(/-/g, ''),
+  generatedImagesRoot,
+  fetchImageImpl,
+  resolveImageHostnameImpl
 } = {}) {
   if (typeof resolveChannel !== 'function') throw new Error('协议代理缺少渠道解析器')
   if (!/^[a-zA-Z0-9_-]{16,128}$/.test(accessToken)) throw new Error('协议代理访问令牌格式无效')
@@ -3066,7 +3070,10 @@ function createProtocolProxy({
             },
             readJsonBody,
             serverVersion: APP_VERSION,
-            signal
+            signal,
+            generatedImagesRoot,
+            fetchImageImpl,
+            resolveImageHostnameImpl
           }
         )
         return

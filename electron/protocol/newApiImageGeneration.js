@@ -1,3 +1,8 @@
+const fs = require('fs')
+const dns = require('dns')
+const net = require('net')
+const path = require('path')
+const { randomUUID } = require('crypto')
 const { readResponseTextLimited } = require('./upstreamRequest')
 
 const DEFAULT_IMAGE_MODEL = 'grok-imagine-image-quality'
@@ -6,6 +11,7 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const MAX_IMAGE_ERROR_BYTES = 64 * 1024
 const MAX_IMAGE_PROMPT_LENGTH = 8000
 const MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 60_000
 const SUPPORTED_MCP_PROTOCOLS = new Set(['2025-06-18', '2025-03-26', '2024-11-05'])
 const PREFERRED_IMAGE_MODELS = [
   'grok-imagine-image-quality',
@@ -111,10 +117,15 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
     maximum: 8,
     pattern: /^(?:png|webp|jpeg|jpg)$/i
   })
-  const responseFormat = boundedString(argumentsValue.response_format, 'response_format', {
-    maximum: 16,
-    pattern: /^(?:url|b64_json)$/
-  })
+  const responseFormat =
+    boundedString(argumentsValue.response_format, 'response_format', {
+      maximum: 16,
+      pattern: /^(?:url|b64_json)$/
+    }) ||
+    boundedString(options.defaultResponseFormat, 'defaultResponseFormat', {
+      maximum: 16,
+      pattern: /^(?:url|b64_json)$/
+    })
   const requestedCount = Number(argumentsValue.n ?? options.defaultCount ?? 1)
 
   if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 4) {
@@ -185,11 +196,156 @@ function safeImageUrl(value) {
     const url = new URL(String(value || ''))
 
     if (url.protocol !== 'https:') return ''
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+
+    if (
+      !hostname ||
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      hostname.endsWith('.local') ||
+      privateIpAddress(hostname)
+    ) {
+      return ''
+    }
 
     return url.toString()
   } catch {
     return ''
   }
+}
+
+function privateIpAddress(hostname) {
+  if (net.isIPv4(hostname)) {
+    const octets = hostname.split('.').map(Number)
+
+    return (
+      octets[0] === 10 ||
+      octets[0] === 127 ||
+      octets[0] === 0 ||
+      (octets[0] === 169 && octets[1] === 254) ||
+      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+      (octets[0] === 192 && octets[1] === 168) ||
+      (octets[0] === 192 && octets[1] === 0) ||
+      (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19 || octets[1] === 51)) ||
+      (octets[0] === 203 && octets[1] === 0 && octets[2] === 113) ||
+      octets[0] >= 224
+    )
+  }
+  if (net.isIPv6(hostname)) {
+    const normalized = hostname.toLowerCase()
+
+    if (normalized.startsWith('::ffff:')) return true
+
+    return (
+      normalized === '::' ||
+      normalized === '::1' ||
+      normalized.startsWith('fc') ||
+      normalized.startsWith('fd') ||
+      /^fe[89ab]/u.test(normalized) ||
+      normalized.startsWith('ff')
+    )
+  }
+
+  return false
+}
+
+async function downloadImageUrl(url, options = {}) {
+  const safeUrl = safeImageUrl(url)
+
+  if (!safeUrl) throw new Error('上游返回了不安全的图片 URL')
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  const timer = setTimeout(abort, IMAGE_DOWNLOAD_TIMEOUT_MS)
+
+  options.signal?.addEventListener?.('abort', abort, { once: true })
+  try {
+    let currentUrl = safeUrl
+    let response = null
+
+    for (let redirects = 0; redirects <= 3; redirects += 1) {
+      await assertPublicImageHostname(currentUrl, options.resolveImageHostnameImpl)
+      response = await (options.fetchImageImpl || fetch)(currentUrl, {
+        method: 'GET',
+        headers: { accept: 'image/png,image/jpeg,image/webp' },
+        redirect: 'manual',
+        signal: controller.signal
+      })
+      if (![301, 302, 303, 307, 308].includes(response?.status)) break
+      if (redirects === 3) throw new Error('图片 URL 重定向次数过多')
+      const location = response.headers?.get?.('location')
+      const nextUrl = safeImageUrl(location ? new URL(location, currentUrl).toString() : '')
+
+      response.body?.cancel?.().catch?.(() => {})
+      if (!nextUrl) throw new Error('图片 URL 重定向到了不安全的地址')
+      currentUrl = nextUrl
+    }
+
+    if (!response?.ok || !response.body) throw new Error(`图片 URL 下载失败（HTTP ${response?.status || 0}）`)
+    const declaredBytes = Number(response.headers?.get?.('content-length') || 0)
+
+    if (declaredBytes > MAX_IMAGE_BYTES) throw new Error('图片 URL 返回内容超过 20 MiB 限制')
+    const chunks = []
+    let bytes = 0
+
+    for await (const chunk of response.body) {
+      const buffer = Buffer.from(chunk)
+
+      bytes += buffer.length
+      if (bytes > MAX_IMAGE_BYTES) throw new Error('图片 URL 返回内容超过 20 MiB 限制')
+      chunks.push(buffer)
+    }
+    const buffer = Buffer.concat(chunks)
+    const mimeType = imageMimeType(buffer)
+
+    if (!buffer.length) throw new Error('图片 URL 返回了空内容')
+    if (!mimeType) throw new Error('图片 URL 返回了不支持的图片格式')
+
+    return { data: buffer.toString('base64'), mimeType, bytes: buffer.length }
+  } finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener?.('abort', abort)
+  }
+}
+
+async function assertPublicImageHostname(urlValue, resolveHostnameImpl = dns.promises.lookup) {
+  const hostname = new URL(urlValue).hostname.replace(/^\[|\]$/g, '')
+
+  if (privateIpAddress(hostname)) throw new Error('图片 URL 指向了本地或私有网络地址')
+  if (net.isIP(hostname)) return
+  const resolved = await resolveHostnameImpl(hostname, { all: true, verbatim: true })
+  const addresses = Array.isArray(resolved) ? resolved : [resolved]
+
+  if (!addresses.length || addresses.some(item => !item?.address || privateIpAddress(String(item.address)))) {
+    throw new Error('图片 URL 域名解析到了本地或私有网络地址')
+  }
+}
+
+function persistGeneratedImage(image, generatedImagesRoot, index, fsModule = fs) {
+  const root = path.resolve(String(generatedImagesRoot || ''))
+
+  if (!generatedImagesRoot || root === path.parse(root).root) throw new Error('生成图片保存目录无效')
+  const extension = image.mimeType === 'image/png' ? 'png' : image.mimeType === 'image/webp' ? 'webp' : 'jpg'
+  const filename = `generated-${Date.now()}-${randomUUID()}-${index + 1}.${extension}`
+  const filePath = path.join(root, filename)
+  const partialPath = `${filePath}.part`
+
+  fsModule.mkdirSync(root, { recursive: true })
+  try {
+    fsModule.writeFileSync(partialPath, Buffer.from(image.data, 'base64'), { flag: 'wx' })
+    fsModule.renameSync(partialPath, filePath)
+  } catch (error) {
+    fsModule.rmSync(partialPath, { force: true })
+    throw error
+  }
+
+  return filePath
+}
+
+function localImageMarkdown(filePath, index) {
+  const normalizedPath = String(filePath || '').replace(/\\/g, '/')
+
+  return `![Generated image ${index + 1}](<${normalizedPath}>)`
 }
 
 function imageToolResult(payload) {
@@ -211,7 +367,12 @@ function imageToolResult(payload) {
         name: `generated-image-${images.length + 1}`,
         description: 'Image generated by the selected NewAPI channel.'
       })
-      content.push({ type: 'text', text: `Generated image URL: ${url}\nRender this URL as a Markdown image.` })
+      content.push({
+        type: 'text',
+        text: `Image generated successfully. Embed it in the final response exactly as: ![Generated image ${
+          images.length + 1
+        }](<${url}>)`
+      })
       images.push({ kind: 'url', url, ...(revisedPrompt ? { revisedPrompt } : {}) })
       continue
     }
@@ -230,6 +391,85 @@ function imageToolResult(payload) {
     }
 
     throw new Error('上游图片响应既没有 url，也没有 b64_json')
+  }
+
+  return {
+    content,
+    structuredContent: {
+      created: Number(payload?.created || 0) || 0,
+      images
+    },
+    isError: false
+  }
+}
+
+async function materializedImageToolResult(payload, options = {}) {
+  const items = Array.isArray(payload?.data) ? payload.data : []
+
+  if (!items.length || items.length > 4) throw new Error('上游图片响应缺少有效的 data 数组')
+  const content = []
+  const images = []
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    const revisedPrompt = typeof item?.revised_prompt === 'string' ? item.revised_prompt.slice(0, 2000) : ''
+    const url = safeImageUrl(item?.url)
+    let decoded = null
+    let sourceKind = 'inline'
+
+    if (typeof item?.b64_json === 'string') {
+      decoded = decodeImageBase64(item.b64_json)
+    } else if (url) {
+      sourceKind = 'url'
+      try {
+        decoded = await downloadImageUrl(url, options)
+      } catch {
+        content.push({
+          type: 'resource_link',
+          uri: url,
+          name: `generated-image-${index + 1}`,
+          description: 'Image generated by the selected NewAPI channel.'
+        })
+        content.push({
+          type: 'text',
+          text: `Image generated successfully. Embed it in the final response exactly as: ![Generated image ${
+            index + 1
+          }](<${url}>)`
+        })
+        images.push({ kind: 'url', url, materialized: false, ...(revisedPrompt ? { revisedPrompt } : {}) })
+        continue
+      }
+    } else {
+      throw new Error('上游图片响应既没有安全 url，也没有 b64_json')
+    }
+
+    let filePath = ''
+
+    if (options.generatedImagesRoot) {
+      try {
+        filePath = persistGeneratedImage(decoded, options.generatedImagesRoot, index, options.fsModule || fs)
+      } catch {
+        filePath = ''
+      }
+    }
+
+    content.push({ type: 'image', data: decoded.data, mimeType: decoded.mimeType })
+    content.push({
+      type: 'text',
+      text: filePath
+        ? `Image generated and saved locally. Embed it in the final response exactly as: ${localImageMarkdown(
+            filePath,
+            index
+          )}`
+        : `Generated inline ${decoded.mimeType} image (${decoded.bytes} bytes).`
+    })
+    images.push({
+      kind: sourceKind === 'url' ? 'downloaded' : 'inline',
+      mimeType: decoded.mimeType,
+      bytes: decoded.bytes,
+      ...(filePath ? { filePath } : {}),
+      ...(revisedPrompt ? { revisedPrompt } : {})
+    })
   }
 
   return {
@@ -327,7 +567,9 @@ async function generateNewApiImage(channel, argumentsValue, options = {}) {
     throw new Error('图片生成上游返回了非 JSON 响应')
   }
 
-  const result = imageToolResult(responsePayload)
+  const result = options.materializeImages
+    ? await materializedImageToolResult(responsePayload, options)
+    : imageToolResult(responsePayload)
 
   options.onDiagnostic?.({
     operation: 'newapi_image_generation',
@@ -466,7 +708,11 @@ async function handleImageMcpRequest(request, response, channel, options = {}) {
   try {
     releaseImageCall = options.acquireImageCall?.() || null
     if (options.acquireImageCall && !releaseImageCall) throw new Error('当前渠道已有图片生成任务，请等待它完成后重试')
-    const generated = await generateNewApiImage(channel, body.params?.arguments || {}, options)
+    const generated = await generateNewApiImage(channel, body.params?.arguments || {}, {
+      ...options,
+      defaultResponseFormat: 'b64_json',
+      materializeImages: true
+    })
 
     jsonRpcResponse(response, id, generated.result)
   } catch (error) {
@@ -484,14 +730,18 @@ module.exports = {
   IMAGE_TOOL_NAME,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_PROMPT_LENGTH,
+  downloadImageUrl,
+  assertPublicImageHostname,
   generateNewApiImage,
   handleImageMcpRequest,
   imageGenerationPayload,
   imageToolDefinition,
   imageToolResult,
+  materializedImageToolResult,
   ImageGenerationValidationError,
   isImageGenerationModel,
   isAllowedMcpOrigin,
   preferredImageGenerationModel,
+  safeImageUrl,
   upstreamImagesUrl
 }

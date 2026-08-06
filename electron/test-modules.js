@@ -49,12 +49,16 @@ const {
 } = require('./protocol/newApiChatCompatibility')
 const {
   DEFAULT_IMAGE_MODEL,
+  assertPublicImageHostname,
+  downloadImageUrl,
   generateNewApiImage,
   imageGenerationPayload,
   imageToolResult,
   isImageGenerationModel,
   isAllowedMcpOrigin,
+  materializedImageToolResult,
   preferredImageGenerationModel,
+  safeImageUrl,
   upstreamImagesUrl
 } = require('./protocol/newApiImageGeneration')
 const {
@@ -179,6 +183,12 @@ async function main() {
     prompt: 'sunrise',
     n: 1
   })
+  assert.deepStrictEqual(imageGenerationPayload({ prompt: 'sunrise' }, { defaultResponseFormat: 'b64_json' }), {
+    model: DEFAULT_IMAGE_MODEL,
+    prompt: 'sunrise',
+    n: 1,
+    response_format: 'b64_json'
+  })
   assert.strictEqual(DEFAULT_IMAGE_MODEL, 'grok-imagine-image-quality')
   assert.strictEqual(isImageGenerationModel('grok-imagine-image-quality'), true)
   assert.strictEqual(isImageGenerationModel('grok-4.5'), false)
@@ -219,8 +229,60 @@ async function main() {
 
   assert.strictEqual(urlResult.content[0].type, 'resource_link')
   assert.strictEqual(urlResult.structuredContent.images[0].url, 'https://cdn.example.com/generated.png')
+  assert.match(urlResult.content[1].text, /!\[Generated image 1\]\(<https:\/\/cdn\.example\.com\/generated\.png>\)/)
   assert.throws(() => imageToolResult({ data: [{ url: 'file:///private/image.png' }] }), /url.*b64_json/)
   assert.throws(() => imageToolResult({ data: [{ url: 'http://127.0.0.1/private.png' }] }), /url.*b64_json/)
+  assert.strictEqual(safeImageUrl('https://127.0.0.1/private.png'), '')
+  assert.strictEqual(safeImageUrl('https://[::1]/private.png'), '')
+  assert.strictEqual(safeImageUrl('https://[::ffff:127.0.0.1]/private.png'), '')
+  await assert.rejects(downloadImageUrl('https://localhost/private.png'), /不安全/)
+  await assert.rejects(
+    downloadImageUrl('https://cdn.example.com/not-an-image.png', {
+      resolveImageHostnameImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+      fetchImageImpl: async () => new Response('<html>not an image</html>', { status: 200 })
+    }),
+    /不支持的图片格式/
+  )
+  await assert.rejects(
+    assertPublicImageHostname('https://cdn.example.com/private.png', async () => [{ address: '127.0.0.1', family: 4 }]),
+    /私有网络/
+  )
+  const generatedImagesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-generated-images-'))
+
+  try {
+    const materialized = await materializedImageToolResult(
+      { created: 124, data: [{ url: 'https://cdn.example.com/generated.png' }] },
+      {
+        generatedImagesRoot,
+        resolveImageHostnameImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+        fetchImageImpl: async () =>
+          new Response(Buffer.from(inlinePng, 'base64'), {
+            status: 200,
+            headers: { 'content-type': 'image/png' }
+          })
+      }
+    )
+
+    assert.strictEqual(materialized.content[0].type, 'image')
+    assert.strictEqual(materialized.content[0].mimeType, 'image/png')
+    assert.strictEqual(materialized.structuredContent.images[0].kind, 'downloaded')
+    assert.strictEqual(fs.existsSync(materialized.structuredContent.images[0].filePath), true)
+    assert.match(materialized.content[1].text, /!\[Generated image 1\]\(<.*generated-.*\.png>\)/)
+    const fallback = await materializedImageToolResult(
+      { data: [{ url: 'https://cdn.example.com/generated.png' }] },
+      {
+        generatedImagesRoot,
+        resolveImageHostnameImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+        fetchImageImpl: async () => new Response('', { status: 503 })
+      }
+    )
+
+    assert.strictEqual(fallback.content[0].type, 'resource_link')
+    assert.strictEqual(fallback.structuredContent.images[0].materialized, false)
+    assert.match(fallback.content[1].text, /Embed it in the final response exactly as/)
+  } finally {
+    fs.rmSync(generatedImagesRoot, { recursive: true, force: true })
+  }
   const imageDiagnostics = []
   let observedImageRequest = null
   const generatedImage = await generateNewApiImage(
@@ -789,6 +851,8 @@ async function main() {
     })
 
     assert.strictEqual(configured.dataRoot, path.join(currentClientRoot, 'data'))
+    assert.strictEqual(configured.generatedImages, path.join(currentClientRoot, 'data', 'generated-images'))
+    assert.strictEqual(fs.existsSync(configured.generatedImages), true)
     assert.strictEqual(configured.legacyElectronUserData, legacyElectronUserData)
     assert.strictEqual(setPaths.get('userData'), configured.electronUserData)
     assert.strictEqual(setPaths.get('sessionData'), configured.sessionData)

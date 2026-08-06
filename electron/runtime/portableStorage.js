@@ -49,6 +49,7 @@ function portableStoragePaths(options) {
     logs: path.join(dataRoot, 'logs'),
     electronLogs: path.join(dataRoot, 'logs', 'electron'),
     diagnostics: path.join(dataRoot, 'diagnostics'),
+    generatedImages: path.join(dataRoot, 'generated-images'),
     runtime: path.join(dataRoot, 'runtime'),
     updates: path.join(dataRoot, 'updates'),
     migrationMarker: path.join(dataRoot, 'runtime', 'storage-migration.json')
@@ -65,6 +66,7 @@ function ensurePortableDirectories(paths, fsModule = fs) {
     paths.logs,
     paths.electronLogs,
     paths.diagnostics,
+    paths.generatedImages,
     paths.runtime,
     paths.updates
   ]

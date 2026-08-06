@@ -1714,6 +1714,19 @@ async function main() {
   )
   const proxy = await createProtocolProxy({
     port: 0,
+    generatedImagesRoot: path.join(wireCodexHome, 'generated-images'),
+    resolveImageHostnameImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    fetchImageImpl: async url => {
+      assert.strictEqual(url, 'https://cdn.example.com/wire-generated.png')
+
+      return new Response(
+        Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII=',
+          'base64'
+        ),
+        { status: 200, headers: { 'content-type': 'image/png' } }
+      )
+    },
     onDiagnostic: diagnostic => proxyDiagnostics.push(diagnostic),
     resolveChannel: id => {
       assert.strictEqual(id, 'test-channel')
@@ -1876,11 +1889,32 @@ async function main() {
   assert.strictEqual(upstreamRequests[0].url, '/v1/images/generations')
   assert.strictEqual(upstreamRequests[0].body.model, DEFAULT_IMAGE_MODEL)
   assert.strictEqual(upstreamRequests[0].body.prompt, 'wire-inline-image')
+  assert.strictEqual(upstreamRequests[0].body.response_format, 'b64_json')
   assert.doesNotMatch(JSON.stringify(proxyDiagnostics.at(-1)), /wire-inline-image|test-key/)
+  const mcpUrlImageResponse = await fetch(imageMcpUrl, {
+    method: 'POST',
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'generate_image', arguments: { prompt: 'wire-url-image-mcp' } }
+    })
+  })
+  const mcpUrlImage = await mcpUrlImageResponse.json()
+
+  assert.strictEqual(mcpUrlImage.result.isError, false)
+  assert.strictEqual(mcpUrlImage.result.content[0].type, 'image')
+  assert.strictEqual(mcpUrlImage.result.content[0].mimeType, 'image/png')
+  assert.strictEqual(mcpUrlImage.result.structuredContent.images[0].kind, 'downloaded')
+  assert.strictEqual(fs.existsSync(mcpUrlImage.result.structuredContent.images[0].filePath), true)
+  assert.match(mcpUrlImage.result.content[1].text, /Embed it in the final response exactly as/)
+  assert.strictEqual(upstreamRequests[1].body.prompt, 'wire-url-image-mcp')
+  assert.strictEqual(upstreamRequests[1].body.response_format, 'b64_json')
   const rejectedMcpOrigin = await fetch(imageMcpUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json', origin: 'https://evil.example.com' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} })
+    body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/list', params: {} })
   })
 
   assert.strictEqual(rejectedMcpOrigin.status, 403)
@@ -2632,6 +2666,11 @@ async function main() {
   assert.ok(imageGenerationStream.includes('response.function_call_arguments.done'))
   assert.ok(imageGenerationStream.includes('mcp__chatgpt_model_manager_image__generate_image'))
   assert.ok(!imageGenerationStream.includes('tools.image_gen__imagegen'))
+  assert.ok(
+    upstreamRequests.some(request =>
+      JSON.stringify(request.body).includes('Markdown image expression returned by the tool verbatim')
+    )
+  )
   assert.strictEqual(
     imageGenerationDiagnostic.emulation.toolCallName,
     'mcp__chatgpt_model_manager_image__generate_image'

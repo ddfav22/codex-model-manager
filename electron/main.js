@@ -365,6 +365,7 @@ async function initializeProtocolRuntime() {
 
   protocolProxy = await createProtocolProxy({
     port: 0,
+    generatedImagesRoot: portableStorage.generatedImages,
     resolveChannel: id => manager.getRelayRuntime(id),
     onDiagnostic: diagnostic => {
       writeRuntimeDiagnostic({ lastProxyRequest: diagnostic }, { lightweight: true })
