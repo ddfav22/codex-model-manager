@@ -46,6 +46,7 @@ const INITIAL_BACKUP_FILENAME = 'initial-backup.json'
 const MODELS_CACHE_FILENAME = 'models_cache.json'
 const NATIVE_MODELS_FILENAME = 'native-models.json'
 const MODEL_ALIASES_FILENAME = 'model-aliases.json'
+const MANAGED_IMAGE_MCP_SERVER = 'chatgpt_model_manager_image'
 const IMPORTED_SESSIONS_DIRNAME = 'imported'
 const AGENTS_DIRNAME = 'agents'
 const CODEX_TARGETS_CACHE_MS = 5 * 60 * 1000
@@ -744,6 +745,7 @@ function saveChannels(channelsPath, channels) {
 
 function formatTomlValue(value) {
   if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
   return JSON.stringify(String(value))
 }
 
@@ -855,6 +857,25 @@ function protocolProxyBaseUrl(options = {}) {
   ).replace(/\/+$/, '')
 }
 
+function managedImageMcpUrl(channelId, options = {}) {
+  return `${protocolProxyBaseUrl(options)}/v1/${encodeURIComponent(channelId)}/mcp/image`
+}
+
+function configureManagedImageMcp(text, channelId, options = {}) {
+  let next = removeTableBlock(text, `mcp_servers.${MANAGED_IMAGE_MCP_SERVER}`)
+
+  next = setTableKey(next, `mcp_servers.${MANAGED_IMAGE_MCP_SERVER}`, 'url', managedImageMcpUrl(channelId, options))
+  next = setTableKey(next, `mcp_servers.${MANAGED_IMAGE_MCP_SERVER}`, 'enabled', true)
+  next = setTableKey(next, `mcp_servers.${MANAGED_IMAGE_MCP_SERVER}`, 'startup_timeout_sec', 10)
+  next = setTableKey(next, `mcp_servers.${MANAGED_IMAGE_MCP_SERVER}`, 'tool_timeout_sec', 240)
+
+  return next
+}
+
+function removeManagedImageMcp(text) {
+  return removeTableBlock(text, `mcp_servers.${MANAGED_IMAGE_MCP_SERVER}`)
+}
+
 function managedChannelFromConfig(parsed, channels) {
   const managedChannels = channels.filter(channel => channel?.managed)
   const currentProvider = String(parsed?.model_provider || 'openai')
@@ -922,8 +943,15 @@ function refreshManagedProviderProxyBaseUrl(options = {}) {
       ? parsed.openai_base_url || ''
       : parsed.model_providers?.[activeChannel.id]?.base_url || ''
   const usesStableOpenaiIdentity = currentProvider === 'openai'
+  const configuredImageMcp = parsed.mcp_servers?.[MANAGED_IMAGE_MCP_SERVER]
+  const expectedImageMcpUrl = managedImageMcpUrl(activeChannel.id, options)
 
-  if (usesStableOpenaiIdentity && normalizeBaseUrl(configuredBaseUrl) === normalizeBaseUrl(localBaseUrl)) {
+  if (
+    usesStableOpenaiIdentity &&
+    normalizeBaseUrl(configuredBaseUrl) === normalizeBaseUrl(localBaseUrl) &&
+    configuredImageMcp?.enabled !== false &&
+    normalizeBaseUrl(configuredImageMcp?.url) === normalizeBaseUrl(expectedImageMcpUrl)
+  ) {
     return { updated: false, reason: 'already-current', providerId: activeChannel.id, baseUrl: localBaseUrl }
   }
 
@@ -937,6 +965,7 @@ function refreshManagedProviderProxyBaseUrl(options = {}) {
     next = setRootKey(next, 'model_provider', 'openai')
     next = setRootKey(next, 'openai_base_url', localBaseUrl)
     next = removeRootKey(next, 'preferred_auth_method')
+    next = configureManagedImageMcp(next, activeChannel.id, options)
     next = preserveProjectBlocks(current, next)
     parseConfig(next)
     writeText(paths.configPath, next)
@@ -4152,11 +4181,13 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
       next = setRootKey(next, 'model_provider', 'openai')
       next = setRootKey(next, 'openai_base_url', localBaseUrl)
       next = removeRootKey(next, 'preferred_auth_method')
+      next = configureManagedImageMcp(next, channel.id, options)
     } else {
       next = setRootKey(next, 'model_provider', channel.id)
       next = removeRootKey(next, 'openai_base_url')
       next = removeRootKey(next, 'preferred_auth_method')
       next = removeRootKey(next, 'model_catalog_json')
+      next = removeManagedImageMcp(next)
     }
 
     if (channel.managed) next = setTableKey(next, 'features', 'shell_tool', true)
@@ -4309,6 +4340,7 @@ function restoreDefaultProvider(options = {}) {
     next = removeRootKey(next, 'openai_base_url')
     next = removeRootKey(next, 'preferred_auth_method')
     next = removeRootKey(next, 'model_catalog_json')
+    next = removeManagedImageMcp(next)
     for (const channel of parseJsonFile(paths.channelsPath, [])) {
       next = removeTableBlock(next, `model_providers.${channel.id}`)
     }
@@ -4453,6 +4485,7 @@ function removeRelay(id, options = {}) {
     next = removeRootKey(next, 'model_provider')
     next = removeRootKey(next, 'openai_base_url')
     next = removeRootKey(next, 'model_catalog_json')
+    next = removeManagedImageMcp(next)
   }
 
   parseConfig(next)

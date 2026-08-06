@@ -496,6 +496,31 @@ async function main() {
         )
         return
       }
+      if (request.method === 'POST' && request.url === '/v1/images/generations') {
+        if (requestBody.prompt === 'wire-upstream-failure') {
+          response.writeHead(503, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'temporary image capacity failure' } }))
+          return
+        }
+
+        response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(
+          JSON.stringify(
+            requestBody.prompt === 'wire-inline-image'
+              ? {
+                  created: 123,
+                  data: [
+                    {
+                      b64_json:
+                        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII='
+                    }
+                  ]
+                }
+              : { created: 124, data: [{ url: 'https://cdn.example.com/wire-generated.png' }] }
+          )
+        )
+        return
+      }
       const requestText = JSON.stringify(requestBody)
 
       if (requestText.includes('CONTEXT CHECKPOINT COMPACTION')) {
@@ -749,8 +774,8 @@ async function main() {
         const requestText = JSON.stringify(requestBody)
 
         if (recovering) {
-          assert.ok(requestText.includes('image_gen__imagegen'))
-          assert.ok(requestText.includes('generatedImage'))
+          assert.ok(requestText.includes('mcp__chatgpt_model_manager_image__generate_image'))
+          assert.ok(!requestText.includes('image_gen__imagegen'))
           assert.deepStrictEqual(
             requestBody.response_format,
             { type: 'json_object' },
@@ -758,7 +783,8 @@ async function main() {
           )
         } else {
           assert.ok(requestText.includes('reading an image skill'))
-          assert.ok(requestText.includes('image_gen__imagegen'))
+          assert.ok(requestText.includes('mcp__chatgpt_model_manager_image__generate_image'))
+          assert.ok(requestText.includes('/v1/images/generations'))
         }
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
@@ -776,7 +802,7 @@ async function main() {
                 delta: {
                   role: 'assistant',
                   content: recovering
-                    ? '{"name":"exec","arguments":{"input":"const result = await tools.image_gen__imagegen({prompt:\\"一张太阳图片\\"}); generatedImage(result);"}}'
+                    ? '{"name":"mcp__chatgpt_model_manager_image__generate_image","arguments":{"prompt":"一张太阳图片"}}'
                     : '我先按照图像生成流程读取相关技能说明。'
                 },
                 finish_reason: null
@@ -1742,6 +1768,115 @@ async function main() {
   )
   assert.strictEqual(proxyDiagnostics.at(-1).source, 'validated-alias-catalog')
   upstreamRequests.length = 0
+  mark('newapi-image-direct-route')
+  const directImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-imagine-image',
+      prompt: 'wire-url-image',
+      n: 1,
+      size: '1024x1024'
+    })
+  })
+  const directImagePayload = await directImageResponse.json()
+
+  assert.strictEqual(directImageResponse.status, 200)
+  assert.strictEqual(directImagePayload.data[0].url, 'https://cdn.example.com/wire-generated.png')
+  assert.strictEqual(upstreamRequests[0].url, '/v1/images/generations')
+  assert.strictEqual(upstreamRequests[0].authorization, 'Bearer test-key')
+  assert.deepStrictEqual(upstreamRequests[0].body, {
+    model: 'grok-imagine-image',
+    prompt: 'wire-url-image',
+    n: 1,
+    size: '1024x1024'
+  })
+  assert.strictEqual(proxyDiagnostics.at(-1).operation, 'newapi_image_generation')
+  assert.strictEqual(proxyDiagnostics.at(-1).promptLength, 'wire-url-image'.length)
+  assert.doesNotMatch(JSON.stringify(proxyDiagnostics.at(-1)), /wire-url-image|test-key/)
+  upstreamRequests.length = 0
+  const invalidImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: 'too many images', n: 5 })
+  })
+
+  assert.strictEqual(invalidImageResponse.status, 400)
+  assert.strictEqual(upstreamRequests.length, 0)
+  const upstreamImageFailure = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: 'wire-upstream-failure' })
+  })
+  const upstreamImageFailurePayload = await upstreamImageFailure.json()
+
+  assert.strictEqual(upstreamImageFailure.status, 502)
+  assert.strictEqual(upstreamImageFailurePayload.error.type, 'image_generation_error')
+  assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_error')
+  upstreamRequests.length = 0
+  mark('newapi-image-mcp')
+  const imageMcpUrl = `${proxy.baseUrl}/v1/test-channel/mcp/image`
+  const mcpInitializeResponse = await fetch(imageMcpUrl, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'wire-test', version: '1.0.0' }
+      }
+    })
+  })
+  const mcpInitialize = await mcpInitializeResponse.json()
+
+  assert.strictEqual(mcpInitializeResponse.status, 200)
+  assert.strictEqual(mcpInitialize.result.protocolVersion, '2025-06-18')
+  assert.strictEqual(mcpInitialize.result.serverInfo.version, '1.2.76')
+  const mcpToolsResponse = await fetch(imageMcpUrl, {
+    method: 'POST',
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+  })
+  const mcpTools = await mcpToolsResponse.json()
+
+  assert.strictEqual(mcpToolsResponse.status, 200)
+  assert.strictEqual(mcpTools.result.tools[0].name, 'generate_image')
+  assert.deepStrictEqual(mcpTools.result.tools[0].inputSchema.required, ['prompt'])
+  const mcpImageResponse = await fetch(imageMcpUrl, {
+    method: 'POST',
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'generate_image', arguments: { prompt: 'wire-inline-image' } }
+    })
+  })
+  const mcpImage = await mcpImageResponse.json()
+
+  assert.strictEqual(mcpImageResponse.status, 200)
+  assert.strictEqual(mcpImage.result.isError, false)
+  assert.strictEqual(mcpImage.result.content[0].type, 'image')
+  assert.strictEqual(mcpImage.result.content[0].mimeType, 'image/png')
+  assert.strictEqual(mcpImage.result.structuredContent.images[0].kind, 'inline')
+  assert.strictEqual(upstreamRequests[0].url, '/v1/images/generations')
+  assert.strictEqual(upstreamRequests[0].body.model, 'grok-imagine-image')
+  assert.strictEqual(upstreamRequests[0].body.prompt, 'wire-inline-image')
+  assert.doesNotMatch(JSON.stringify(proxyDiagnostics.at(-1)), /wire-inline-image|test-key/)
+  const rejectedMcpOrigin = await fetch(imageMcpUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: 'https://evil.example.com' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} })
+  })
+
+  assert.strictEqual(rejectedMcpOrigin.status, 403)
+  upstreamRequests.length = 0
   highDemandRetryRequests = 0
   const highDemandRecovered = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2426,7 +2561,20 @@ async function main() {
       model: 'grok-image-generation',
       stream: true,
       input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '生成一张太阳图片' }] }],
-      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+      tools: [
+        { type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' },
+        {
+          type: 'function',
+          name: 'mcp__chatgpt_model_manager_image__generate_image',
+          description: 'Generate an image through NewAPI POST /v1/images/generations.',
+          parameters: {
+            type: 'object',
+            properties: { prompt: { type: 'string' } },
+            required: ['prompt'],
+            additionalProperties: false
+          }
+        }
+      ]
     })
   })
   const imageGenerationStream = await imageGenerationResponse.text()
@@ -2434,10 +2582,13 @@ async function main() {
 
   assert.strictEqual(imageGenerationResponse.status, 200)
   assert.strictEqual(upstreamRequests.length, 2)
-  assert.ok(imageGenerationStream.includes('response.custom_tool_call_input.done'))
-  assert.ok(imageGenerationStream.includes('tools.image_gen__imagegen'))
-  assert.ok(imageGenerationStream.includes('generatedImage'))
-  assert.strictEqual(imageGenerationDiagnostic.emulation.toolCallName, 'exec')
+  assert.ok(imageGenerationStream.includes('response.function_call_arguments.done'))
+  assert.ok(imageGenerationStream.includes('mcp__chatgpt_model_manager_image__generate_image'))
+  assert.ok(!imageGenerationStream.includes('tools.image_gen__imagegen'))
+  assert.strictEqual(
+    imageGenerationDiagnostic.emulation.toolCallName,
+    'mcp__chatgpt_model_manager_image__generate_image'
+  )
   assert.strictEqual(imageGenerationDiagnostic.emulation.continuationRecovery.naturalStall, true)
   assert.strictEqual(imageGenerationDiagnostic.emulation.continuationRecovery.recoveryAttempts, 1)
   assert.strictEqual(imageGenerationDiagnostic.emulation.continuationRecovery.acceptedRetry, true)

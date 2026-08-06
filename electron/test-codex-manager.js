@@ -720,6 +720,13 @@ async function main() {
   assert.strictEqual(parsedActiveConfig.features.shell_tool, true)
   assert.strictEqual(parsedActiveConfig.model_provider, 'openai')
   assert.strictEqual(parsedActiveConfig.openai_base_url, 'http://127.0.0.1:47891/v1/acme-relay')
+  assert.strictEqual(
+    parsedActiveConfig.mcp_servers?.chatgpt_model_manager_image?.url,
+    'http://127.0.0.1:47891/v1/acme-relay/mcp/image'
+  )
+  assert.strictEqual(parsedActiveConfig.mcp_servers?.chatgpt_model_manager_image?.enabled, true)
+  assert.strictEqual(parsedActiveConfig.mcp_servers?.chatgpt_model_manager_image?.startup_timeout_sec, 10)
+  assert.strictEqual(parsedActiveConfig.mcp_servers?.chatgpt_model_manager_image?.tool_timeout_sec, 240)
   assert.strictEqual(parsedActiveConfig.preferred_auth_method, undefined)
   assert.strictEqual(parsedActiveConfig.model_providers?.['acme-relay'], undefined)
   assert.doesNotMatch(activeConfig, /env_key = "CODEX_MM_ACME_RELAY_API_KEY"/)
@@ -735,6 +742,10 @@ async function main() {
   assert.strictEqual(refreshedProxy.providerId, 'acme-relay')
   assert.strictEqual(refreshedProxyConfig.model_provider, 'openai')
   assert.strictEqual(refreshedProxyConfig.openai_base_url, 'http://127.0.0.1:53123/v1/acme-relay')
+  assert.strictEqual(
+    refreshedProxyConfig.mcp_servers?.chatgpt_model_manager_image?.url,
+    'http://127.0.0.1:53123/v1/acme-relay/mcp/image'
+  )
   assert.ok(manager.readStatus(options).projects.some(project => project.path === projectDir.toLowerCase()))
   assert.ok(manager.readStatus(options).sessions.some(session => session.id === 'test-session'))
   assert.strictEqual(
@@ -766,6 +777,10 @@ async function main() {
   assert.strictEqual(migratedLegacyProvider.reason, 'migrated-to-stable-openai-provider')
   assert.strictEqual(migratedLegacyConfig.model_provider, 'openai')
   assert.strictEqual(migratedLegacyConfig.openai_base_url, 'http://127.0.0.1:53123/v1/acme-relay')
+  assert.strictEqual(
+    migratedLegacyConfig.mcp_servers?.chatgpt_model_manager_image?.url,
+    'http://127.0.0.1:53123/v1/acme-relay/mcp/image'
+  )
   assert.strictEqual(migratedLegacyConfig.model_providers?.['acme-relay'], undefined)
 
   const activationProgress = []
@@ -820,6 +835,10 @@ async function main() {
   assert.strictEqual(activationProgress.at(-1).status, 'success')
   assert.strictEqual(activatedConfig.model_provider, 'openai')
   assert.strictEqual(activatedConfig.openai_base_url, 'http://127.0.0.1:53124/v1/acme-relay')
+  assert.strictEqual(
+    activatedConfig.mcp_servers?.chatgpt_model_manager_image?.url,
+    'http://127.0.0.1:53124/v1/acme-relay/mcp/image'
+  )
   assert.strictEqual(activatedConfig.model_providers?.['acme-relay'], undefined)
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(authPath, 'utf8')), {
     auth_mode: 'apikey',
@@ -846,6 +865,7 @@ async function main() {
   assert.doesNotMatch(restoredConfig, /model_provider =/)
   assert.doesNotMatch(restoredConfig, /openai_base_url/)
   assert.doesNotMatch(restoredConfig, /model_catalog_json/)
+  assert.strictEqual(restoredConfig.includes('[mcp_servers.chatgpt_model_manager_image]'), false)
   assert.match(restoredConfig, /\[features\]/)
 
   const initialRestored = manager.restoreInitialBackup(options)

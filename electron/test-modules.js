@@ -42,6 +42,14 @@ const {
   withoutRejectedChatParameter
 } = require('./protocol/newApiChatCompatibility')
 const {
+  DEFAULT_IMAGE_MODEL,
+  generateNewApiImage,
+  imageGenerationPayload,
+  imageToolResult,
+  isAllowedMcpOrigin,
+  upstreamImagesUrl
+} = require('./protocol/newApiImageGeneration')
+const {
   legacyCleanupCommand,
   legacyScanDecision,
   rememberManagerExecutable,
@@ -87,6 +95,88 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  assert.strictEqual(upstreamImagesUrl('https://ainiubi.org'), 'https://ainiubi.org/v1/images/generations')
+  assert.strictEqual(upstreamImagesUrl('https://ainiubi.org/v1'), 'https://ainiubi.org/v1/images/generations')
+  assert.strictEqual(
+    upstreamImagesUrl('https://ainiubi.org/v1/chat/completions?ignored=1'),
+    'https://ainiubi.org/v1/images/generations'
+  )
+  assert.deepStrictEqual(imageGenerationPayload({ prompt: 'sunrise' }), {
+    model: DEFAULT_IMAGE_MODEL,
+    prompt: 'sunrise',
+    n: 1
+  })
+  assert.deepStrictEqual(
+    imageGenerationPayload({
+      prompt: 'poster',
+      model: 'gpt-image-1',
+      n: 2,
+      size: '1024x1024',
+      quality: 'high',
+      output_format: 'JPEG'
+    }),
+    {
+      model: 'gpt-image-1',
+      prompt: 'poster',
+      n: 2,
+      size: '1024x1024',
+      quality: 'high',
+      output_format: 'jpeg'
+    }
+  )
+  assert.throws(() => imageGenerationPayload({ prompt: '' }), /prompt/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', n: 5 }), /n/)
+  assert.strictEqual(isAllowedMcpOrigin(''), true)
+  assert.strictEqual(isAllowedMcpOrigin('http://127.0.0.1:1234'), true)
+  assert.strictEqual(isAllowedMcpOrigin('https://evil.example.com'), false)
+  const inlinePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII='
+  const inlineResult = imageToolResult({ created: 123, data: [{ b64_json: inlinePng }] })
+
+  assert.strictEqual(inlineResult.content[0].type, 'image')
+  assert.strictEqual(inlineResult.content[0].mimeType, 'image/png')
+  assert.strictEqual(inlineResult.structuredContent.images[0].kind, 'inline')
+  const urlResult = imageToolResult({ data: [{ url: 'https://cdn.example.com/generated.png' }] })
+
+  assert.strictEqual(urlResult.content[0].type, 'resource_link')
+  assert.strictEqual(urlResult.structuredContent.images[0].url, 'https://cdn.example.com/generated.png')
+  assert.throws(() => imageToolResult({ data: [{ url: 'file:///private/image.png' }] }), /url.*b64_json/)
+  assert.throws(() => imageToolResult({ data: [{ url: 'http://127.0.0.1/private.png' }] }), /url.*b64_json/)
+  const imageDiagnostics = []
+  let observedImageRequest = null
+  const generatedImage = await generateNewApiImage(
+    { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
+    { prompt: 'module prompt', size: '1024x1024' },
+    {
+      fetchImpl: async (url, request) => {
+        observedImageRequest = { url, request, body: JSON.parse(request.body) }
+
+        return new Response(JSON.stringify({ created: 456, data: [{ b64_json: inlinePng }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      },
+      onDiagnostic: diagnostic => imageDiagnostics.push(diagnostic)
+    }
+  )
+
+  assert.strictEqual(observedImageRequest.url, 'https://ainiubi.org/v1/images/generations')
+  assert.strictEqual(observedImageRequest.request.headers.authorization, 'Bearer sk-module-secret')
+  assert.strictEqual(observedImageRequest.body.prompt, 'module prompt')
+  assert.strictEqual(generatedImage.result.content[0].type, 'image')
+  assert.strictEqual(imageDiagnostics[0].promptLength, 'module prompt'.length)
+  assert.doesNotMatch(JSON.stringify(imageDiagnostics), /module prompt|sk-module-secret/)
+  await assert.rejects(
+    generateNewApiImage(
+      { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
+      { prompt: 'private prompt' },
+      {
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ error: { message: 'Invalid token sk-upstream-secret' } }), { status: 401 })
+      }
+    ),
+    error => /\[redacted\]/.test(error.message) && !/sk-upstream-secret|private prompt/.test(error.message)
+  )
+
   assert.strictEqual(normalizeToolArguments({ command: 'echo ok' }), '{"command":"echo ok"}')
   assert.strictEqual(mergeStreamedToolName('shell_', 'command'), 'shell_command')
   assert.strictEqual(mergeStreamedToolName('shell_command', 'shell_command'), 'shell_command')

@@ -66,10 +66,16 @@ const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
 const { parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
 const { normalizeVisibleAssistantText, sanitizeVisibleAssistantDelta } = require('./protocol/visibleAssistantText')
 const {
+  generateNewApiImage,
+  handleImageMcpRequest,
+  ImageGenerationValidationError
+} = require('./protocol/newApiImageGeneration')
+const {
   RECOVERY_DECISION,
   parseAgentRecoveryDecision,
   recoveryDecisionContract
 } = require('./protocol/agentRecoveryDecision')
+const { version: APP_VERSION } = require('../package.json')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 60_000
 const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 0
@@ -708,8 +714,17 @@ function promptToolCatalog(tools, messages = []) {
     }))
 }
 
+function managerImageTool(catalog) {
+  return catalog.find(
+    tool =>
+      /generate[_-]?image/i.test(String(tool?.name || '')) &&
+      /newapi|images\/generations/i.test(String(tool?.description || ''))
+  )
+}
+
 function execToolContract(catalog) {
   if (!catalog.some(tool => tool.name === 'exec')) return ''
+  const imageTool = managerImageTool(catalog)
 
   return [
     'Special contract for the exec tool: arguments.input must be valid JavaScript for the Codex tool orchestrator, never raw PowerShell or cmd text.',
@@ -718,8 +733,23 @@ function execToolContract(catalog) {
     'Current or time-sensitive facts require a tool result. Never answer prices, rates, weather, news, scores, schedules, availability, or other live data from memory.',
     'For live web information, call the nested web tool through exec and return its result, for example:',
     '{"name":"exec","arguments":{"input":"const result = await tools.web__run({search_query:[{q:\\"today gold price\\"}],response_length:\\"short\\"}); text(result);"}}',
-    'For an image-generation request, use exec to call the nested image generator and return its image result; do not stop after reading an image skill, for example:',
-    '{"name":"exec","arguments":{"input":"const result = await tools.image_gen__imagegen({prompt:\\"the user requested image\\"}); generatedImage(result);"}}'
+    ...(!imageTool
+      ? [
+          'For an image-generation request, use exec to call the nested image generator and return its image result; do not stop after reading an image skill, for example:',
+          '{"name":"exec","arguments":{"input":"const result = await tools.image_gen__imagegen({prompt:\\"the user requested image\\"}); generatedImage(result);"}}'
+        ]
+      : [])
+  ].join('\n')
+}
+
+function imageGenerationToolContract(catalog) {
+  const imageTool = managerImageTool(catalog)
+
+  if (!imageTool) return ''
+
+  return [
+    `For an image-generation request, call the allowed ${imageTool.name} tool; do not stop after reading an image skill.`,
+    `Example: <codex_tool_call>{"name":${JSON.stringify(imageTool.name)},"arguments":{"prompt":"the user requested image"}}</codex_tool_call>`
   ].join('\n')
 }
 
@@ -780,6 +810,7 @@ function toolEmulationRequest(request) {
     `Never emit ${AGENT_COMPLETION_SIGNAL} with a tool call, while work remains, after a plan-only sentence, or when genuine user input is missing.`,
     'Reading a SKILL.md file is an intermediate tool result, not a stopping point. Follow the skill instructions and continue its workflow in the same turn.',
     execToolContract(catalog),
+    imageGenerationToolContract(catalog),
     `Allowed tools: ${JSON.stringify(catalog)}`
   ]
     .filter(Boolean)
@@ -2313,6 +2344,51 @@ async function handleModelsRequest(response, channel, onDiagnostic) {
   }
 }
 
+async function handleImagesRequest(request, response, channel, onDiagnostic, options = {}) {
+  const rawBody = await readJsonBody(request, 128 * 1024)
+  const signal = options.signal || createUpstreamSignal(request, response)
+  let releaseImageCall = null
+
+  try {
+    releaseImageCall = options.acquireImageCall?.() || null
+    if (options.acquireImageCall && !releaseImageCall) {
+      response.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '2' })
+      response.end(
+        JSON.stringify({
+          error: {
+            type: 'image_generation_busy',
+            message: '当前渠道已有图片生成任务，请等待它完成后重试'
+          }
+        })
+      )
+      return
+    }
+    const generated = await generateNewApiImage(channel, rawBody, {
+      signal,
+      onDiagnostic: diagnostic => onDiagnostic?.({ channelId: channel.id, ...diagnostic })
+    })
+
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    response.end(JSON.stringify(generated.responsePayload))
+  } catch (error) {
+    if (response.headersSent) throw error
+    response.writeHead(error instanceof ImageGenerationValidationError ? 400 : 502, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store'
+    })
+    response.end(
+      JSON.stringify({
+        error: {
+          type: 'image_generation_error',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      })
+    )
+  } finally {
+    releaseImageCall?.()
+  }
+}
+
 function wireApiForModel(channel, model) {
   const modelName = String(model || '').trim()
   const maps = [
@@ -2650,6 +2726,10 @@ async function handleResponsesRequest(
   if (!upstream.ok && forwardedNames.length && upstreamRejectsNativeTools(errorBody)) {
     const nativeToolFailureKind = upstreamFailureKind(upstream.status, errorBody)
     const emulation = toolEmulationRequest(converted.request)
+    const emulatedImageTool = managerImageTool(emulation.catalog)
+    const imageRecoveryInstruction = emulatedImageTool
+      ? `For image generation, call the exact allowed ${emulatedImageTool.name} tool with a prompt argument; reading an image skill is not completion. `
+      : 'For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. '
     const fallbackUpstream = await sendUpstream(emulation.payload)
 
     if (fallbackUpstream.ok) {
@@ -2681,7 +2761,8 @@ async function handleResponsesRequest(
                 recoveryAttemptDescription +
                 'The rejected plan is already visible to the user, so do not repeat, paraphrase, or explain it. Re-check the original user request and returned tool results. ' +
                 'If the rejected answer says it will switch methods, turn that stated method into the next executable tool call now; do not announce the switch again. ' +
-                'For current or time-sensitive information, use exec with the nested web__run tool. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result). ' +
+                'For current or time-sensitive information, use exec with the nested web__run tool. ' +
+                imageRecoveryInstruction +
                 decisionContract
               : retryContext.missingCompletionSignal
                 ? 'The previous answer followed a Codex local tool result but omitted the required completion signal. ' +
@@ -2697,7 +2778,9 @@ async function handleResponsesRequest(
                   : retryContext.toolIntentRequired
                     ? 'The latest request requires a verified tool result, but the previous answer did not emit a valid Codex tool call. ' +
                       recoveryAttemptDescription +
-                      'For current or time-sensitive information, use exec with the nested web__run tool; do not answer from memory. For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. For local actions, use the matching allowed tool. ' +
+                      'For current or time-sensitive information, use exec with the nested web__run tool; do not answer from memory. ' +
+                      imageRecoveryInstruction +
+                      'For local actions, use the matching allowed tool. ' +
                       decisionContract
                     : 'The previous answer stopped at an intermediate promise instead of executing the Codex agent step. ' +
                       recoveryAttemptDescription +
@@ -2891,6 +2974,13 @@ function createProtocolProxy({
 
   let lastDiagnostic = null
   const runtimeWireApis = new Map()
+  const activeImageChannels = new Set()
+  const acquireImageCall = channelId => {
+    if (activeImageChannels.has(channelId)) return null
+    activeImageChannels.add(channelId)
+
+    return () => activeImageChannels.delete(channelId)
+  }
   const routePrefix = `/proxy/${accessToken}`
   const server = http.createServer(async (request, response) => {
     try {
@@ -2911,14 +3001,21 @@ function createProtocolProxy({
       const relativePath = url.pathname.startsWith(routePrefix) ? url.pathname.slice(routePrefix.length) : ''
       const responsesMatch = relativePath.match(/^\/v1\/([^/]+)\/responses(\/compact)?$/)
       const modelsMatch = relativePath.match(/^\/v1\/([^/]+)\/models$/)
+      const imagesMatch = relativePath.match(/^\/v1\/([^/]+)\/images\/generations$/)
+      const imageMcpMatch = relativePath.match(/^\/v1\/([^/]+)\/mcp\/image$/)
 
-      if ((!responsesMatch || request.method !== 'POST') && (!modelsMatch || request.method !== 'GET')) {
+      if (
+        (!responsesMatch || request.method !== 'POST') &&
+        (!modelsMatch || request.method !== 'GET') &&
+        (!imagesMatch || request.method !== 'POST') &&
+        !imageMcpMatch
+      ) {
         response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
         response.end('Not found')
         return
       }
 
-      const channelId = decodeURIComponent((responsesMatch || modelsMatch)[1])
+      const channelId = decodeURIComponent((responsesMatch || modelsMatch || imagesMatch || imageMcpMatch)[1])
       const channel = resolveChannel(channelId)
       const learnedWireApis = runtimeWireApis.get(channelId) || {}
 
@@ -2928,6 +3025,39 @@ function createProtocolProxy({
           lastDiagnostic = diagnostic
           if (typeof onDiagnostic === 'function') onDiagnostic(diagnostic)
         })
+        return
+      }
+      if (imagesMatch) {
+        await handleImagesRequest(
+          request,
+          response,
+          { ...channel, id: channel.id || channelId },
+          diagnostic => {
+            lastDiagnostic = diagnostic
+            if (typeof onDiagnostic === 'function') onDiagnostic(diagnostic)
+          },
+          { acquireImageCall: () => acquireImageCall(channelId) }
+        )
+        return
+      }
+      if (imageMcpMatch) {
+        const signal = createUpstreamSignal(request, response)
+
+        await handleImageMcpRequest(
+          request,
+          response,
+          { ...channel, id: channel.id || channelId },
+          {
+            acquireImageCall: () => acquireImageCall(channelId),
+            onDiagnostic: diagnostic => {
+              lastDiagnostic = { channelId, ...diagnostic }
+              if (typeof onDiagnostic === 'function') onDiagnostic(lastDiagnostic)
+            },
+            readJsonBody,
+            serverVersion: APP_VERSION,
+            signal
+          }
+        )
         return
       }
       await handleResponsesRequest(

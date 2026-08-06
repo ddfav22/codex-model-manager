@@ -4,6 +4,13 @@
 
 ## 1.2.76 - 2026-08-06
 
+### NewAPI 图片生成
+
+- 本地协议代理新增 OpenAI 兼容的 `POST /v1/images/generations` 路由，并把请求转发到当前选中的 NewAPI 渠道；API Key 只保留在管理器进程内。
+- 管理器为 Codex 注册受随机本地能力路径保护的 `generate_image` MCP 工具。Grok 原生工具不兼容时会优先调用这个可审计工具，不再依赖运行时是否提供 OpenAI 内置图片工具。
+- 同时支持上游 `url` 与 `b64_json` 响应；内联图片只接受 PNG、JPEG、WebP，单图上限 20 MiB。提示词、API Key 和完整图片数据不进入诊断日志。
+- 图片生成默认使用 `grok-imagine-image`，工具调用可以显式覆盖渠道实际使用的图片模型；单次最多 4 张，同一渠道只允许一个生成任务，避免意外并发计费。
+
 ### NewAPI 聊天与工具调用
 
 - 参考 Nous Research 的开源 Hermes Agent 协议自愈思路，新增独立 NewAPI Chat Completions 兼容层；Codex 仍拥有工具执行与 Agent Loop，不引入第三方运行时或远程工具网关。

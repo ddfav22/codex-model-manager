@@ -57,7 +57,7 @@ Responses 的 `custom_tool_call` 项 ID 使用 `ctc_`，`function_call` 项 ID �
 
 Grok 可能返回计划句但不发工具调用。只有紧邻当前工具结果或明确需要工具的当前任务才允许恢复；历史工具结果不能触发新任务恢复。正常计划续接没有固定次数和总耗时上限，但单次请求仍有超时，连续五次渠道失败或连续五次完全相同计划会熔断。
 
-图像请求需要引导模型通过 Codex `exec` 桥调用 `tools.image_gen__imagegen`，但是否存在该工具仍由当前 Codex 运行时决定，代理不能伪造工具。
+托管 NewAPI 渠道会在 Codex 配置中注册 `chatgpt_model_manager_image` Streamable HTTP MCP 服务，其 `generate_image` 工具通过当前渠道的 `POST /v1/images/generations` 执行并返回标准 MCP 图片内容或资源链接。MCP URL 必须复用协议代理的随机能力路径，API Key 只能由管理器内部解析；不得写入 Codex 配置、工具参数或日志。若该 MCP 工具未出现在当前 Codex 请求中，兼容层才退回运行时已有的 `exec`/`image_gen__imagegen` 提示，绝不能伪造未注册工具。
 
 Grok 返回工具 JSON 时不一定严格使用 `name` + `arguments`。兼容层允许常见的 `tool_call`/`function` 信封、`tool`/`tool_name` 名称、`args` 和 `exec.input`，但最终工具名仍必须存在于本轮 Codex 允许列表中。
 
