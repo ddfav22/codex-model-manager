@@ -13,6 +13,7 @@ const {
   adaptResponsesRequest,
   fetchWithCapacityRetry,
   normalizeResponsesToolItemIds,
+  responsesRequestToChat,
   runWithAbortTimeout,
   upstreamFailureKind,
   upstreamRejectsNativeTools
@@ -32,6 +33,14 @@ const {
 } = require('./protocol/toolContinuation')
 const { readResponseBufferLimited, readResponseJsonLimited } = require('./protocol/upstreamRequest')
 const { readChatAssistant } = require('./protocol/chatAssistantStream')
+const {
+  deterministicToolCallId,
+  mergeStreamedToolName,
+  normalizeToolArguments,
+  rejectedOptionalChatParameter,
+  sanitizeChatToolHistory,
+  withoutRejectedChatParameter
+} = require('./protocol/newApiChatCompatibility')
 const {
   legacyCleanupCommand,
   legacyScanDecision,
@@ -78,6 +87,114 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  assert.strictEqual(normalizeToolArguments({ command: 'echo ok' }), '{"command":"echo ok"}')
+  assert.strictEqual(mergeStreamedToolName('shell_', 'command'), 'shell_command')
+  assert.strictEqual(mergeStreamedToolName('shell_command', 'shell_command'), 'shell_command')
+  assert.strictEqual(mergeStreamedToolName('shell_', 'shell_command'), 'shell_command')
+  assert.strictEqual(
+    deterministicToolCallId('shell_command', '{"command":"echo ok"}', 0),
+    deterministicToolCallId('shell_command', '{"command":"echo ok"}', 0),
+    'missing provider call ids must be stable across retries'
+  )
+
+  const strictHistory = sanitizeChatToolHistory([
+    { role: 'assistant', content: null, tool_calls: [] },
+    { role: 'tool', tool_call_id: 'orphan', content: 'orphan result' },
+    {
+      role: 'assistant',
+      content: 'Running checks.',
+      tool_calls: [
+        {
+          id: 'call_duplicate',
+          type: 'function',
+          function: { name: 'shell_command', arguments: { command: 'echo one' } }
+        },
+        {
+          id: 'call_duplicate',
+          type: 'function',
+          function: { name: 'shell_command', arguments: '{"command":"echo two"}' }
+        },
+        { id: 'call_invalid', type: 'function', function: { name: '', arguments: '{}' } }
+      ]
+    },
+    { role: 'tool', tool_call_id: 'call_duplicate', content: 'one' },
+    { role: 'tool', tool_call_id: 'call_duplicate', content: 'two' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call_incomplete', type: 'function', function: { name: 'shell_command', arguments: '{}' } }]
+    },
+    { role: 'user', content: 'Continue.' }
+  ])
+  const strictAssistant = strictHistory.messages.find(message => Array.isArray(message.tool_calls))
+
+  assert.deepStrictEqual(
+    strictAssistant.tool_calls.map(call => call.id),
+    ['call_duplicate', 'call_duplicate_d2'],
+    'duplicate call ids must be deterministically uniquified'
+  )
+  assert.strictEqual(strictAssistant.tool_calls[0].function.arguments, '{"command":"echo one"}')
+  assert.deepStrictEqual(
+    strictHistory.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id),
+    ['call_duplicate', 'call_duplicate_d2'],
+    'tool results must remain paired with rewritten ids'
+  )
+  assert.strictEqual(strictHistory.diagnostics.droppedEmptyToolCallArrays, 1)
+  assert.strictEqual(strictHistory.diagnostics.droppedInvalidToolCalls, 1)
+  assert.strictEqual(strictHistory.diagnostics.droppedOrphanToolResults, 1)
+  assert.strictEqual(strictHistory.diagnostics.droppedIncompleteToolCalls, 1)
+  assert.strictEqual(strictHistory.diagnostics.deduplicatedToolCallIds, 1)
+
+  const missingIdPair = [
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: '', type: 'function', function: { name: 'exec', arguments: { input: 'text(true)' } } }]
+    },
+    { role: 'tool', tool_call_id: '', content: 'ok' }
+  ]
+  const firstMissingId = sanitizeChatToolHistory(missingIdPair).messages[0].tool_calls[0].id
+  const secondMissingId = sanitizeChatToolHistory(missingIdPair).messages[0].tool_calls[0].id
+
+  assert.ok(firstMissingId.startsWith('call_'))
+  assert.strictEqual(firstMissingId, secondMissingId)
+
+  const optionalPayload = {
+    stream_options: { include_usage: true },
+    parallel_tool_calls: true,
+    tools: [{ type: 'function', function: { name: 'exec', strict: true, parameters: { type: 'object' } } }]
+  }
+
+  assert.strictEqual(
+    rejectedOptionalChatParameter(400, "Unrecognized request argument supplied: 'stream_options'", optionalPayload),
+    'stream_options'
+  )
+  assert.strictEqual(
+    rejectedOptionalChatParameter(422, 'Extra inputs are not permitted: parallel_tool_calls', optionalPayload),
+    'parallel_tool_calls'
+  )
+  assert.strictEqual(
+    rejectedOptionalChatParameter(400, 'tools[0].function.strict is not supported', optionalPayload),
+    'tool_function_strict'
+  )
+  assert.strictEqual(rejectedOptionalChatParameter(429, 'stream_options unavailable', optionalPayload), '')
+  assert.strictEqual(withoutRejectedChatParameter(optionalPayload, 'stream_options').stream_options, undefined)
+  assert.strictEqual(
+    withoutRejectedChatParameter(optionalPayload, 'tool_function_strict').tools[0].function.strict,
+    undefined
+  )
+  const nonStreamingChat = responsesRequestToChat({
+    model: 'grok-4.5',
+    stream: false,
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'No stream.' }] }]
+  })
+
+  assert.strictEqual(nonStreamingChat.request.stream, false)
+  assert.strictEqual(
+    nonStreamingChat.request.stream_options,
+    undefined,
+    'non-streaming NewAPI requests must not contain stream_options'
+  )
   const projectRoot = path.resolve(__dirname, '..')
   const installerIncludeRelative = String(packageMetadata.build?.nsis?.include || '')
   const installerIncludePath = path.resolve(projectRoot, installerIncludeRelative)

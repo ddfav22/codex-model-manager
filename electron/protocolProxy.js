@@ -46,6 +46,16 @@ const {
 } = require('./protocol/upstreamRequest')
 const { readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
+  MAX_OPTIONAL_PARAMETER_RETRIES,
+  deterministicToolCallId,
+  mergeStreamedToolName,
+  normalizeToolArguments,
+  rejectedOptionalChatParameter,
+  sanitizeChatToolHistory,
+  uniqueToolCallId,
+  withoutRejectedChatParameter
+} = require('./protocol/newApiChatCompatibility')
+const {
   hasInternalToolResult,
   internalAdapterInstruction,
   internalToolCallsTranscript,
@@ -179,13 +189,21 @@ async function fetchWithCapacityRetry(fetcher, { signal, maxRetries = UPSTREAM_C
 
 function upstreamDiagnostic(diagnostic, upstream, errorText = '') {
   const retry = upstream?.codexRetryDiagnostic || {}
+  const chatCompatibility = upstream?.codexChatCompatibility || {}
 
   return {
     ...diagnostic,
     upstreamStatus: Number(upstream?.status || 0),
     upstreamFailureKind: retry.failureKind || (upstream?.ok ? '' : upstreamFailureKind(upstream?.status, errorText)),
     upstreamRetryCount: Number(retry.retryCount || 0),
-    upstreamRetryDelayMs: Number(retry.retryDelayMs || 0)
+    upstreamRetryDelayMs: Number(retry.retryDelayMs || 0),
+    chatCompatibilityRetryCount: Array.isArray(chatCompatibility.removedParameters)
+      ? chatCompatibility.removedParameters.length
+      : 0,
+    chatCompatibilityRemovedParameters: Array.isArray(chatCompatibility.removedParameters)
+      ? chatCompatibility.removedParameters
+      : [],
+    effectiveChatRequestBytes: Number(chatCompatibility.requestBytes || 0)
   }
 }
 
@@ -420,7 +438,7 @@ function chatMessagesFromInput(instructions, input, toolNames) {
         content: null,
         tool_calls: [
           {
-            id: item.call_id || item.id || `call_${randomUUID().replace(/-/g, '')}`,
+            id: item.call_id || item.id || '',
             type: 'function',
             function: {
               name: toolNames.toChat(item.name),
@@ -438,7 +456,7 @@ function chatMessagesFromInput(instructions, input, toolNames) {
         content: null,
         tool_calls: [
           {
-            id: item.call_id || item.id || `call_${randomUUID().replace(/-/g, '')}`,
+            id: item.call_id || item.id || '',
             type: 'function',
             function: {
               name: toolNames.toChat(item.name),
@@ -547,16 +565,20 @@ function chatToolsFromResponses(tools, toolNames) {
 function responsesRequestToChat(body, capability = null) {
   const toolNames = createToolNameMap()
   const tools = chatToolsFromResponses(body.tools, toolNames)
-  const request = {
-    model: body.model,
-    messages: chatMessagesFromInput(
+  const toolHistory = sanitizeChatToolHistory(
+    chatMessagesFromInput(
       managedInstructions(body.instructions, body, body.model),
       normalizeCompactionInput(body.input),
       toolNames
-    ),
-    stream: body.stream !== false,
-    stream_options: { include_usage: true }
+    )
+  )
+  const request = {
+    model: body.model,
+    messages: toolHistory.messages,
+    stream: body.stream !== false
   }
+
+  if (request.stream) request.stream_options = { include_usage: true }
 
   if (tools.length) request.tools = tools
   if (tools.length && body.tool_choice) {
@@ -590,13 +612,59 @@ function responsesRequestToChat(body, capability = null) {
   }
   if (capability?.supportsVerbosity && body.text?.verbosity) request.verbosity = body.text.verbosity
 
-  return { request, toolNames }
+  return { request, toolNames, compatibility: toolHistory.diagnostics }
 }
 
 function upstreamRejectsNativeTools(text) {
   return /tool calls? (?:are|is) not supported|does not support (?:tool|function) calls?|tools? (?:are|is) not supported/i.test(
     String(text || '')
   )
+}
+
+async function sendChatWithCompatibilityFallback(sendRequest, payload) {
+  let compatiblePayload = payload
+  const removedParameters = []
+
+  for (let attempt = 0; attempt <= MAX_OPTIONAL_PARAMETER_RETRIES; attempt += 1) {
+    const upstream = await sendRequest(compatiblePayload)
+
+    if (upstream.ok) {
+      upstream.codexChatCompatibility = {
+        removedParameters,
+        requestBytes: jsonByteLength(compatiblePayload)
+      }
+      return upstream
+    }
+
+    const errorBody = await readResponseTextLimited(upstream)
+    const rejectedParameter = rejectedOptionalChatParameter(upstream.status, errorBody, compatiblePayload)
+
+    if (
+      !rejectedParameter ||
+      removedParameters.includes(rejectedParameter) ||
+      attempt >= MAX_OPTIONAL_PARAMETER_RETRIES
+    ) {
+      upstream.codexChatCompatibility = {
+        removedParameters,
+        requestBytes: jsonByteLength(compatiblePayload),
+        errorBody
+      }
+      return upstream
+    }
+
+    compatiblePayload = withoutRejectedChatParameter(compatiblePayload, rejectedParameter)
+    removedParameters.push(rejectedParameter)
+  }
+
+  throw new Error('NewAPI 兼容重试状态异常')
+}
+
+async function chatUpstreamErrorBody(upstream) {
+  if (typeof upstream?.codexChatCompatibility?.errorBody === 'string') {
+    return upstream.codexChatCompatibility.errorBody
+  }
+
+  return readResponseTextLimited(upstream)
 }
 
 function promptToolCatalog(tools, messages = []) {
@@ -1370,6 +1438,7 @@ function createStreamState(body, toolNames, response) {
     text: '',
     messageId: `msg_${randomUUID().replace(/-/g, '')}`,
     tools: new Map(),
+    announcedToolIds: new Set(),
     usage: null,
     progressOutput: [],
     liveProgress: null,
@@ -1486,25 +1555,39 @@ function ensureTextStarted(state) {
 }
 
 function toolStateFor(state, chatTool, fallbackIndex) {
-  const index = Number(chatTool.index ?? fallbackIndex ?? state.tools.size)
+  const parsedIndex = Number(chatTool.index ?? fallbackIndex)
+  const index = Number.isInteger(parsedIndex) && parsedIndex >= 0 ? parsedIndex : state.tools.size
   let tool = state.tools.get(index)
 
   if (!tool) {
     tool = {
       index,
-      id: chatTool.id || `call_${randomUUID().replace(/-/g, '')}`,
+      id: '',
       itemId: '',
       name: '',
       arguments: '',
+      emittedArgumentsLength: 0,
       announced: false
     }
     state.tools.set(index, tool)
   }
 
-  if (chatTool.id) tool.id = chatTool.id
-  if (chatTool.function?.name) tool.name += chatTool.function.name
+  if (chatTool.id && !tool.announced) tool.id = String(chatTool.id)
+  if (chatTool.function?.name) tool.name = mergeStreamedToolName(tool.name, chatTool.function.name)
 
   return tool
+}
+
+function ensureToolCallId(state, tool) {
+  if (tool.announced) return tool.id
+
+  const candidate =
+    String(tool.id || '').trim() || deterministicToolCallId(tool.name, tool.arguments, Number(tool.index || 0))
+
+  tool.id = uniqueToolCallId(candidate, state.announcedToolIds)
+  state.announcedToolIds.add(tool.id)
+
+  return tool.id
 }
 
 function ensureToolItemId(state, tool) {
@@ -1516,9 +1599,10 @@ function ensureToolItemId(state, tool) {
   return custom
 }
 
-function announceTool(state, tool) {
-  if (tool.announced || !tool.name) return
+function announceTool(state, tool, options = {}) {
+  if (tool.announced || !tool.name || (!tool.id && options.force !== true)) return
   ensureResponseStarted(state)
+  ensureToolCallId(state, tool)
   tool.announced = true
   const custom = ensureToolItemId(state, tool)
 
@@ -1544,13 +1628,27 @@ function announceTool(state, tool) {
   })
 }
 
+function flushToolArgumentDelta(state, tool) {
+  if (!tool.announced || state.toolNames.isCustomChat(tool.name)) return
+
+  const delta = tool.arguments.slice(tool.emittedArgumentsLength)
+
+  if (!delta) return
+  tool.emittedArgumentsLength = tool.arguments.length
+  writeEvent(state.response, 'response.function_call_arguments.delta', {
+    item_id: tool.itemId,
+    output_index: state.outputOffset + (state.textStarted ? tool.index + 1 : tool.index),
+    delta
+  })
+}
+
 function consumeChatChunk(state, chunk) {
   if (chunk?.id && !state.started) state.responseId = chunk.id.replace(/^chatcmpl-/, 'resp_')
   if (chunk?.model) state.model = chunk.model
   if (chunk?.usage) state.usage = chunk.usage
 
   for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
-    const delta = choice.delta || {}
+    const delta = choice.delta && Object.keys(choice.delta).length ? choice.delta : choice.message || choice.delta || {}
     const text = typeof delta.content === 'string' ? sanitizeVisibleAssistantDelta(delta.content) : ''
 
     if (text) {
@@ -1565,23 +1663,15 @@ function consumeChatChunk(state, chunk) {
       })
     }
 
-    for (const chatTool of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
-      const tool = toolStateFor(state, chatTool)
-
-      announceTool(state, tool)
-      const argumentDelta = chatTool.function?.arguments || ''
+    for (const [toolPosition, chatTool] of (Array.isArray(delta.tool_calls) ? delta.tool_calls : []).entries()) {
+      const tool = toolStateFor(state, chatTool, toolPosition)
+      const argumentDelta = normalizeToolArguments(chatTool.function?.arguments)
 
       if (argumentDelta) {
         tool.arguments += argumentDelta
-        announceTool(state, tool)
-        if (tool.announced && !state.toolNames.isCustomChat(tool.name)) {
-          writeEvent(state.response, 'response.function_call_arguments.delta', {
-            item_id: tool.itemId,
-            output_index: state.outputOffset + (state.textStarted ? tool.index + 1 : tool.index),
-            delta: argumentDelta
-          })
-        }
       }
+      announceTool(state, tool)
+      flushToolArgumentDelta(state, tool)
     }
 
     if (delta.function_call) {
@@ -1596,16 +1686,12 @@ function consumeChatChunk(state, chunk) {
       )
 
       announceTool(state, legacyTool)
-      const argumentDelta = delta.function_call.arguments || ''
+      const argumentDelta = normalizeToolArguments(delta.function_call.arguments)
 
       if (argumentDelta) {
         legacyTool.arguments += argumentDelta
-        writeEvent(state.response, 'response.function_call_arguments.delta', {
-          item_id: legacyTool.itemId,
-          output_index: state.outputOffset + (state.textStarted ? 1 : 0),
-          delta: argumentDelta
-        })
       }
+      flushToolArgumentDelta(state, legacyTool)
     }
   }
 }
@@ -1639,8 +1725,9 @@ function finishResponseStream(state) {
   }
 
   for (const tool of [...state.tools.values()].sort((left, right) => left.index - right.index)) {
-    announceTool(state, tool)
+    announceTool(state, tool, { force: true })
     if (!tool.announced) continue
+    flushToolArgumentDelta(state, tool)
     const outputIndex = state.outputOffset + (state.textStarted ? tool.index + 1 : tool.index)
     const custom = state.toolNames.isCustomChat(tool.name)
     const input = customInputFromChatArguments(tool.arguments)
@@ -1770,10 +1857,10 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
     )
     state.textStarted = Boolean(state.text)
   }
-  for (const chatTool of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
-    const tool = toolStateFor(state, chatTool)
+  for (const [toolPosition, chatTool] of (Array.isArray(message.tool_calls) ? message.tool_calls : []).entries()) {
+    const tool = toolStateFor(state, chatTool, toolPosition)
 
-    tool.arguments = chatTool.function?.arguments || ''
+    tool.arguments = normalizeToolArguments(chatTool.function?.arguments)
   }
   if (message.function_call) {
     const tool = toolStateFor(
@@ -1801,6 +1888,8 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
     })
   }
   for (const tool of state.tools.values()) {
+    if (!tool.name) continue
+    ensureToolCallId(state, tool)
     const custom = ensureToolItemId(state, tool)
 
     output.push(
@@ -2490,6 +2579,7 @@ async function handleResponsesRequest(
     hasShellTool: sourceNames.some(name => /(^|[._-])(shell|shell_command|exec)([._-]|$)/i.test(name)),
     hasComputerUseTool: sourceNames.some(name => /computer.?use/i.test(name)),
     instructionsLength: String(body.instructions || '').length,
+    chatHistoryCompatibility: converted.compatibility,
     forwardedRequestBytes: jsonByteLength(converted.request)
   }
 
@@ -2501,19 +2591,23 @@ async function handleResponsesRequest(
     }
   }
   const sendUpstream = (payload, signal = upstreamSignal) =>
-    fetchWithCapacityRetry(
-      () =>
-        fetch(upstreamChatUrl(channel.baseUrl), {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${channel.apiKey}`,
-            'content-type': 'application/json',
-            accept: payload.stream ? 'text/event-stream' : 'application/json'
-          },
-          body: JSON.stringify(payload),
-          signal
-        }),
-      { signal }
+    sendChatWithCompatibilityFallback(
+      compatiblePayload =>
+        fetchWithCapacityRetry(
+          () =>
+            fetch(upstreamChatUrl(channel.baseUrl), {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${channel.apiKey}`,
+                'content-type': 'application/json',
+                accept: compatiblePayload.stream ? 'text/event-stream' : 'application/json'
+              },
+              body: JSON.stringify(compatiblePayload),
+              signal
+            }),
+          { signal }
+        ),
+      payload
     )
   const forcePromptToolEmulation = capability.toolTransport === 'prompt-emulated' && forwardedNames.length > 0
   let emulatedStreamState = null
@@ -2523,7 +2617,7 @@ async function handleResponsesRequest(
         headers: { 'content-type': 'application/json' }
       })
     : await sendUpstream(converted.request)
-  let errorBody = upstream.ok ? '' : await readResponseTextLimited(upstream)
+  let errorBody = upstream.ok ? '' : await chatUpstreamErrorBody(upstream)
 
   if (preferredWireApi === 'chat' && !upstream.ok && endpointCompatibilityFailure(upstream.status, errorBody)) {
     const chatFailure = {
@@ -2646,7 +2740,7 @@ async function handleResponsesRequest(
                     return readChatAssistant(retryUpstream, { onContentDelta: retryContext.onContentDelta })
                   }
 
-                  const retryError = await readResponseTextLimited(retryUpstream)
+                  const retryError = await chatUpstreamErrorBody(retryUpstream)
                   const structuredRecoveryRejected =
                     strictToolRecovery &&
                     retryPayload.response_format &&
@@ -2665,7 +2759,7 @@ async function handleResponsesRequest(
                       })
                     }
                     retryContext.recordFailure?.(recoveryFailureKindForStatus(compatibleRetryUpstream.status))
-                    await readResponseTextLimited(compatibleRetryUpstream)
+                    await chatUpstreamErrorBody(compatibleRetryUpstream)
                   } else {
                     retryContext.recordFailure?.(recoveryFailureKindForStatus(retryUpstream.status))
                   }
@@ -2737,7 +2831,7 @@ async function handleResponsesRequest(
       }
     } else {
       upstream = fallbackUpstream
-      errorBody = await readResponseTextLimited(fallbackUpstream)
+      errorBody = await chatUpstreamErrorBody(fallbackUpstream)
     }
   }
 

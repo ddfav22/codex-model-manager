@@ -455,6 +455,7 @@ async function main() {
   let streamedInternalTranscriptRequests = 0
   let formatFallbackRecoveryRequests = 0
   let highDemandRetryRequests = 0
+  let newApiStrictToolRequests = 0
   let releaseStalledFinalResponse = null
   let markStalledFinalReached
   const stalledFinalReached = new Promise(resolve => {
@@ -609,6 +610,88 @@ async function main() {
       if (requestBody.model === 'grok-context-too-large') {
         response.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '0' })
         response.end(JSON.stringify({ error: { type: 'context_length_exceeded', message: 'too many input tokens' } }))
+        return
+      }
+
+      if (requestBody.model === 'grok-newapi-strict-tool-compat') {
+        newApiStrictToolRequests += 1
+        if (requestBody.stream_options) {
+          response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'Unrecognized request argument: stream_options' } }))
+          return
+        }
+        if (Object.prototype.hasOwnProperty.call(requestBody, 'parallel_tool_calls')) {
+          response.writeHead(422, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'Extra inputs are not permitted: parallel_tool_calls' } }))
+          return
+        }
+        if (requestBody.tools?.some(tool => typeof tool?.function?.strict === 'boolean')) {
+          response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'tools[0].function.strict is not supported' } }))
+          return
+        }
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-newapi-strict-tools',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  tool_calls: [
+                    { index: 0, type: 'function', function: { name: 'shell_', arguments: '{"command":' } },
+                    { index: 1, type: 'function', function: { name: 'exec', arguments: '{"input":' } }
+                  ]
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-newapi-strict-tools',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                message: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_newapi_shared',
+                      type: 'function',
+                      function: { name: 'command', arguments: '"echo one"}' }
+                    },
+                    {
+                      index: 1,
+                      id: 'call_newapi_shared',
+                      type: 'function',
+                      function: { name: 'exec', arguments: '"text(true)"}' }
+                    }
+                  ]
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        response.end(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-newapi-strict-tools',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
+          })}\n\ndata: [DONE]\n\n`
+        )
         return
       }
 
@@ -1557,7 +1640,8 @@ async function main() {
     'grok-identity-self-report',
     'grok-high-demand-retry',
     'grok-high-demand-exhausted',
-    'grok-context-too-large'
+    'grok-context-too-large',
+    'grok-newapi-strict-tool-compat'
   ]
   const modelCapabilities = Object.fromEntries(
     [...expectedCanonicalModels, ...testOnlyModels].map(model => [
@@ -1607,7 +1691,11 @@ async function main() {
         modelAliases: catalogResult.aliases,
         modelCatalog: generatedCatalog.filter(model => expectedPickerModels.includes(model.slug)),
         modelCapabilities,
-        modelWireApis: { 'gpt-native-responses-test': 'responses', 'grok-4.5': 'chat' }
+        modelWireApis: {
+          'gpt-native-responses-test': 'responses',
+          'grok-4.5': 'chat',
+          'grok-newapi-strict-tool-compat': 'chat'
+        }
       }
     }
   })
@@ -1708,6 +1796,59 @@ async function main() {
   assert.strictEqual(upstreamRequests.length, 1)
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamFailureKind, 'context_too_large')
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 0)
+  upstreamRequests.length = 0
+  newApiStrictToolRequests = 0
+  const newApiStrictTools = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-newapi-strict-tool-compat',
+      stream: true,
+      parallel_tool_calls: true,
+      tool_choice: 'auto',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Run both tools.' }] }],
+      tools: [
+        {
+          type: 'function',
+          name: 'shell_command',
+          strict: true,
+          parameters: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command'],
+            additionalProperties: false
+          }
+        },
+        { type: 'custom', name: 'exec', description: 'Run Codex JavaScript orchestration.' }
+      ]
+    })
+  })
+  const newApiStrictToolsBody = await newApiStrictTools.text()
+  const newApiRequests = upstreamRequests.filter(request => request.body.model === 'grok-newapi-strict-tool-compat')
+
+  assert.strictEqual(newApiStrictTools.status, 200)
+  assert.strictEqual(newApiStrictToolRequests, 4)
+  assert.strictEqual(newApiRequests.length, 4)
+  assert.ok(newApiRequests[0].body.stream_options)
+  assert.strictEqual(newApiRequests[1].body.stream_options, undefined)
+  assert.strictEqual(newApiRequests[1].body.parallel_tool_calls, true)
+  assert.strictEqual(newApiRequests[2].body.parallel_tool_calls, undefined)
+  assert.strictEqual(newApiRequests[2].body.tools[0].function.strict, true)
+  assert.strictEqual(newApiRequests[3].body.tools[0].function.strict, undefined)
+  assert.ok(newApiStrictToolsBody.includes('response.function_call_arguments.done'))
+  assert.ok(newApiStrictToolsBody.includes('response.custom_tool_call_input.done'))
+  assert.ok(newApiStrictToolsBody.includes('"call_id":"call_newapi_shared"'))
+  assert.ok(newApiStrictToolsBody.includes('"call_id":"call_newapi_shared_d2"'))
+  assert.ok(newApiStrictToolsBody.includes('"name":"shell_command"'))
+  assert.ok(newApiStrictToolsBody.includes('"arguments":"{\\"command\\":\\"echo one\\"}"'))
+  assert.ok(newApiStrictToolsBody.includes('"input":"text(true)"'))
+  assert.deepStrictEqual(proxyDiagnostics.at(-1).chatCompatibilityRemovedParameters, [
+    'stream_options',
+    'parallel_tool_calls',
+    'tool_function_strict'
+  ])
+  assert.strictEqual(proxyDiagnostics.at(-1).chatCompatibilityRetryCount, 3)
+  assert.ok(proxyDiagnostics.at(-1).effectiveChatRequestBytes > 0)
   upstreamRequests.length = 0
   const fastResponses = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
