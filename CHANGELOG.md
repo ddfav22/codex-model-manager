@@ -4,6 +4,10 @@
 
 ## 1.2.76 - 2026-08-06
 
+### 普通对话与项目边界
+
+- 修复普通 Codex 对话关闭后被管理器按 cwd 自动转换为 Local Project 的问题。`projectless-thread-ids` 现在始终优先，管理器只同步已存在的显式项目和任务归属，不再仅凭对话工作目录创建或固定项目。
+
 ### NewAPI 图片生成
 
 - 本地协议代理新增 OpenAI 兼容的 `POST /v1/images/generations` 路由，并把请求转发到当前选中的 NewAPI 渠道；API Key 只保留在管理器进程内。

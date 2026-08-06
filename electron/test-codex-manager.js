@@ -329,25 +329,69 @@ async function main() {
       randomUUID: () => 'new-local-project'
     }
   })
-  const desktopProjectState = JSON.parse(fs.readFileSync(globalStatePath, 'utf8'))
+  let desktopProjectState = JSON.parse(fs.readFileSync(globalStatePath, 'utf8'))
 
-  assert.strictEqual(desktopProjectSync.changed, true)
-  assert.strictEqual(desktopProjectSync.addedProjectCount, 1)
-  assert.strictEqual(desktopProjectSync.assignedThreadCount, 2)
-  assert.strictEqual(desktopProjectSync.pinnedProjectCount, 2)
-  assert.ok(fs.existsSync(desktopProjectSync.backupPath))
-  assert.deepStrictEqual(desktopProjectState['local-projects']['new-local-project'].rootPaths, [projectDir])
-  assert.strictEqual(desktopProjectState['thread-project-assignments']['test-session'].projectId, 'new-local-project')
-  assert.strictEqual(
-    desktopProjectState['thread-project-assignments']['large-test-session'].projectId,
-    'new-local-project'
-  )
-  assert.deepStrictEqual(desktopProjectState['projectless-thread-ids'], ['unrelated-thread'])
+  assert.strictEqual(desktopProjectSync.changed, false)
+  assert.strictEqual(desktopProjectSync.addedProjectCount, 0)
+  assert.strictEqual(desktopProjectSync.assignedThreadCount, 0)
+  assert.strictEqual(desktopProjectSync.pinnedProjectCount, 1)
+  assert.strictEqual(desktopProjectSync.backupPath, '')
+  assert.strictEqual(desktopProjectState['local-projects']['new-local-project'], undefined)
+  assert.strictEqual(desktopProjectState['thread-project-assignments']['test-session'], undefined)
+  assert.strictEqual(desktopProjectState['thread-project-assignments']['large-test-session'], undefined)
+  assert.deepStrictEqual(desktopProjectState['projectless-thread-ids'], ['test-session', 'unrelated-thread'])
   assert.deepStrictEqual(desktopProjectState['thread-workspace-root-hints'], {
+    'test-session': projectDir,
     'unrelated-thread': externalDir
   })
-  assert.deepStrictEqual(desktopProjectState['pinned-project-ids'], ['existing-project', 'new-local-project'])
+  assert.deepStrictEqual(desktopProjectState['pinned-project-ids'], ['existing-project'])
   assert.deepStrictEqual(desktopProjectState['unrelated-setting'], { preserved: true })
+
+  fs.writeFileSync(
+    globalStatePath,
+    `${JSON.stringify(
+      {
+        ...desktopProjectState,
+        'local-projects': {
+          ...desktopProjectState['local-projects'],
+          'explicit-project': {
+            id: 'explicit-project',
+            name: 'Explicit',
+            rootPaths: [projectDir],
+            createdAt: 2,
+            updatedAt: 2
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  )
+  const explicitProjectSync = manager._internal.syncDesktopProjects(manager.getPaths(options), {
+    desktopProjectOptions: {
+      now: Date.parse('2026-08-03T00:00:01.000Z'),
+      randomUUID: () => 'must-not-create-an-implicit-project'
+    }
+  })
+
+  desktopProjectState = JSON.parse(fs.readFileSync(globalStatePath, 'utf8'))
+  assert.strictEqual(explicitProjectSync.changed, true)
+  assert.strictEqual(explicitProjectSync.addedProjectCount, 0)
+  assert.strictEqual(explicitProjectSync.assignedThreadCount, 1)
+  assert.strictEqual(explicitProjectSync.pinnedProjectCount, 2)
+  assert.ok(fs.existsSync(explicitProjectSync.backupPath))
+  assert.strictEqual(desktopProjectState['thread-project-assignments']['test-session'], undefined)
+  assert.strictEqual(
+    desktopProjectState['thread-project-assignments']['large-test-session'].projectId,
+    'explicit-project'
+  )
+  assert.deepStrictEqual(desktopProjectState['projectless-thread-ids'], ['test-session', 'unrelated-thread'])
+  assert.deepStrictEqual(desktopProjectState['thread-workspace-root-hints'], {
+    'test-session': projectDir,
+    'unrelated-thread': externalDir
+  })
+  assert.deepStrictEqual(desktopProjectState['pinned-project-ids'], ['existing-project', 'explicit-project'])
 
   fs.writeFileSync(
     globalStatePath,
@@ -363,7 +407,7 @@ async function main() {
   assert.strictEqual(repairedPinnedProjects.assignedThreadCount, 0)
   assert.strictEqual(repairedPinnedProjects.pinnedProjectCount, 1)
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(globalStatePath, 'utf8'))['pinned-project-ids'], [
-    'new-local-project'
+    'explicit-project'
   ])
   assert.strictEqual(
     manager._internal.syncDesktopProjects(manager.getPaths(options), {
@@ -1689,11 +1733,38 @@ async function main() {
     })}\n`,
     'utf8'
   )
+  fs.writeFileSync(
+    manager.getPaths(deleteDataOptions).globalStatePath,
+    `${JSON.stringify(
+      {
+        'local-projects': {
+          'explicit-backfill-project': {
+            id: 'explicit-backfill-project',
+            name: 'Backfill',
+            rootPaths: [backfillProjectDir],
+            createdAt: 1,
+            updatedAt: 1
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  )
   const ensuredProjects = manager._internal.ensureProjectsFromSessions(manager.getPaths(deleteDataOptions))
 
   assert.strictEqual(ensuredProjects.addedProjectCount, 1)
   assert.ok(
-    manager.readStatus(deleteDataOptions).projects.some(project => project.path === backfillProjectDir.toLowerCase())
+    manager
+      .readStatus(deleteDataOptions)
+      .projects.some(project => project.path.toLowerCase() === backfillProjectDir.toLowerCase())
+  )
+  assert.strictEqual(
+    manager
+      .readStatus(deleteDataOptions)
+      .projects.some(project => project.path.toLowerCase() === deleteProjectDir.toLowerCase()),
+    true
   )
   const deletedConversationData = await manager.deleteConversationData(
     { scope: 'active', projectPath: deleteProjectDir },
@@ -1707,7 +1778,9 @@ async function main() {
   assert.strictEqual(fs.existsSync(backfillSessionPath), true)
   assert.strictEqual(fs.existsSync(deleteProjectDir), false)
   assert.strictEqual(
-    deletedConversationData.status.projects.some(project => project.path === backfillProjectDir.toLowerCase()),
+    deletedConversationData.status.projects.some(
+      project => project.path.toLowerCase() === backfillProjectDir.toLowerCase()
+    ),
     true
   )
   let busyDeleteAttempts = 0

@@ -21,7 +21,12 @@ const {
   installTomlFilesFromZip,
   safePackageName
 } = require('./features/packageArchive')
-const { GLOBAL_STATE_FILENAME, syncDesktopProjectsFromSessions } = require('./features/codexDesktopProjects')
+const {
+  GLOBAL_STATE_FILENAME,
+  localProjectRoots,
+  readJsonObject,
+  syncDesktopProjectsFromSessions
+} = require('./features/codexDesktopProjects')
 const {
   REASONING_DESCRIPTIONS,
   aggregateModelTests,
@@ -3789,8 +3794,7 @@ function sessionProjectPaths(sessions) {
 }
 
 function ensureProjectsFromSessions(paths, options = {}) {
-  const sessions = listSessions(paths).filter(session => session.location !== 'archived')
-  const projectPaths = sessionProjectPaths(sessions).filter(projectPath => {
+  const projectPaths = localProjectRoots(readJsonObject(paths.globalStatePath)).filter(projectPath => {
     try {
       return fs.existsSync(projectPath) && fs.statSync(projectPath).isDirectory()
     } catch {
@@ -3803,7 +3807,7 @@ function ensureProjectsFromSessions(paths, options = {}) {
   const current = readText(paths.configPath)
   const parsed = parseConfig(current || '')
   const existing = new Set(listProjects(parsed).map(project => project.path.toLowerCase()))
-  const missing = projectPaths.filter(projectPath => !existing.has(projectPath))
+  const missing = projectPaths.filter(projectPath => !existing.has(projectPath.toLowerCase()))
 
   if (!missing.length) return { addedProjectCount: 0, addedProjects: [] }
 

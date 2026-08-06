@@ -81,7 +81,7 @@ Grok 的 prompt-emulated 工具路径必须同时维护“增量显示”和“�
 
 ### Codex Projects 有两层状态
 
-`config.toml [projects]` 只控制目录信任。桌面端 Projects 页读取 `.codex-global-state.json` 的 `local-projects`、`project-order` 和 `thread-project-assignments`。同步流程必须在 Codex 进程关闭后执行，先备份完整状态，只合并这些项目字段，并从 `projectless-thread-ids`/`thread-workspace-root-hints` 移除已经成功归属的任务。文件损坏或写后校验失败时禁止启动 Codex并恢复备份。
+`config.toml [projects]` 只控制目录信任。桌面端 Projects 页读取 `.codex-global-state.json` 的 `local-projects`、`project-order` 和 `thread-project-assignments`。同步流程必须在 Codex 进程关闭后执行，先备份完整状态，只合并这些项目字段；`projectless-thread-ids` 是普通对话的显式归属，优先级高于 cwd，禁止仅凭会话 cwd 创建项目或移除普通对话标记。只有已归属现有 Local Project 的任务才能清理对应 workspace hint。文件损坏或写后校验失败时禁止启动 Codex并恢复备份。
 
 Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。仅创建 Local Project 和任务归属仍可能让所有任务停留在统一列表；同步到的项目 ID 必须追加到固定列表，同时保留用户原有固定项并保持幂等。
 

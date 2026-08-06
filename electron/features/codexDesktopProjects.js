@@ -1,7 +1,5 @@
 const fs = require('fs')
 const path = require('path')
-const { randomUUID } = require('crypto')
-
 const GLOBAL_STATE_FILENAME = '.codex-global-state.json'
 
 function readJsonObject(filePath) {
@@ -49,6 +47,28 @@ function validSessionProjects(sessions) {
   })
 }
 
+function localProjectRoots(state) {
+  const localProjects =
+    state?.['local-projects'] && typeof state['local-projects'] === 'object' && !Array.isArray(state['local-projects'])
+      ? state['local-projects']
+      : {}
+  const roots = []
+  const seen = new Set()
+
+  for (const project of Object.values(localProjects)) {
+    for (const rootPath of Array.isArray(project?.rootPaths) ? project.rootPaths : []) {
+      const resolved = resolvedRoot(rootPath)
+      const key = rootKey(resolved)
+
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      roots.push(resolved)
+    }
+  }
+
+  return roots
+}
+
 function backupStateFile(filePath, backupDir, now) {
   if (!fs.existsSync(filePath)) return ''
 
@@ -85,9 +105,9 @@ function writeVerifiedJson(filePath, value, backupPath) {
 }
 
 function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}) {
-  const sessionProjects = validSessionProjects(sessions)
+  const validSessions = validSessionProjects(sessions)
 
-  if (!sessionProjects.length) {
+  if (!validSessions.length) {
     return {
       changed: false,
       addedProjectCount: 0,
@@ -109,6 +129,9 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
     !Array.isArray(state['thread-project-assignments'])
       ? { ...state['thread-project-assignments'] }
       : {}
+  const projectlessThreadIds = new Set(
+    (Array.isArray(state['projectless-thread-ids']) ? state['projectless-thread-ids'] : []).map(String)
+  )
   const projectsByRoot = new Map()
 
   for (const [projectId, project] of Object.entries(localProjects)) {
@@ -119,31 +142,24 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
     }
   }
 
+  const sessionProjects = validSessions.flatMap(session => {
+    if (projectlessThreadIds.has(session.id)) return []
+
+    const current = assignments[session.id]
+    const assignedProjectId =
+      current?.projectKind === 'local' && localProjects[current.projectId] ? String(current.projectId) : ''
+    const projectId = assignedProjectId || projectsByRoot.get(rootKey(session.cwd)) || ''
+
+    return projectId ? [{ ...session, projectId }] : []
+  })
   const timestamp = Number(options.now || Date.now())
-  const createId = typeof options.randomUUID === 'function' ? options.randomUUID : randomUUID
-  const addedProjectIds = []
-  const addedProjects = []
   const syncedProjectIds = []
   const syncedProjectIdSet = new Set()
   let assignedThreadCount = 0
 
   for (const session of sessionProjects) {
     const key = rootKey(session.cwd)
-    let projectId = projectsByRoot.get(key)
-
-    if (!projectId) {
-      projectId = createId()
-      localProjects[projectId] = {
-        id: projectId,
-        name: path.basename(session.cwd) || session.cwd,
-        rootPaths: [session.cwd],
-        createdAt: timestamp,
-        updatedAt: timestamp
-      }
-      projectsByRoot.set(key, projectId)
-      addedProjectIds.push(projectId)
-      addedProjects.push(session.cwd)
-    }
+    const projectId = session.projectId
 
     if (!syncedProjectIdSet.has(projectId)) {
       syncedProjectIdSet.add(projectId)
@@ -184,17 +200,13 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
   const existingOrder = Array.isArray(state['project-order']) ? state['project-order'].map(String) : []
   const knownProjectIds = new Set(Object.keys(localProjects))
   const orderCandidates = [
-    ...addedProjectIds,
-    ...existingOrder.filter(projectId => knownProjectIds.has(projectId) && !addedProjectIds.includes(projectId)),
-    ...Object.keys(localProjects).filter(
-      projectId => !addedProjectIds.includes(projectId) && !existingOrder.includes(projectId)
-    )
+    ...existingOrder.filter(projectId => knownProjectIds.has(projectId)),
+    ...Object.keys(localProjects).filter(projectId => !existingOrder.includes(projectId))
   ]
   const projectOrder = [...new Set(orderCandidates)]
   const pinnedBefore = Array.isArray(state['pinned-project-ids']) ? state['pinned-project-ids'].map(String) : []
   const pinnedProjectIds = [...new Set([...pinnedBefore, ...syncedProjectIds])]
   const changed =
-    addedProjectIds.length > 0 ||
     assignedThreadCount > 0 ||
     projectlessAfter.length !== projectlessBefore.length ||
     Object.keys(hintsAfter).length !== Object.keys(hintsBefore).length ||
@@ -227,8 +239,8 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
 
   return {
     changed: true,
-    addedProjectCount: addedProjectIds.length,
-    addedProjects,
+    addedProjectCount: 0,
+    addedProjects: [],
     assignedThreadCount,
     projectCount: Object.keys(localProjects).length,
     pinnedProjectCount: pinnedProjectIds.length,
@@ -240,6 +252,7 @@ module.exports = {
   GLOBAL_STATE_FILENAME,
   readJsonObject,
   rootKey,
+  localProjectRoots,
   syncDesktopProjectsFromSessions,
   validSessionProjects
 }
