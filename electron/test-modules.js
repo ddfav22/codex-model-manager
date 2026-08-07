@@ -285,14 +285,10 @@ async function main() {
     diagnosticClassification({ outcome: 'upstream_error', upstreamFailureKind: 'upstream_timeout' }),
     { diagnosticKind: 'upstream_timeout', diagnosticSeverity: 'warn' }
   )
-  assert.deepStrictEqual(
-    diagnosticClassification({ nativeEmptyRecovery: { attempted: true, recovered: true, exhausted: false } }),
-    { diagnosticKind: 'upstream_empty_recovered', diagnosticSeverity: 'info' }
-  )
-  assert.deepStrictEqual(
-    diagnosticClassification({ nativeEmptyRecovery: { attempted: true, recovered: false, exhausted: true } }),
-    { diagnosticKind: 'upstream_empty_response', diagnosticSeverity: 'warn' }
-  )
+  assert.deepStrictEqual(diagnosticClassification({ taskTermination: { shouldContinue: true, kind: 'refusal' } }), {
+    diagnosticKind: 'task_terminated',
+    diagnosticSeverity: 'warn'
+  })
   assert.deepStrictEqual(
     diagnosticClassification({
       emulation: {

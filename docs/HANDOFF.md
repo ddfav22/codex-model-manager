@@ -85,13 +85,19 @@ Grok 的 prompt-emulated 工具路径必须同时维护“增量显示”和“�
 
 Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。仅创建 Local Project 和任务归属仍可能让所有任务停留在统一列表；同步到的项目 ID 必须追加到固定列表，同时保留用户原有固定项并保持幂等。
 
-### 任务恢复必须由用户触发并避免重复执行
+### 手动任务恢复必须由用户触发并避免重复执行
 
 对话管理的恢复入口只接受规范 UUID 和未归档的本地 session。先用 `thread/read(includeTurns: true)` 检查运行时与最后一个 turn；任一状态仍为 active/inProgress 时必须拒绝，不能创建并发恢复回合。工作区预检只记录目录是否存在、是否为 Git 仓库和已跟踪改动数量，不记录文件名、diff、对话或工具输出。
 
 恢复通过 `codex exec --json --skip-git-repo-check resume <id> -` 执行，固定恢复指令走 stdin，禁止出现在命令参数和日志。只有 CLI 在 `turn.started`/工具或文件事件出现之前，以明确 session/rollout/history 损坏或不兼容分类失败时，才允许调用一次 `thread/fork` 并恢复新任务；认证、额度、高负载、权限、审批、网络和未知错误直接停止。恢复子进程不脱离客户端，客户端退出时必须终止，且不得使用绕过审批或沙箱的参数。
 
-原生 Responses 的成功空终态是独立的协议兼容边界：只有明确收到 `response.completed`，且整次响应没有输出文本、可见推理摘要或任何工具调用，才允许把原 input 与一条内部续接指令再次发送一次。正常流在首个真实输出出现后必须立即透传。第二次仍为空时合成可见停止消息；第二次为认证、额度、权限、网络或其他错误时直接返回错误，禁止第三次请求。诊断不得保存内部续接指令或响应正文。
+### 原生 Responses 终止续接必须创建可见新 turn
+
+协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。只有 refusal、没有最终文本/工具调用的 completed，或没有工具调用的 incomplete 才标记为可续接；HTTP 认证、额度、权限、网络错误和 `response.failed` 不得触发。
+
+任务监督器收到可续接终止后，先用 `thread/read(includeTurns: true)` 等待当前 turn 不再 active/inProgress，再优先通过正在运行的桌面 app-server `turn/start` 向同一 thread 提交 `{type:"text", text:"继续"}`。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；两条路径都不得添加审批、沙箱或权限绕过参数。
+
+计数以同一 thread 的连续终止链为范围，成功创建一个“继续”turn 才计一次，最多三次。相同 turn 的重复诊断必须去重；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限/网络或代理错误立即停止。第四次终止只记录熔断，不再创建 turn。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-app-server`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。
 
 ### 未来承诺不是 Grok 的终态
 

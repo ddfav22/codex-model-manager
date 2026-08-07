@@ -30,6 +30,11 @@ process.env.CODEX_MANAGER_STATE_DIR = portableStorage.managerState
 const { configureRuntimeLogger, getRuntimeLogPath, logError, logEvent } = require('./runtimeLogger')
 const { createAppUpdater, repositoryFromPackageMetadata } = require('./features/appUpdater')
 const { completePendingPatch } = require('./features/patchInstaller')
+const {
+  createTaskAutoContinuationSupervisor,
+  startVisibleTaskContinuation
+} = require('./features/taskAutoContinuation')
+const { redactedTaskId, startCodexExecRecovery } = require('./features/taskRecovery')
 const { toUserFacingErrorMessage } = require('./features/userFacingErrors')
 const manager = require('./codexManager')
 const { createProtocolProxy } = require('./protocolProxy')
@@ -71,6 +76,61 @@ const appUpdater = createAppUpdater({
   onBeforeInstall: () => {
     isQuitting = true
     setImmediate(() => app.quit())
+  }
+})
+const taskAutoContinuation = createTaskAutoContinuationSupervisor({
+  startContinuation: request =>
+    startVisibleTaskContinuation({
+      ...request,
+      inspectTask: threadId => manager.inspectCodexTaskRecovery(threadId),
+      runDesktopRequest: ({ codexPath, cwd, threadId, input }) =>
+        manager.runCodexAppServerRequest(
+          codexPath,
+          'turn/start',
+          { threadId, input },
+          {
+            cwd,
+            env: { ...process.env, CODEX_HOME: manager.getPaths().codexHome },
+            timeoutMs: 15000,
+            connectDesktop: true
+          }
+        ),
+      startFallback: ({ codexPath, cwd, threadId, prompt }) => {
+        const recovery = startCodexExecRecovery({
+          taskId: threadId,
+          codexPath,
+          cwd,
+          env: { ...process.env, CODEX_HOME: manager.getPaths().codexHome },
+          prompt
+        })
+
+        recovery.completion.then(result => {
+          logEvent(result.ok ? 'info' : 'warn', 'task.autoContinue.fallbackComplete', {
+            threadRef: redactedTaskId(threadId),
+            ok: result.ok,
+            turnStarted: result.turnStarted,
+            workStarted: result.workStarted,
+            failureCategory: result.failureCategory,
+            exitCode: result.exitCode
+          })
+        })
+        return recovery
+      }
+    }),
+  onEvent: event => {
+    const severity = event.type === 'failed' || event.type === 'exhausted' ? 'warn' : 'info'
+
+    logEvent(severity, `task.autoContinue.${event.type}`, {
+      threadRef: redactedTaskId(event.threadId),
+      attempt: Number(event.attempt || 0),
+      attempts: Number(event.attempts || 0),
+      maxContinuations: Number(event.maxContinuations || 0),
+      mode: String(event.mode || ''),
+      reason: String(event.reason || ''),
+      terminationKind: String(event.terminationKind || ''),
+      errorName: String(event.errorName || ''),
+      errorCode: String(event.errorCode || '')
+    })
   }
 })
 
@@ -368,6 +428,11 @@ async function initializeProtocolRuntime() {
     generatedImagesRoot: portableStorage.generatedImages,
     resolveChannel: id => manager.getRelayRuntime(id),
     onDiagnostic: diagnostic => {
+      taskAutoContinuation.handleDiagnostic(diagnostic).catch(error => {
+        logError('task.autoContinue.supervisorError', error, {
+          threadRef: diagnostic?.codexThreadId ? redactedTaskId(diagnostic.codexThreadId) : ''
+        })
+      })
       writeRuntimeDiagnostic({ lastProxyRequest: diagnostic }, { lightweight: true })
       const publicSummary = publicDiagnosticSummary(diagnostic)
 

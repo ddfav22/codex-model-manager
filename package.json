@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-model-manager",
-  "version": "1.2.82",
+  "version": "1.2.83",
   "updateRuntimeId": "electron-33-win-x64-v1",
   "description": "Windows desktop manager for ChatGPT model providers and relay channels.",
   "author": "ChatGPT Model Manager",
@@ -25,8 +25,9 @@
     "dist:patch": "node tools/create-update-patch.js",
     "pack": "npm run build && electron-builder --win --dir",
     "start": "electron .",
-    "test:core": "node electron/test-codex-manager.js && npm run test:agent-loop && npm run test:friendly-errors && npm run test:updater",
+    "test:core": "node electron/test-codex-manager.js && npm run test:agent-loop && npm run test:auto-continuation && npm run test:friendly-errors && npm run test:updater",
     "test:agent-loop": "node electron/test-grok-codex-agent-loop.js",
+    "test:auto-continuation": "node electron/test-task-auto-continuation.js",
     "test:friendly-errors": "node electron/test-user-facing-errors.js",
     "test:modules": "node electron/test-modules.js",
     "test:updater": "node electron/test-app-updater.js && node electron/test-patch-installer.js && node electron/test-update-patch.js",

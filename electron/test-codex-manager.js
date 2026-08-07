@@ -115,6 +115,7 @@ async function main() {
   brokenPipeChild.kill = () => {
     brokenPipeChild.killed = true
   }
+  let brokenPipeArguments = null
 
   await assert.rejects(
     manager._internal.runCodexAppServerRequest(
@@ -122,13 +123,18 @@ async function main() {
       'thread/list',
       {},
       {
+        connectDesktop: true,
         timeoutMs: 1000,
-        spawnProcess: () => brokenPipeChild
+        spawnProcess: (_file, args) => {
+          brokenPipeArguments = args
+          return brokenPipeChild
+        }
       }
     ),
     error => error?.code === 'EPIPE' && /管道已关闭/.test(error.message)
   )
   assert.strictEqual(brokenPipeChild.killed, true)
+  assert.deepStrictEqual(brokenPipeArguments, ['app-server', 'proxy'])
 
   const batchChild = new EventEmitter()
 

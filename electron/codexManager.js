@@ -5472,7 +5472,8 @@ function findBundledCodexTool(fileName, options = {}) {
 function runCodexAppServerRequest(codexPath, method, params = {}, options = {}) {
   return new Promise((resolve, reject) => {
     const spawnProcess = options.spawnProcess || spawn
-    const child = spawnProcess(codexPath, ['app-server'], {
+    const appServerArguments = options.connectDesktop === true ? ['app-server', 'proxy'] : ['app-server']
+    const child = spawnProcess(codexPath, appServerArguments, {
       cwd: options.cwd || os.homedir(),
       env: options.env || process.env,
       windowsHide: true,
