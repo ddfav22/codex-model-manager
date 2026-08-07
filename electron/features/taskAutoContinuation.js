@@ -172,7 +172,8 @@ function createTaskAutoContinuationSupervisor(options = {}) {
           errorName: String(error?.name || 'Error'),
           errorCode: String(error?.code || ''),
           errorPhase: String(error?.continuationPhase || ''),
-          errorMessage: continuationErrorMessage(error)
+          errorMessage: continuationErrorMessage(error),
+          terminationKind
         })
 
         return { action: 'failed', attempt: nextAttempt, error }

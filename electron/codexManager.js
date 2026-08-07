@@ -96,6 +96,7 @@ let codexTargetsCache = { expiresAt: 0, targets: [], appLaunchers: [] }
 let codexInstallationEvidenceCache = { expiresAt: 0, evidence: null }
 const sessionMetaCache = new Map()
 const activeTaskRecoveries = new Map()
+const continuationRuntimeCopies = new Map()
 
 function execFileText(file, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -6530,16 +6531,116 @@ async function inspectCodexTaskRecovery(taskId, options = {}) {
   }
 }
 
-function resolveCodexContinuationTarget(options = {}) {
-  const paths = getPaths(options)
-  const explicitTargets = [options.codexCliPath, ...(Array.isArray(options.codexTargets) ? options.codexTargets : [])]
-    .map(candidate => String(candidate || '').trim())
-    .filter(Boolean)
-  let codexPath = explicitTargets.find(
-    candidate => path.basename(candidate).toLowerCase() === 'codex.exe' && fs.existsSync(candidate)
-  )
+function windowsAppsRoot(options = {}) {
+  return path.resolve(options.windowsAppsRoot || 'C:\\Program Files\\WindowsApps')
+}
 
-  if (!codexPath) codexPath = findCodexCli(options)
+function isWindowsAppsPath(candidate, options = {}) {
+  const root = windowsAppsRoot(options)
+  const resolved = path.resolve(String(candidate || ''))
+
+  return resolved.toLowerCase().startsWith(root.toLowerCase() + path.sep)
+}
+
+function trustedWindowsAppsCodexPackage(candidate, options = {}) {
+  if (!isWindowsAppsPath(candidate, options)) return ''
+
+  const relative = path.relative(windowsAppsRoot(options), path.resolve(candidate))
+  const parts = relative.split(path.sep)
+  const validResourcePath =
+    (parts.length === 4 && /^app$/i.test(parts[1]) && /^resources$/i.test(parts[2])) ||
+    (parts.length === 5 && /^app$/i.test(parts[1]) && /^resources$/i.test(parts[2]) && /^codex$/i.test(parts[3]))
+
+  if (!validResourcePath || !/^OpenAI\.(?:Codex|ChatGPT)_/i.test(parts[0])) return ''
+  if (String(parts.at(-1) || '').toLowerCase() !== 'codex.exe') return ''
+  return parts[0]
+}
+
+async function materializeCodexContinuationRuntime(sourcePath, options = {}) {
+  const packageName = trustedWindowsAppsCodexPackage(sourcePath, options)
+
+  if (!packageName) throw new Error('拒绝复制未经验证的 WindowsApps Codex 运行时')
+
+  const source = path.resolve(sourcePath)
+  const sourceStat = await fs.promises.stat(source)
+
+  if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('WindowsApps Codex 运行时文件无效')
+
+  const paths = getPaths(options)
+  const safePackage = packageName.replace(/[^a-z0-9._-]+/gi, '-')
+  const runtimeRoot = path.resolve(
+    options.continuationRuntimeDir ||
+      path.join(paths.stateDir, 'continuation-runtime', safePackage + '-' + sourceStat.size)
+  )
+  const targetPath = path.join(runtimeRoot, 'codex.exe')
+  const copyKey = source.toLowerCase() + '|' + sourceStat.size + '|' + runtimeRoot.toLowerCase()
+  const reusableTarget = async () => {
+    try {
+      const targetStat = await fs.promises.stat(targetPath)
+
+      return targetStat.isFile() && targetStat.size === sourceStat.size
+    } catch {
+      return false
+    }
+  }
+
+  if (await reusableTarget()) return targetPath
+  if (continuationRuntimeCopies.has(copyKey)) return continuationRuntimeCopies.get(copyKey)
+
+  const operation = (async () => {
+    await fs.promises.mkdir(runtimeRoot, { recursive: true })
+    const temporaryPath = path.join(runtimeRoot, '.codex-copy-' + process.pid + '-' + Date.now() + '.tmp')
+
+    try {
+      await fs.promises.copyFile(source, temporaryPath)
+      const copiedStat = await fs.promises.stat(temporaryPath)
+
+      if (!copiedStat.isFile() || copiedStat.size !== sourceStat.size) {
+        throw new Error('WindowsApps Codex 运行时复制后校验失败')
+      }
+      try {
+        await fs.promises.rename(temporaryPath, targetPath)
+      } catch (error) {
+        if (!(await reusableTarget())) throw error
+      }
+      return targetPath
+    } finally {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {})
+    }
+  })()
+
+  continuationRuntimeCopies.set(copyKey, operation)
+
+  try {
+    return await operation
+  } finally {
+    continuationRuntimeCopies.delete(copyKey)
+  }
+}
+
+async function resolveCodexContinuationTarget(options = {}) {
+  const paths = getPaths(options)
+  const discoverCodexCli = typeof options.findCodexCli === 'function' ? options.findCodexCli : findCodexCli
+  const candidates = [
+    options.codexCliPath,
+    ...(Array.isArray(options.codexTargets) ? options.codexTargets : []),
+    options.skipCodexDiscovery === true ? '' : discoverCodexCli(options)
+  ]
+    .map(candidate => String(candidate || '').trim())
+    .filter(
+      (candidate, index, items) =>
+        candidate &&
+        path.basename(candidate).toLowerCase() === 'codex.exe' &&
+        fs.existsSync(candidate) &&
+        items.findIndex(item => item.toLowerCase() === candidate.toLowerCase()) === index
+    )
+  let codexPath = candidates.find(candidate => !isWindowsAppsPath(candidate, options))
+
+  if (!codexPath) {
+    const protectedSource = candidates.find(candidate => trustedWindowsAppsCodexPackage(candidate, options))
+
+    if (protectedSource) codexPath = await materializeCodexContinuationRuntime(protectedSource, options)
+  }
   if (!codexPath) throw new Error('没有找到 ChatGPT/Codex 自带的 codex.exe')
 
   return {
@@ -6845,11 +6946,13 @@ module.exports = {
     preferredCodexTarget,
     repairGeneratedCodexFiles,
     readResponseTextLimited,
+    materializeCodexContinuationRuntime,
     runCodexAppServerRequest,
     runCodexAppServerBatchRequests,
     removeRootKey,
     removeTableBlock,
     setRootKey,
+    trustedWindowsAppsCodexPackage,
     writeApiKeyAuth,
     writeChannelModelCatalog
   }

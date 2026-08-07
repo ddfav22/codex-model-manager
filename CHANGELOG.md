@@ -2,6 +2,18 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.87 - 2026-08-07
+
+### 修复 WindowsApps CLI 的 spawn EPERM
+
+- 修复 1.2.86 已识别终止并进入 `turn/steer`，但直接执行 Microsoft Store 受保护目录中的 `codex.exe` 时被 Windows 以 `EPERM` 拒绝，导致“继续”仍未发送的问题。
+- 自动续接现在优先使用用户目录中可执行的 Codex CLI。仅剩 Store CLI 时，会把已安装 OpenAI Codex/ChatGPT 包内的官方运行时原子复制并校验到 manager 状态目录后复用，再通过正式 `app-server proxy` 或 `exec resume` 路径发送；不会修改 Store 安装目录。
+- WindowsApps 来源必须匹配 OpenAI Codex/ChatGPT 官方包和固定的 `app/resources[/codex]/codex.exe` 结构。其他包、残缺复制和未验证路径全部拒绝；同一来源的并发续接共享一次复制操作。
+
+### 测试
+
+- 新增受保护 Store 路径不直接执行、可执行用户 CLI 优先、官方 Store CLI 物化、并发复用、原子临时文件清理、既有副本复用和非 OpenAI 包拒绝回归；现场错误阶段继续由真实 runtime 装配测试覆盖。
+
 ## 1.2.86 - 2026-08-07
 
 ### 修复 1.2.85 自动发送前的 TypeError

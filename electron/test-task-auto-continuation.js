@@ -171,6 +171,7 @@ async function main() {
   assert.strictEqual(failureEvents.at(-1).errorName, 'TypeError')
   assert.strictEqual(failureEvents.at(-1).errorPhase, 'resolve-target')
   assert.strictEqual(failureEvents.at(-1).errorMessage, 'cannot resolve continuation target; [redacted]')
+  assert.strictEqual(failureEvents.at(-1).terminationKind, 'refusal')
 
   let legacyDelayCalled = false
   const directStarts = []

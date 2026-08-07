@@ -705,11 +705,104 @@ async function main() {
   fs.mkdirSync(continuationBin, { recursive: true })
   fs.writeFileSync(continuationCodexPath, 'test codex executable', 'utf8')
   assert.deepStrictEqual(
-    manager.resolveCodexContinuationTarget({
+    await manager.resolveCodexContinuationTarget({
       codexHome: tempRoot,
       codexTargets: [path.join(tempRoot, 'ChatGPT.exe'), continuationCodexPath]
     }),
     { codexPath: continuationCodexPath, cwd: tempRoot }
+  )
+
+  const windowsAppsRoot = path.join(tempRoot, 'WindowsApps')
+  const protectedPackageRoot = path.join(windowsAppsRoot, 'OpenAI.Codex_26.730.8199.0_x64__test')
+  const protectedCodexPath = path.join(protectedPackageRoot, 'app', 'resources', 'codex.exe')
+  const continuationStateDir = path.join(tempRoot, 'continuation-state')
+
+  fs.mkdirSync(path.dirname(protectedCodexPath), { recursive: true })
+  fs.writeFileSync(protectedCodexPath, 'protected store codex executable', 'utf8')
+  assert.deepStrictEqual(
+    await manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      stateDir: continuationStateDir,
+      windowsAppsRoot,
+      codexTargets: [protectedCodexPath, continuationCodexPath],
+      skipCodexDiscovery: true
+    }),
+    { codexPath: continuationCodexPath, cwd: tempRoot }
+  )
+  const materializedTargets = await Promise.all([
+    manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      stateDir: continuationStateDir,
+      windowsAppsRoot,
+      codexTargets: [protectedCodexPath],
+      skipCodexDiscovery: true
+    }),
+    manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      stateDir: continuationStateDir,
+      windowsAppsRoot,
+      codexTargets: [protectedCodexPath],
+      skipCodexDiscovery: true
+    })
+  ])
+  const materializedCodexPath = materializedTargets[0].codexPath
+
+  assert.deepStrictEqual(materializedTargets[0], materializedTargets[1])
+  assert.notStrictEqual(materializedCodexPath, protectedCodexPath)
+  assert.ok(materializedCodexPath.startsWith(continuationStateDir + path.sep))
+  assert.strictEqual(path.basename(materializedCodexPath), 'codex.exe')
+  assert.strictEqual(fs.readFileSync(materializedCodexPath, 'utf8'), 'protected store codex executable')
+  assert.strictEqual(
+    fs
+      .readdirSync(path.dirname(materializedCodexPath))
+      .some(name => name.startsWith('.codex-copy-') && name.endsWith('.tmp')),
+    false
+  )
+  const materializedModifiedAt = fs.statSync(materializedCodexPath).mtimeMs
+  const reusedMaterializedTarget = await manager.resolveCodexContinuationTarget({
+    codexHome: tempRoot,
+    stateDir: continuationStateDir,
+    windowsAppsRoot,
+    codexTargets: [protectedCodexPath],
+    skipCodexDiscovery: true
+  })
+
+  assert.strictEqual(reusedMaterializedTarget.codexPath, materializedCodexPath)
+  assert.strictEqual(fs.statSync(materializedCodexPath).mtimeMs, materializedModifiedAt)
+
+  const untrustedStoreCodexPath = path.join(windowsAppsRoot, 'Other.Package_1.0.0', 'app', 'resources', 'codex.exe')
+
+  fs.mkdirSync(path.dirname(untrustedStoreCodexPath), { recursive: true })
+  fs.writeFileSync(untrustedStoreCodexPath, 'untrusted executable', 'utf8')
+  await assert.rejects(
+    manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      stateDir: continuationStateDir,
+      windowsAppsRoot,
+      codexTargets: [untrustedStoreCodexPath],
+      skipCodexDiscovery: true
+    }),
+    /没有找到 ChatGPT\/Codex 自带的 codex\.exe/
+  )
+  const emptyProtectedCodexPath = path.join(
+    windowsAppsRoot,
+    'OpenAI.Codex_26.730.9000.0_x64__test',
+    'app',
+    'resources',
+    'codex.exe'
+  )
+
+  fs.mkdirSync(path.dirname(emptyProtectedCodexPath), { recursive: true })
+  fs.writeFileSync(emptyProtectedCodexPath, '')
+  await assert.rejects(
+    manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      stateDir: continuationStateDir,
+      windowsAppsRoot,
+      codexTargets: [emptyProtectedCodexPath],
+      skipCodexDiscovery: true
+    }),
+    /运行时文件无效/
   )
 
   const recoveryProgress = []
