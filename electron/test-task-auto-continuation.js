@@ -157,7 +157,10 @@ async function main() {
   const failedSupervisor = createTaskAutoContinuationSupervisor({
     onEvent: event => failureEvents.push(event),
     startContinuation: async () => {
-      throw Object.assign(new Error('cannot start'), { code: 'ESTART' })
+      throw Object.assign(new TypeError('cannot resolve continuation target; token=super-secret-token-value'), {
+        code: 'ESTART',
+        continuationPhase: 'resolve-target'
+      })
     }
   })
   const failed = await failedSupervisor.handleDiagnostic(termination(TURN_IDS[0]))
@@ -165,6 +168,9 @@ async function main() {
   assert.strictEqual(failed.action, 'failed')
   assert.strictEqual(failedSupervisor.getState(THREAD_ID).attempts, 0)
   assert.strictEqual(failureEvents.at(-1).errorCode, 'ESTART')
+  assert.strictEqual(failureEvents.at(-1).errorName, 'TypeError')
+  assert.strictEqual(failureEvents.at(-1).errorPhase, 'resolve-target')
+  assert.strictEqual(failureEvents.at(-1).errorMessage, 'cannot resolve continuation target; [redacted]')
 
   let legacyDelayCalled = false
   const directStarts = []
@@ -360,7 +366,7 @@ async function main() {
       },
       startFallback: () => ({ completion: Promise.resolve() })
     }),
-    /permission denied/
+    error => /permission denied/.test(error?.message) && error?.continuationPhase === 'turn-start'
   )
 
   await assert.rejects(
@@ -377,7 +383,21 @@ async function main() {
       },
       startFallback: () => ({ completion: Promise.resolve() })
     }),
-    /active_turn_not_steerable/
+    error => /active_turn_not_steerable/.test(error?.message) && error?.continuationPhase === 'turn-steer'
+  )
+
+  await assert.rejects(
+    startVisibleTaskContinuation({
+      threadId: THREAD_ID,
+      sourceTurnId: TURN_IDS[0],
+      inspectTask: async () => {
+        throw new TypeError('session metadata is not iterable')
+      },
+      runDesktopRequest: async () => {},
+      runDesktopSteer: async () => {},
+      startFallback: () => ({ completion: Promise.resolve() })
+    }),
+    error => /session metadata/.test(error?.message) && error?.continuationPhase === 'resolve-target'
   )
 
   console.log('task auto-continuation tests passed')

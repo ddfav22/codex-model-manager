@@ -2,6 +2,19 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.86 - 2026-08-07
+
+### 修复 1.2.85 自动发送前的 TypeError
+
+- 修复自动续接调用了未公开导出的 app-server 请求函数，导致运行时在真正发送前抛出 `TypeError` 的问题。请求函数现在是正式 manager API，并由实际 runtime 装配测试覆盖。
+- 自动续接不再复用人工任务恢复的 session 扫描、工作区和 Git 快照检查。终止诊断已经携带 thread/turn ID，客户端现在只解析现有 `codex.exe`，以 Codex Home 作为安全启动目录，然后立即执行 `turn/steer` 或 `turn/start`。
+- 优先复用本次渠道应用时已经验证的 Codex 运行时路径，缺失时再进行本机发现。普通对话历史缺失、session 元数据异常或工作区不可访问不再阻止发送可见的“继续”；人工恢复入口的严格检查保持不变。
+- 自动续接失败日志新增 `resolve-target`、`turn-steer`、`turn-start` 或 `exec-resume` 阶段，以及有界且经过凭据特征清理的错误消息，避免现场只记录一个无法定位的 `TypeError`。
+
+### 测试
+
+- 新增真实 main runtime 接线、app-server proxy JSON-RPC 写入序列、无 session ID 即可解析 continuation target、显式运行时路径优先、steer→start 状态切换、socket resume fallback、目标解析失败阶段、权限失败阶段和错误消息记录回归。
+
 ## 1.2.85 - 2026-08-07
 
 ### 终止后立即发送“继续”

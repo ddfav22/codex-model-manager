@@ -6530,6 +6530,24 @@ async function inspectCodexTaskRecovery(taskId, options = {}) {
   }
 }
 
+function resolveCodexContinuationTarget(options = {}) {
+  const paths = getPaths(options)
+  const explicitTargets = [options.codexCliPath, ...(Array.isArray(options.codexTargets) ? options.codexTargets : [])]
+    .map(candidate => String(candidate || '').trim())
+    .filter(Boolean)
+  let codexPath = explicitTargets.find(
+    candidate => path.basename(candidate).toLowerCase() === 'codex.exe' && fs.existsSync(candidate)
+  )
+
+  if (!codexPath) codexPath = findCodexCli(options)
+  if (!codexPath) throw new Error('没有找到 ChatGPT/Codex 自带的 codex.exe')
+
+  return {
+    codexPath: String(codexPath),
+    cwd: fs.existsSync(paths.codexHome) ? paths.codexHome : os.homedir()
+  }
+}
+
 function taskRecoveryProgressNotifier(options, sourceThreadId) {
   const listener = typeof options.onProgress === 'function' ? options.onProgress : () => {}
 
@@ -6780,8 +6798,10 @@ module.exports = {
   migrateManagedProviderAuth,
   repairLocalToolRuntime,
   repairCodexConversationIndex,
+  resolveCodexContinuationTarget,
   recoverCodexTask,
   readStatus,
+  runCodexAppServerRequest,
   refreshManagedProviderProxyBaseUrl,
   removeRelay,
   deleteConversationData,

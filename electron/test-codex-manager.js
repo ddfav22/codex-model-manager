@@ -40,6 +40,8 @@ async function main() {
   const runtimeLogPath = runtimeLogger.configureRuntimeLogger({ roots: [runtimeLogDir] })
 
   assert.strictEqual(manager._internal.appVersion, require('../package.json').version)
+  assert.strictEqual(typeof manager.runCodexAppServerRequest, 'function')
+  assert.strictEqual(manager.runCodexAppServerRequest, manager._internal.runCodexAppServerRequest)
   assert.strictEqual(
     runtimeLogger.logEvent('info', 'test.logger', {
       apiKey: 'test-api-key-super-secret-value',
@@ -101,6 +103,63 @@ async function main() {
   assert.strictEqual(failedResponsesProbe.actualModel, 'gpt-5.6-sol')
   assert.strictEqual(failedResponsesProbe.failure.code, 'probe_budget_exhausted')
   assert.strictEqual(failedResponsesProbe.failure.type, 'invalid_request_error')
+
+  const steerChild = new EventEmitter()
+  const steerMessages = []
+  let steerSpawn = null
+
+  steerChild.stdout = new PassThrough()
+  steerChild.stderr = new PassThrough()
+  steerChild.killed = false
+  steerChild.kill = () => {
+    steerChild.killed = true
+  }
+  steerChild.stdin = new Writable({
+    write(chunk, _encoding, callback) {
+      const message = JSON.parse(String(chunk).trim())
+
+      steerMessages.push(message)
+      if (message.method === 'initialize') {
+        process.nextTick(() => steerChild.stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`))
+      } else if (message.id === 2) {
+        process.nextTick(() => steerChild.stdout.write(`${JSON.stringify({ id: 2, result: { accepted: true } })}\n`))
+      }
+      callback()
+    }
+  })
+  const steerResponse = await manager.runCodexAppServerRequest(
+    'test-codex.exe',
+    'turn/steer',
+    {
+      threadId: '019fd644-3128-7d70-9f84-b95bec943f21',
+      input: [{ type: 'text', text: '继续' }],
+      expectedTurnId: '019fdb85-dc30-7c50-bae1-c776c584b5d8'
+    },
+    {
+      cwd: tempRoot,
+      connectDesktop: true,
+      timeoutMs: 1000,
+      spawnProcess: (file, args, spawnOptions) => {
+        steerSpawn = { file, args, spawnOptions }
+        return steerChild
+      }
+    }
+  )
+
+  assert.deepStrictEqual(steerResponse, { result: { accepted: true }, notification: null })
+  assert.strictEqual(steerSpawn.file, 'test-codex.exe')
+  assert.deepStrictEqual(steerSpawn.args, ['app-server', 'proxy'])
+  assert.strictEqual(steerSpawn.spawnOptions.cwd, tempRoot)
+  assert.deepStrictEqual(steerMessages[2], {
+    method: 'turn/steer',
+    id: 2,
+    params: {
+      threadId: '019fd644-3128-7d70-9f84-b95bec943f21',
+      input: [{ type: 'text', text: '继续' }],
+      expectedTurnId: '019fdb85-dc30-7c50-bae1-c776c584b5d8'
+    }
+  })
+  assert.strictEqual(steerChild.killed, true)
 
   const brokenPipeChild = new EventEmitter()
 
@@ -640,6 +699,18 @@ async function main() {
 
   assert.strictEqual(directRecoveryInspection.runtimeStatus, 'unknown')
   assert.strictEqual(directRecoveryInspection.inspectionCategory, 'skipped')
+  const continuationBin = path.join(tempRoot, 'continuation-bin')
+  const continuationCodexPath = path.join(continuationBin, 'codex.exe')
+
+  fs.mkdirSync(continuationBin, { recursive: true })
+  fs.writeFileSync(continuationCodexPath, 'test codex executable', 'utf8')
+  assert.deepStrictEqual(
+    manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      codexTargets: [path.join(tempRoot, 'ChatGPT.exe'), continuationCodexPath]
+    }),
+    { codexPath: continuationCodexPath, cwd: tempRoot }
+  )
 
   const recoveryProgress = []
   let recoveryStartCount = 0

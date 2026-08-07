@@ -19,6 +19,30 @@ function safeEvent(listener, event) {
   }
 }
 
+function continuationErrorMessage(error) {
+  return String(error?.message || error || '')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:api[_-]?key|authorization|token)\s*[:=]\s*\S+/gi, '[redacted]')
+    .replace(/(?:sk-|sess-|key-)[A-Za-z0-9_-]{12,}/gi, '[redacted]')
+    .replace(/[A-Za-z0-9_=-]{48,}/g, '[redacted]')
+    .slice(0, 500)
+}
+
+function continuationPhaseError(error, phase) {
+  const value = error instanceof Error ? error : new Error(String(error || phase))
+
+  if (!value.continuationPhase) value.continuationPhase = phase
+  return value
+}
+
+async function runContinuationPhase(phase, action) {
+  try {
+    return await action()
+  } catch (error) {
+    throw continuationPhaseError(error, phase)
+  }
+}
+
 function continuationCandidate(diagnostic) {
   const termination = diagnostic?.taskTermination
   const kind = String(termination?.kind || '')
@@ -146,7 +170,9 @@ function createTaskAutoContinuationSupervisor(options = {}) {
           attempts: chain.attempts,
           maxContinuations,
           errorName: String(error?.name || 'Error'),
-          errorCode: String(error?.code || '')
+          errorCode: String(error?.code || ''),
+          errorPhase: String(error?.continuationPhase || ''),
+          errorMessage: continuationErrorMessage(error)
         })
 
         return { action: 'failed', attempt: nextAttempt, error }
@@ -258,7 +284,9 @@ async function startVisibleTaskContinuation(options = {}) {
 
   // Resolve only the local executable and workspace. Do not make a status request first:
   // the diagnostic already identifies the source turn and continuation must be immediate.
-  const inspection = await inspectTask(threadId, { allowActive: true, skipRuntimeInspection: true })
+  const inspection = await runContinuationPhase('resolve-target', () =>
+    inspectTask(threadId, { allowActive: true, skipRuntimeInspection: true })
+  )
   const sourceTurnId = normalizedOptionalTaskId(options.sourceTurnId) || normalizedOptionalTaskId(inspection.lastTurnId)
   const input = [{ type: 'text', text: prompt }]
   const request = {
@@ -269,24 +297,32 @@ async function startVisibleTaskContinuation(options = {}) {
   }
 
   const fallback = () => {
-    const recovery = startFallback({
-      codexPath: inspection.codexPath,
-      cwd: inspection.cwd,
-      threadId,
-      prompt
-    })
+    let recovery
+
+    try {
+      recovery = startFallback({
+        codexPath: inspection.codexPath,
+        cwd: inspection.cwd,
+        threadId,
+        prompt
+      })
+    } catch (error) {
+      throw continuationPhaseError(error, 'exec-resume')
+    }
 
     recovery?.completion?.catch?.(() => {})
     return { mode: 'exec-resume', turnId: '' }
   }
   const startTurn = async () => {
-    const response = await runDesktopRequest(request)
+    const response = await runContinuationPhase('turn-start', () => runDesktopRequest(request))
 
     return { mode: 'desktop-turn-start', turnId: turnIdFromResponse(response) }
   }
   const steerTurn = async () => {
-    if (!sourceTurnId) throw new Error('无法向活动回合发送“继续”：缺少回合 ID')
-    await runDesktopSteer({ ...request, expectedTurnId: sourceTurnId })
+    if (!sourceTurnId) {
+      throw continuationPhaseError(new Error('无法向活动回合发送“继续”：缺少回合 ID'), 'turn-steer')
+    }
+    await runContinuationPhase('turn-steer', () => runDesktopSteer({ ...request, expectedTurnId: sourceTurnId }))
 
     return { mode: 'desktop-turn-steer', turnId: sourceTurnId }
   }
