@@ -719,6 +719,16 @@ async function main() {
 
   fs.mkdirSync(path.dirname(protectedCodexPath), { recursive: true })
   fs.writeFileSync(protectedCodexPath, 'protected store codex executable', 'utf8')
+  const protectedCompanions = {
+    'codex-command-runner.exe': 'protected command runner',
+    'codex-windows-sandbox-setup.exe': 'protected sandbox setup',
+    'rg.exe': 'protected ripgrep',
+    'codex-code-mode-host.exe': 'protected code mode host'
+  }
+
+  for (const [name, contents] of Object.entries(protectedCompanions)) {
+    fs.writeFileSync(path.join(path.dirname(protectedCodexPath), name), contents, 'utf8')
+  }
   assert.deepStrictEqual(
     await manager.resolveCodexContinuationTarget({
       codexHome: tempRoot,
@@ -752,6 +762,16 @@ async function main() {
   assert.ok(materializedCodexPath.startsWith(continuationStateDir + path.sep))
   assert.strictEqual(path.basename(materializedCodexPath), 'codex.exe')
   assert.strictEqual(fs.readFileSync(materializedCodexPath, 'utf8'), 'protected store codex executable')
+  for (const [name, contents] of Object.entries(protectedCompanions)) {
+    assert.strictEqual(fs.readFileSync(path.join(path.dirname(materializedCodexPath), name), 'utf8'), contents)
+  }
+  const materializedManifestPath = path.join(path.dirname(materializedCodexPath), 'runtime-manifest.json')
+  const materializedManifest = JSON.parse(fs.readFileSync(materializedManifestPath, 'utf8'))
+
+  assert.deepStrictEqual(
+    materializedManifest.files.map(file => file.name),
+    ['codex.exe', ...Object.keys(protectedCompanions)]
+  )
   assert.strictEqual(
     fs
       .readdirSync(path.dirname(materializedCodexPath))
@@ -759,6 +779,22 @@ async function main() {
     false
   )
   const materializedModifiedAt = fs.statSync(materializedCodexPath).mtimeMs
+  const missingCachedHelper = path.join(path.dirname(materializedCodexPath), 'codex-command-runner.exe')
+
+  fs.rmSync(missingCachedHelper)
+  fs.rmSync(materializedManifestPath)
+  const repairedMaterializedTarget = await manager.resolveCodexContinuationTarget({
+    codexHome: tempRoot,
+    stateDir: continuationStateDir,
+    windowsAppsRoot,
+    codexTargets: [protectedCodexPath],
+    skipCodexDiscovery: true
+  })
+
+  assert.strictEqual(repairedMaterializedTarget.codexPath, materializedCodexPath)
+  assert.strictEqual(fs.readFileSync(missingCachedHelper, 'utf8'), protectedCompanions['codex-command-runner.exe'])
+  assert.ok(fs.existsSync(materializedManifestPath))
+  assert.strictEqual(fs.statSync(materializedCodexPath).mtimeMs, materializedModifiedAt)
   const reusedMaterializedTarget = await manager.resolveCodexContinuationTarget({
     codexHome: tempRoot,
     stateDir: continuationStateDir,
@@ -769,6 +805,23 @@ async function main() {
 
   assert.strictEqual(reusedMaterializedTarget.codexPath, materializedCodexPath)
   assert.strictEqual(fs.statSync(materializedCodexPath).mtimeMs, materializedModifiedAt)
+
+  const incompletePackageRoot = path.join(windowsAppsRoot, 'OpenAI.Codex_26.730.8500.0_x64__test')
+  const incompleteCodexPath = path.join(incompletePackageRoot, 'app', 'resources', 'codex.exe')
+
+  fs.mkdirSync(path.dirname(incompleteCodexPath), { recursive: true })
+  fs.writeFileSync(incompleteCodexPath, 'incomplete store codex executable', 'utf8')
+  fs.writeFileSync(path.join(path.dirname(incompleteCodexPath), 'codex-command-runner.exe'), 'runner only', 'utf8')
+  await assert.rejects(
+    manager.resolveCodexContinuationTarget({
+      codexHome: tempRoot,
+      stateDir: continuationStateDir,
+      windowsAppsRoot,
+      codexTargets: [incompleteCodexPath],
+      skipCodexDiscovery: true
+    }),
+    /incomplete sandbox helpers/
+  )
 
   const untrustedStoreCodexPath = path.join(windowsAppsRoot, 'Other.Package_1.0.0', 'app', 'resources', 'codex.exe')
 

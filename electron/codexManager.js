@@ -6573,12 +6573,57 @@ async function materializeCodexContinuationRuntime(sourcePath, options = {}) {
       path.join(paths.stateDir, 'continuation-runtime', safePackage + '-' + sourceStat.size)
   )
   const targetPath = path.join(runtimeRoot, 'codex.exe')
-  const copyKey = source.toLowerCase() + '|' + sourceStat.size + '|' + runtimeRoot.toLowerCase()
+  const resourceRoot = path.dirname(source)
+  const companionNames = [
+    'codex-command-runner.exe',
+    'codex-windows-sandbox-setup.exe',
+    'rg.exe',
+    'codex-code-mode-host.exe'
+  ]
+  const sourceEntries = [{ name: 'codex.exe', source, size: sourceStat.size }]
+
+  for (const name of companionNames) {
+    const companionSource = path.join(resourceRoot, name)
+
+    try {
+      const companionStat = await fs.promises.stat(companionSource)
+
+      if (companionStat.isFile() && companionStat.size > 0) {
+        sourceEntries.push({ name, source: companionSource, size: companionStat.size })
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
+
+  const helperNames = new Set(sourceEntries.map(entry => entry.name))
+  const hasCommandRunner = helperNames.has('codex-command-runner.exe')
+  const hasSandboxSetup = helperNames.has('codex-windows-sandbox-setup.exe')
+
+  if (hasCommandRunner !== hasSandboxSetup) {
+    throw new Error('WindowsApps Codex runtime has incomplete sandbox helpers')
+  }
+
+  const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json')
+  const manifestFiles = sourceEntries.map(({ name, size }) => ({ name, size }))
+  const copyKey =
+    source.toLowerCase() +
+    '|' +
+    manifestFiles.map(file => file.name.toLowerCase() + ':' + file.size).join('|') +
+    '|' +
+    runtimeRoot.toLowerCase()
   const reusableTarget = async () => {
     try {
-      const targetStat = await fs.promises.stat(targetPath)
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'))
 
-      return targetStat.isFile() && targetStat.size === sourceStat.size
+      if (JSON.stringify(manifest?.files) !== JSON.stringify(manifestFiles)) return false
+
+      for (const file of manifestFiles) {
+        const targetStat = await fs.promises.stat(path.join(runtimeRoot, file.name))
+
+        if (!targetStat.isFile() || targetStat.size !== file.size) return false
+      }
+      return true
     } catch {
       return false
     }
@@ -6589,23 +6634,50 @@ async function materializeCodexContinuationRuntime(sourcePath, options = {}) {
 
   const operation = (async () => {
     await fs.promises.mkdir(runtimeRoot, { recursive: true })
-    const temporaryPath = path.join(runtimeRoot, '.codex-copy-' + process.pid + '-' + Date.now() + '.tmp')
+    const temporaryPaths = []
 
     try {
-      await fs.promises.copyFile(source, temporaryPath)
-      const copiedStat = await fs.promises.stat(temporaryPath)
+      for (const file of sourceEntries) {
+        const destination = path.join(runtimeRoot, file.name)
+        let destinationValid = false
 
-      if (!copiedStat.isFile() || copiedStat.size !== sourceStat.size) {
-        throw new Error('WindowsApps Codex 运行时复制后校验失败')
+        try {
+          const destinationStat = await fs.promises.stat(destination)
+
+          destinationValid = destinationStat.isFile() && destinationStat.size === file.size
+        } catch {}
+        if (destinationValid) continue
+
+        const temporaryPath = path.join(
+          runtimeRoot,
+          '.codex-copy-' + process.pid + '-' + Date.now() + '-' + file.name + '.tmp'
+        )
+
+        temporaryPaths.push(temporaryPath)
+        await fs.promises.copyFile(file.source, temporaryPath)
+        const copiedStat = await fs.promises.stat(temporaryPath)
+
+        if (!copiedStat.isFile() || copiedStat.size !== file.size) {
+          throw new Error('WindowsApps Codex 运行时复制后校验失败：' + file.name)
+        }
+        await fs.promises.rm(destination, { force: true })
+        await fs.promises.rename(temporaryPath, destination)
       }
-      try {
-        await fs.promises.rename(temporaryPath, targetPath)
-      } catch (error) {
-        if (!(await reusableTarget())) throw error
-      }
+
+      const manifestTemporaryPath = path.join(
+        runtimeRoot,
+        '.codex-copy-' + process.pid + '-' + Date.now() + '-manifest.tmp'
+      )
+
+      temporaryPaths.push(manifestTemporaryPath)
+      await fs.promises.writeFile(manifestTemporaryPath, JSON.stringify({ files: manifestFiles }), 'utf8')
+      await fs.promises.rm(manifestPath, { force: true })
+      await fs.promises.rename(manifestTemporaryPath, manifestPath)
+
+      if (!(await reusableTarget())) throw new Error('WindowsApps Codex 运行时成组复制后校验失败')
       return targetPath
     } finally {
-      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {})
+      await Promise.all(temporaryPaths.map(file => fs.promises.rm(file, { force: true }).catch(() => {})))
     }
   })()
 
