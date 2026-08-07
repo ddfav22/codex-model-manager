@@ -458,6 +458,10 @@ async function main() {
   let formatFallbackRecoveryRequests = 0
   let highDemandRetryRequests = 0
   let newApiStrictToolRequests = 0
+  let nativeEmptyOnceRequests = 0
+  let nativeEmptyTwiceRequests = 0
+  let nativeEmptyJsonOnceRequests = 0
+  let nativeEmptyAuthRequests = 0
   let releaseStalledFinalResponse = null
   let markStalledFinalReached
   const stalledFinalReached = new Promise(resolve => {
@@ -1082,6 +1086,92 @@ async function main() {
         return
       }
 
+      if (
+        requestBody.model === 'gpt-native-empty-once' ||
+        requestBody.model === 'gpt-native-empty-twice' ||
+        requestBody.model === 'gpt-native-empty-auth'
+      ) {
+        const requestCount = (() => {
+          if (requestBody.model === 'gpt-native-empty-once') return ++nativeEmptyOnceRequests
+          if (requestBody.model === 'gpt-native-empty-auth') return ++nativeEmptyAuthRequests
+
+          return ++nativeEmptyTwiceRequests
+        })()
+        const recovered = requestBody.model === 'gpt-native-empty-once' && requestCount === 2
+
+        assert.strictEqual(request.url, '/v1/responses')
+        if (requestBody.model === 'gpt-native-empty-auth' && requestCount === 2) {
+          response.writeHead(401, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'invalid authentication for empty recovery' } }))
+          return
+        }
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            type: 'response.created',
+            response: { id: `resp-${requestBody.model}-${requestCount}`, status: 'in_progress', output: [] }
+          })}\n\n`
+        )
+        if (recovered) {
+          response.write(
+            `data: ${JSON.stringify({
+              type: 'response.output_text.delta',
+              delta: 'EMPTY_RECOVERY_OK'
+            })}\n\n`
+          )
+        }
+        response.end(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: `resp-${requestBody.model}-${requestCount}`,
+              status: 'completed',
+              model: requestBody.model,
+              output: recovered
+                ? [
+                    {
+                      type: 'message',
+                      role: 'assistant',
+                      content: [{ type: 'output_text', text: 'EMPTY_RECOVERY_OK' }]
+                    }
+                  ]
+                : []
+            }
+          })}\n\n`
+        )
+        return
+      }
+
+      if (requestBody.model === 'gpt-native-empty-json-once') {
+        nativeEmptyJsonOnceRequests += 1
+        const recovered = nativeEmptyJsonOnceRequests === 2
+
+        assert.strictEqual(request.url, '/v1/responses')
+        assert.strictEqual(requestBody.stream, false)
+        response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(
+          JSON.stringify({
+            id: `resp-native-empty-json-${nativeEmptyJsonOnceRequests}`,
+            object: 'response',
+            status: 'completed',
+            model: requestBody.model,
+            output: recovered
+              ? [
+                  {
+                    type: 'message',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'EMPTY_JSON_RECOVERY_OK' }]
+                  }
+                ]
+              : []
+          })
+        )
+        return
+      }
+
       if (requestBody.model === 'gpt-native-responses-test' || requestBody.model === 'gpt-5.6-sol') {
         assert.strictEqual(request.url, '/v1/responses')
         response.writeHead(200, {
@@ -1644,6 +1734,10 @@ async function main() {
   const proxyDiagnostics = []
   const testOnlyModels = [
     'gpt-native-responses-test',
+    'gpt-native-empty-once',
+    'gpt-native-empty-twice',
+    'gpt-native-empty-json-once',
+    'gpt-native-empty-auth',
     'grok-custom-proxy-test',
     'grok-transport-error',
     'grok-reject-tools-test',
@@ -3577,6 +3671,98 @@ async function main() {
   assert.strictEqual(upstreamRequests[0].body.input[0].id, 'ctc_53e2893f954b40c8af50100324613d7c')
   assert.strictEqual(upstreamRequests[0].body.input[0].call_id, 'call_cross_model_native')
   assert.ok(nativeResponsesText.includes('response.completed'))
+  assert.strictEqual(proxyDiagnostics.at(-1).nativeEmptyRecovery.attempted, false)
+  upstreamRequests.length = 0
+
+  const nativeEmptyOnceResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-native-empty-once',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue once.' }] }],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run a local tool.' }]
+    })
+  })
+  const nativeEmptyOnceText = await nativeEmptyOnceResponse.text()
+  const nativeEmptyOnceDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(nativeEmptyOnceResponse.status, 200)
+  assert.strictEqual(nativeEmptyOnceRequests, 2)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.ok(JSON.stringify(upstreamRequests[1].body.input.at(-1)).includes('no renderable assistant output'))
+  assert.ok(JSON.stringify(upstreamRequests[1].body.input).includes('Continue once.'))
+  assert.ok(nativeEmptyOnceText.includes('EMPTY_RECOVERY_OK'))
+  assert.strictEqual(nativeEmptyOnceDiagnostic.diagnosticKind, 'upstream_empty_recovered')
+  assert.strictEqual(nativeEmptyOnceDiagnostic.nativeEmptyRecovery.attempted, true)
+  assert.strictEqual(nativeEmptyOnceDiagnostic.nativeEmptyRecovery.recovered, true)
+  assert.strictEqual(nativeEmptyOnceDiagnostic.nativeEmptyRecovery.exhausted, false)
+  upstreamRequests.length = 0
+
+  const nativeEmptyTwiceResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-native-empty-twice',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Stop after one retry.' }] }]
+    })
+  })
+  const nativeEmptyTwiceText = await nativeEmptyTwiceResponse.text()
+  const nativeEmptyTwiceDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(nativeEmptyTwiceResponse.status, 200)
+  assert.strictEqual(nativeEmptyTwiceRequests, 2)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.ok(nativeEmptyTwiceText.includes('模型连续两次返回空内容'))
+  assert.ok(nativeEmptyTwiceText.includes('response.output_text.delta'))
+  assert.strictEqual(nativeEmptyTwiceDiagnostic.diagnosticKind, 'upstream_empty_response')
+  assert.strictEqual(nativeEmptyTwiceDiagnostic.diagnosticSeverity, 'warn')
+  assert.strictEqual(nativeEmptyTwiceDiagnostic.nativeEmptyRecovery.attempted, true)
+  assert.strictEqual(nativeEmptyTwiceDiagnostic.nativeEmptyRecovery.recovered, false)
+  assert.strictEqual(nativeEmptyTwiceDiagnostic.nativeEmptyRecovery.exhausted, true)
+  upstreamRequests.length = 0
+
+  const nativeEmptyJsonOnceResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-native-empty-json-once',
+      stream: false,
+      input: 'Recover a non-streaming empty response.'
+    })
+  })
+  const nativeEmptyJsonOncePayload = await nativeEmptyJsonOnceResponse.json()
+  const nativeEmptyJsonDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(nativeEmptyJsonOnceResponse.status, 200)
+  assert.strictEqual(nativeEmptyJsonOnceRequests, 2)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.strictEqual(nativeEmptyJsonOncePayload.output[0].content[0].text, 'EMPTY_JSON_RECOVERY_OK')
+  assert.strictEqual(nativeEmptyJsonDiagnostic.diagnosticKind, 'upstream_empty_recovered')
+  assert.strictEqual(nativeEmptyJsonDiagnostic.nativeEmptyRecovery.recovered, true)
+  upstreamRequests.length = 0
+
+  const nativeEmptyAuthResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-native-empty-auth',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Stop on auth.' }] }]
+    })
+  })
+  const nativeEmptyAuthPayload = await nativeEmptyAuthResponse.json()
+  const nativeEmptyAuthDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(nativeEmptyAuthResponse.status, 401)
+  assert.strictEqual(nativeEmptyAuthRequests, 2)
+  assert.strictEqual(upstreamRequests.length, 2)
+  assert.match(nativeEmptyAuthPayload.error.message, /invalid authentication/i)
+  assert.strictEqual(nativeEmptyAuthDiagnostic.outcome, 'upstream_error')
+  assert.strictEqual(nativeEmptyAuthDiagnostic.nativeEmptyRecovery.attempted, true)
+  assert.strictEqual(nativeEmptyAuthDiagnostic.nativeEmptyRecovery.recovered, false)
+  assert.strictEqual(nativeEmptyAuthDiagnostic.nativeEmptyRecovery.exhausted, false)
   upstreamRequests.length = 0
 
   const child = spawn(

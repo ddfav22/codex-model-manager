@@ -39,6 +39,7 @@ const {
   shouldAcceptContinuationRecovery
 } = require('./protocol/toolContinuation')
 const {
+  MAX_UPSTREAM_BUFFER_BYTES,
   createUpstreamSignal,
   pipeResponseBodyLimited,
   readResponseBufferLimited,
@@ -87,6 +88,9 @@ const UPSTREAM_CAPACITY_MAX_RETRIES = 2
 const UPSTREAM_CAPACITY_RETRY_BASE_MS = 750
 const UPSTREAM_CAPACITY_RETRY_MAX_MS = 5000
 const UPSTREAM_FAILURE_CLASSIFICATION_BYTES = 64 * 1024
+const EMPTY_RESPONSES_RECOVERY_PROMPT =
+  'The previous upstream attempt completed successfully but returned no renderable assistant output and no tool call. Continue the original Codex task now from the existing conversation and tool results. Do not repeat completed tool calls. Return the next required tool call, ask for genuinely missing user input, or provide a concise final answer.'
+const EMPTY_RESPONSES_STOP_MESSAGE = '模型连续两次返回空内容，本轮已停止；请回复“继续”或在渠道管理中使用“恢复任务”。'
 
 function jsonByteLength(value) {
   try {
@@ -2446,6 +2450,274 @@ async function pipeFetchBody(upstream, response, headers = {}) {
   return pipeResponseBodyLimited(upstream, response, headers)
 }
 
+function responsesContentHasRenderableText(content) {
+  return (Array.isArray(content) ? content : []).some(part =>
+    ['output_text', 'text', 'refusal'].includes(String(part?.type || ''))
+      ? Boolean(String(part?.text || part?.refusal || '').trim())
+      : false
+  )
+}
+
+function responsesItemHasRenderableOutput(item) {
+  const type = String(item?.type || '')
+
+  if (!type) return false
+  if (type === 'message') return responsesContentHasRenderableText(item.content)
+  if (type === 'reasoning') {
+    return (Array.isArray(item.summary) ? item.summary : []).some(part => Boolean(String(part?.text || '').trim()))
+  }
+  if (type === 'compaction') return false
+
+  return true
+}
+
+function responsesPayloadHasRenderableOutput(payload) {
+  if (Boolean(String(payload?.output_text || '').trim())) return true
+
+  return (Array.isArray(payload?.output) ? payload.output : []).some(responsesItemHasRenderableOutput)
+}
+
+function responsesEventHasRenderableOutput(chunk) {
+  const type = String(chunk?.type || '')
+
+  if (
+    ['response.output_text.delta', 'response.output_text.done', 'response.refusal.delta'].includes(type) &&
+    Boolean(String(chunk?.delta || chunk?.text || chunk?.refusal || '').trim())
+  ) {
+    return true
+  }
+  if (type === 'response.reasoning_summary_text.delta' && Boolean(String(chunk?.delta || '').trim())) return true
+  if (type === 'response.output_item.added' || type === 'response.output_item.done') {
+    return responsesItemHasRenderableOutput(chunk.item)
+  }
+  if (type === 'response.completed') return responsesPayloadHasRenderableOutput(chunk.response)
+
+  return false
+}
+
+function clonedFetchResponse(upstream, body) {
+  return new Response(body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: upstream.headers
+  })
+}
+
+async function probeNativeResponsesOutput(upstream) {
+  if (!upstream.body) {
+    return {
+      delivery: upstream,
+      bytes: 0,
+      completed: false,
+      failed: false,
+      renderable: false,
+      successfulEmpty: false
+    }
+  }
+
+  const [probeBody, deliveryBody] = upstream.body.tee()
+  const delivery = clonedFetchResponse(upstream, deliveryBody)
+  const reader = probeBody.getReader()
+  const decoder = new TextDecoder()
+  const isSse = /text\/event-stream/i.test(String(upstream.headers.get('content-type') || ''))
+  let bytes = 0
+  let completed = false
+  let failed = false
+  let renderable = false
+  let jsonText = ''
+  const parser = isSse
+    ? createParser({
+        onEvent(event) {
+          if (!event.data || event.data === '[DONE]') return
+
+          try {
+            const chunk = JSON.parse(event.data)
+            const type = String(chunk?.type || '')
+
+            if (type === 'response.completed') completed = true
+            if (type === 'response.failed' || type === 'response.incomplete' || type === 'error') failed = true
+            if (responsesEventHasRenderableOutput(chunk)) renderable = true
+          } catch {
+            // Unrecognized provider metadata must pass through unchanged.
+          }
+        }
+      })
+    : null
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+
+      if (done) break
+      bytes += value.byteLength
+      if (bytes > MAX_UPSTREAM_BUFFER_BYTES) throw new Error(`上游响应超过 ${MAX_UPSTREAM_BUFFER_BYTES} 字节限制`)
+      const text = decoder.decode(value, { stream: true })
+
+      if (parser) parser.feed(text)
+      else jsonText += text
+
+      if (renderable || completed || failed) break
+    }
+    const tail = decoder.decode()
+
+    if (parser) {
+      if (tail) parser.feed(tail)
+      parser.reset({ consume: true })
+    } else {
+      jsonText += tail
+      try {
+        const payload = JSON.parse(jsonText || '{}')
+
+        completed = String(payload?.status || '').toLowerCase() === 'completed'
+        failed = ['failed', 'incomplete', 'cancelled'].includes(String(payload?.status || '').toLowerCase())
+        renderable = responsesPayloadHasRenderableOutput(payload)
+      } catch {
+        // Non-JSON compatible responses pass through unchanged.
+      }
+    }
+  } catch (error) {
+    delivery.body?.cancel('native responses probe failed').catch(() => {})
+    throw error
+  } finally {
+    if (renderable || completed || failed) reader.cancel('native responses probe complete').catch(() => {})
+    reader.releaseLock()
+  }
+
+  return {
+    delivery,
+    bytes,
+    completed,
+    failed,
+    renderable,
+    successfulEmpty: completed && !failed && !renderable
+  }
+}
+
+function nativeEmptyRecoveryBody(body) {
+  const input = Array.isArray(body.input)
+    ? [...body.input]
+    : body.input === undefined || body.input === null
+      ? []
+      : typeof body.input === 'string'
+        ? [responseMessageItem(body.input)]
+        : [body.input]
+
+  input.push(responseMessageItem(EMPTY_RESPONSES_RECOVERY_PROMPT))
+
+  return { ...body, input }
+}
+
+function upstreamResponseHeaders(upstream, stream) {
+  return {
+    'content-type':
+      upstream.headers.get('content-type') ||
+      (stream === false ? 'application/json; charset=utf-8' : 'text/event-stream; charset=utf-8')
+  }
+}
+
+function writeNativeEmptyRecoveryStop(response, body) {
+  if (body.stream === false) {
+    const item = {
+      id: `msg_${randomUUID().replace(/-/g, '')}`,
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: EMPTY_RESPONSES_STOP_MESSAGE, annotations: [] }]
+    }
+
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+    response.end(
+      JSON.stringify({
+        id: `resp_${randomUUID().replace(/-/g, '')}`,
+        object: 'response',
+        created_at: Math.floor(Date.now() / 1000),
+        status: 'completed',
+        model: body.model,
+        output: [item]
+      })
+    )
+    return
+  }
+
+  const state = createStreamState(body, { isCustomChat: () => false, toResponses: name => name }, response)
+
+  ensureResponsesStreamHeaders(response)
+  ensureTextStarted(state)
+  state.text = EMPTY_RESPONSES_STOP_MESSAGE
+  writeEvent(response, 'response.output_text.delta', {
+    item_id: state.messageId,
+    output_index: state.outputOffset,
+    content_index: 0,
+    delta: EMPTY_RESPONSES_STOP_MESSAGE,
+    logprobs: []
+  })
+  finishResponseStream(state)
+}
+
+async function deliverNativeResponsesWithSingleEmptyRecovery({ upstream, response, body, sendRecovery }) {
+  const initial = await probeNativeResponsesOutput(upstream)
+
+  if (!initial.successfulEmpty) {
+    await pipeFetchBody(initial.delivery, response, upstreamResponseHeaders(initial.delivery, body.stream))
+    return {
+      delivered: true,
+      upstream: initial.delivery,
+      recovery: { attempted: false, recovered: false, exhausted: false, initialProbeBytes: initial.bytes }
+    }
+  }
+
+  initial.delivery.body?.cancel('empty native responses attempt').catch(() => {})
+  const retryUpstream = await sendRecovery(nativeEmptyRecoveryBody(body))
+
+  if (!retryUpstream.ok) {
+    return {
+      delivered: false,
+      upstream: retryUpstream,
+      recovery: {
+        attempted: true,
+        recovered: false,
+        exhausted: false,
+        initialProbeBytes: initial.bytes,
+        recoveryProbeBytes: 0,
+        recoveryStatus: retryUpstream.status
+      }
+    }
+  }
+
+  const retried = await probeNativeResponsesOutput(retryUpstream)
+
+  if (retried.successfulEmpty) {
+    retried.delivery.body?.cancel('repeated empty native responses attempt').catch(() => {})
+    writeNativeEmptyRecoveryStop(response, body)
+    return {
+      delivered: true,
+      upstream: retried.delivery,
+      recovery: {
+        attempted: true,
+        recovered: false,
+        exhausted: true,
+        initialProbeBytes: initial.bytes,
+        recoveryProbeBytes: retried.bytes,
+        recoveryStatus: retryUpstream.status
+      }
+    }
+  }
+
+  await pipeFetchBody(retried.delivery, response, upstreamResponseHeaders(retried.delivery, body.stream))
+  return {
+    delivered: true,
+    upstream: retried.delivery,
+    recovery: {
+      attempted: true,
+      recovered: true,
+      exhausted: false,
+      initialProbeBytes: initial.bytes,
+      recoveryProbeBytes: retried.bytes,
+      recoveryStatus: retryUpstream.status
+    }
+  }
+}
+
 async function handleResponsesRequest(
   request,
   response,
@@ -2551,7 +2823,7 @@ async function handleResponsesRequest(
       // Runtime protocol learning must never interrupt the model request.
     }
   }
-  const sendResponsesUpstream = () =>
+  const sendResponsesUpstream = (payload = body) =>
     fetchWithCapacityRetry(
       () =>
         fetch(upstreamResponsesUrl(channel.baseUrl), {
@@ -2561,7 +2833,7 @@ async function handleResponsesRequest(
             'content-type': request.headers['content-type'] || 'application/json',
             accept: body.stream === false ? 'application/json' : 'text/event-stream'
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(payload),
           signal: upstreamSignal
         }),
       { signal: upstreamSignal }
@@ -2588,24 +2860,36 @@ async function handleResponsesRequest(
       forwardedRequestBytes: jsonByteLength(body)
     }
 
-    const upstream = await sendResponsesUpstream()
-    const headers = {
-      'content-type':
-        upstream.headers.get('content-type') ||
-        (body.stream === false ? 'application/json; charset=utf-8' : 'text/event-stream; charset=utf-8')
-    }
+    let upstream = await sendResponsesUpstream()
+    let headers = upstreamResponseHeaders(upstream, body.stream)
+    let nativeEmptyRecovery = null
 
     if (upstream.ok) {
       reportWireApi('responses')
-      if (typeof onDiagnostic === 'function') {
-        try {
-          onDiagnostic({ ...upstreamDiagnostic(diagnostic, upstream), outcome: 'upstream_accepted' })
-        } catch {
-          // Diagnostics must never interrupt the model request.
+      const delivery = await deliverNativeResponsesWithSingleEmptyRecovery({
+        upstream,
+        response,
+        body,
+        sendRecovery: sendResponsesUpstream
+      })
+
+      nativeEmptyRecovery = delivery.recovery
+      if (delivery.delivered) {
+        if (typeof onDiagnostic === 'function') {
+          try {
+            onDiagnostic({
+              ...upstreamDiagnostic(diagnostic, delivery.upstream),
+              outcome: 'upstream_accepted',
+              nativeEmptyRecovery
+            })
+          } catch {
+            // Diagnostics must never interrupt the model request.
+          }
         }
+        return
       }
-      await pipeFetchBody(upstream, response, headers)
-      return
+      upstream = delivery.upstream
+      headers = upstreamResponseHeaders(upstream, body.stream)
     }
     const buffer = await readResponseBufferLimited(upstream)
 
@@ -2614,6 +2898,7 @@ async function handleResponsesRequest(
         try {
           onDiagnostic({
             ...upstreamDiagnostic(diagnostic, upstream, buffer.toString('utf8')),
+            ...(nativeEmptyRecovery ? { nativeEmptyRecovery } : {}),
             outcome: 'upstream_error'
           })
         } catch {

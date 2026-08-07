@@ -36,6 +36,15 @@ function codexRequestContext(body) {
 
 function diagnosticClassification(diagnostic) {
   const continuation = diagnostic?.emulation?.continuationRecovery
+  const nativeEmptyRecovery = diagnostic?.nativeEmptyRecovery
+
+  if (nativeEmptyRecovery?.exhausted) {
+    return { diagnosticKind: 'upstream_empty_response', diagnosticSeverity: 'warn' }
+  }
+
+  if (nativeEmptyRecovery?.attempted && nativeEmptyRecovery?.recovered) {
+    return { diagnosticKind: 'upstream_empty_recovered', diagnosticSeverity: 'info' }
+  }
 
   if (continuation?.exhausted) {
     if (continuation.recoveryCircuitBreaker === 'consecutive_transport_failures') {
@@ -100,6 +109,8 @@ function diagnosticMessage(diagnostic) {
       return 'Agent Loop 连续返回相同的中间计划，已暂停并保留当前任务。'
     case 'agent_loop_stalled':
       return 'Agent Loop 未进入完成状态，已暂停并保留当前任务。'
+    case 'upstream_empty_response':
+      return '模型连续两次返回空内容，本轮已停止并保留当前任务。'
     default:
       return '模型请求出现异常，详细信息已写入运行日志。'
   }

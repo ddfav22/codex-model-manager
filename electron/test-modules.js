@@ -286,6 +286,14 @@ async function main() {
     { diagnosticKind: 'upstream_timeout', diagnosticSeverity: 'warn' }
   )
   assert.deepStrictEqual(
+    diagnosticClassification({ nativeEmptyRecovery: { attempted: true, recovered: true, exhausted: false } }),
+    { diagnosticKind: 'upstream_empty_recovered', diagnosticSeverity: 'info' }
+  )
+  assert.deepStrictEqual(
+    diagnosticClassification({ nativeEmptyRecovery: { attempted: true, recovered: false, exhausted: true } }),
+    { diagnosticKind: 'upstream_empty_response', diagnosticSeverity: 'warn' }
+  )
+  assert.deepStrictEqual(
     diagnosticClassification({
       emulation: {
         continuationRecovery: { exhausted: true, recoveryCircuitBreaker: 'consecutive_transport_failures' }
