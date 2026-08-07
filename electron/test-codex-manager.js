@@ -606,6 +606,40 @@ async function main() {
       }),
     /仍在运行/
   )
+  const activeRecoveryInspection = await manager.inspectCodexTaskRecovery(recoveryTaskId, {
+    ...options,
+    allowActive: true,
+    codexCliPath: 'test-codex.exe',
+    runAppServerRequest: async (_codexPath, method, params) => {
+      assert.strictEqual(method, 'thread/read')
+      assert.deepStrictEqual(params, { threadId: recoveryTaskId, includeTurns: true })
+      return {
+        result: {
+          thread: {
+            id: recoveryTaskId,
+            status: { type: 'active' },
+            turns: [{ id: '019fda49-48f3-7382-872f-e51aaa190525', status: 'inProgress' }]
+          }
+        }
+      }
+    }
+  })
+
+  assert.strictEqual(activeRecoveryInspection.runtimeStatus, 'active')
+  assert.strictEqual(activeRecoveryInspection.lastTurnStatus, 'inProgress')
+  assert.strictEqual(activeRecoveryInspection.lastTurnId, '019fda49-48f3-7382-872f-e51aaa190525')
+  const directRecoveryInspection = await manager.inspectCodexTaskRecovery(recoveryTaskId, {
+    ...options,
+    allowActive: true,
+    skipRuntimeInspection: true,
+    codexCliPath: 'test-codex.exe',
+    runAppServerRequest: async () => {
+      throw new Error('runtime inspection must be skipped')
+    }
+  })
+
+  assert.strictEqual(directRecoveryInspection.runtimeStatus, 'unknown')
+  assert.strictEqual(directRecoveryInspection.inspectionCategory, 'skipped')
 
   const recoveryProgress = []
   let recoveryStartCount = 0

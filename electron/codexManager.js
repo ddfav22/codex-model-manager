@@ -6479,32 +6479,41 @@ async function inspectCodexTaskRecovery(taskId, options = {}) {
   const request = options.runAppServerRequest || runCodexAppServerRequest
   let runtimeStatus = 'unknown'
   let lastTurnStatus = 'unknown'
+  let lastTurnId = ''
   let inspectionCategory = ''
 
   try {
-    const response = await request(
-      codexPath,
-      'thread/read',
-      { threadId: normalizedTaskId, includeTurns: true },
-      {
-        cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
-        env: { ...process.env, CODEX_HOME: paths.codexHome },
-        timeoutMs: options.inspectTimeoutMs || 30000
-      }
-    )
+    if (options.skipRuntimeInspection) {
+      inspectionCategory = 'skipped'
+    } else {
+      const response = await request(
+        codexPath,
+        'thread/read',
+        { threadId: normalizedTaskId, includeTurns: true },
+        {
+          cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
+          env: { ...process.env, CODEX_HOME: paths.codexHome },
+          timeoutMs: options.inspectTimeoutMs || 30000
+        }
+      )
 
-    const thread = response?.result?.thread || {}
-    const turns = Array.isArray(thread.turns) ? thread.turns : []
-    const lastTurn = turns[turns.length - 1]
+      const thread = response?.result?.thread || {}
+      const turns = Array.isArray(thread.turns) ? thread.turns : []
+      const lastTurn = turns[turns.length - 1]
 
-    runtimeStatus = String(thread.status?.type || 'unknown')
-    lastTurnStatus = String(lastTurn?.status || 'unknown')
+      runtimeStatus = String(thread.status?.type || 'unknown')
+      lastTurnStatus = String(lastTurn?.status || 'unknown')
+      lastTurnId = String(lastTurn?.id || '')
+    }
   } catch (error) {
     inspectionCategory = recoveryFailureCategory(error instanceof Error ? error.message : String(error))
     if (inspectionCategory !== 'session') throw error
   }
 
-  if (runtimeStatus === 'active' || /^(?:inprogress|in_progress|running)$/i.test(lastTurnStatus)) {
+  if (
+    !options.allowActive &&
+    (runtimeStatus === 'active' || /^(?:inprogress|in_progress|running)$/i.test(lastTurnStatus))
+  ) {
     throw new Error('这个任务仍在运行，已拒绝创建重复恢复回合')
   }
 
@@ -6515,6 +6524,7 @@ async function inspectCodexTaskRecovery(taskId, options = {}) {
     cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
     runtimeStatus,
     lastTurnStatus,
+    lastTurnId,
     inspectionCategory,
     workspace: taskRecoveryWorkspaceSnapshot(session, options)
   }

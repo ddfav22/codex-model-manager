@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.84**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.85**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -14,7 +14,7 @@
 - 为仅提供 Chat Completions 的 Grok 渠道适配 Responses 事件、工具调用、工具结果与无固定轮数的 Agent Loop 恢复；计划型中间消息按 `commentary` delta 渐进显示，恢复阶段通过“继续工具/确实完成/需要输入”三态决策收口，只有重复内容或连续连接失败才触发熔断，内部工具历史和恢复控制不会出现在对话正文。
 - 保留 Codex 的 `sessions`、Projects、Skills、Agents 和登录配置；历史任务目录会同步为 Codex 桌面端 Local Projects，导入、导出和删除操作包含隔离与失败回滚。
 - 对话管理可粘贴任务 UUID 或从对话行恢复未完成任务：用户确认后先检查最后一轮、工作区和 Git 现场，再继续原任务；只有恢复尚未开始且会话记录不可用时才 Fork 一次。认证、额度、权限、网络或高负载错误不会自动重试。
-- 原生 Responses 渠道若以 refusal、空输出、仅推理无最终答复、incomplete 或受阻工具调用停滞，客户端会在当前 turn 结束后向同一 Codex 对话发送一条可见的“继续”；真实网络中断也会等待任务确认停止后续接。任何后续进展都会取消待发消息，同一连续终止链最多三次，正常完成、用户新消息或不可恢复错误会停止并重置。
+- 原生 Responses 渠道若以 refusal、空输出、仅推理无最终答复、incomplete、受阻工具调用或真实网络中断终止，客户端不会等待任务空闲，而是立即向同一 Codex 对话发送一条可见的“继续”：活动回合走官方 `turn/steer`，已结束回合走 `turn/start`。同一连续终止链最多三次，正常完成、用户新消息或不可恢复错误会停止并重置。
 - 管理器自己的设置、日志和更新文件只写入客户端目录下的 `data`，发布包不携带开发机数据。
 - 提供中文错误提示、启动进度、关闭行为选择和 GitHub Release 在线更新。
 

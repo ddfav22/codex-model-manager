@@ -2,13 +2,12 @@ const assert = require('assert')
 
 const {
   AUTO_CONTINUATION_PROMPT,
-  AUTO_CONTINUATION_CANCELLED,
-  DEFAULT_IDLE_ATTEMPTS,
   MAX_AUTO_CONTINUATIONS,
   createTaskAutoContinuationSupervisor,
   desktopProxyUnavailable,
-  startVisibleTaskContinuation,
-  waitForTaskIdle
+  desktopTurnIsActive,
+  desktopTurnNeedsStart,
+  startVisibleTaskContinuation
 } = require('./features/taskAutoContinuation')
 
 const THREAD_ID = '019fd644-3128-7d70-9f84-b95bec943f21'
@@ -50,11 +49,10 @@ function normalCompletion(turnId) {
   }
 }
 
-function toolCall(turnId, capturedAt = '2026-08-07T06:29:33.093Z') {
+function toolCall(turnId) {
   return {
     codexThreadId: THREAD_ID,
     codexTurnId: turnId,
-    capturedAt,
     outcome: 'upstream_accepted',
     taskTermination: {
       terminal: true,
@@ -71,7 +69,6 @@ function transportFailure(turnId) {
   return {
     codexThreadId: THREAD_ID,
     codexTurnId: turnId,
-    capturedAt: '2026-08-07T06:21:40.246Z',
     outcome: 'proxy_error',
     diagnosticKind: 'proxy_transport_error',
     transportFailureKind: 'network_error'
@@ -81,9 +78,12 @@ function transportFailure(turnId) {
 async function main() {
   assert.strictEqual(AUTO_CONTINUATION_PROMPT, '继续')
   assert.strictEqual(MAX_AUTO_CONTINUATIONS, 3)
-  assert.strictEqual(DEFAULT_IDLE_ATTEMPTS, 150)
   assert.strictEqual(desktopProxyUnavailable(new Error('failed to connect to control socket')), true)
   assert.strictEqual(desktopProxyUnavailable(new Error('permission denied by policy')), false)
+  assert.strictEqual(desktopTurnNeedsStart(new Error('no active turn for thread')), true)
+  assert.strictEqual(desktopTurnNeedsStart(new Error('permission denied by policy')), false)
+  assert.strictEqual(desktopTurnIsActive(new Error('active turn already running')), true)
+  assert.strictEqual(desktopTurnIsActive(new Error('no active turn')), false)
 
   const events = []
   const starts = []
@@ -91,7 +91,7 @@ async function main() {
     onEvent: event => events.push(event),
     startContinuation: async request => {
       starts.push(request)
-      return { mode: 'desktop-app-server', turnId: TURN_IDS[starts.length] }
+      return { mode: 'desktop-turn-start', turnId: TURN_IDS[starts.length] }
     }
   })
 
@@ -122,7 +122,7 @@ async function main() {
   const manualSupervisor = createTaskAutoContinuationSupervisor({
     startContinuation: async request => {
       manualStarts.push(request)
-      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+      return { mode: 'desktop-turn-start', turnId: TURN_IDS[1] }
     }
   })
 
@@ -166,35 +166,33 @@ async function main() {
   assert.strictEqual(failedSupervisor.getState(THREAD_ID).attempts, 0)
   assert.strictEqual(failureEvents.at(-1).errorCode, 'ESTART')
 
-  const watchedStarts = []
-  const watchEvents = []
-  const watchSupervisor = createTaskAutoContinuationSupervisor({
-    watchGraceMs: 0,
-    delay: async () => {},
-    onEvent: event => watchEvents.push(event),
+  let legacyDelayCalled = false
+  const directStarts = []
+  const directSupervisor = createTaskAutoContinuationSupervisor({
+    watchGraceMs: 60000,
+    delay: async () => {
+      legacyDelayCalled = true
+    },
     startContinuation: async request => {
-      watchedStarts.push(request)
-      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+      directStarts.push(request)
+      return { mode: 'desktop-turn-steer', turnId: request.sourceTurnId }
     }
   })
-  const blockedTool = await watchSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
+  const blockedTool = await directSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
 
   assert.strictEqual(blockedTool.action, 'started')
-  assert.strictEqual(watchedStarts[0].terminationKind, 'blocked_tool_call')
-  assert.strictEqual(
-    watchEvents.some(event => event.type === 'watching'),
-    true
-  )
+  assert.strictEqual(directStarts[0].terminationKind, 'blocked_tool_call')
+  assert.strictEqual(legacyDelayCalled, false)
+  assert.strictEqual(directSupervisor.getState(THREAD_ID).watching, undefined)
 
   const transportStarts = []
   const transportSupervisor = createTaskAutoContinuationSupervisor({
-    watchGraceMs: 0,
-    delay: async () => {},
     startContinuation: async request => {
       transportStarts.push(request)
-      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+      return { mode: 'desktop-turn-steer', turnId: request.sourceTurnId }
     }
   })
+
   assert.strictEqual((await transportSupervisor.handleDiagnostic(transportFailure(TURN_IDS[0]))).action, 'started')
   assert.strictEqual(transportStarts[0].terminationKind, 'transport_interrupted')
   assert.strictEqual(
@@ -210,72 +208,93 @@ async function main() {
     'observed'
   )
 
-  let releaseWatch
-  const watchDelay = new Promise(resolve => {
-    releaseWatch = resolve
+  let releaseDirect
+  const directPending = new Promise(resolve => {
+    releaseDirect = resolve
   })
-  let cancelledWatchStarts = 0
-  const cancellationEvents = []
-  const cancellationSupervisor = createTaskAutoContinuationSupervisor({
-    watchGraceMs: 1,
-    delay: async () => watchDelay,
-    onEvent: event => cancellationEvents.push(event),
+  let uncancelledStarts = 0
+  const uncancelledSupervisor = createTaskAutoContinuationSupervisor({
     startContinuation: async () => {
-      cancelledWatchStarts += 1
-      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+      uncancelledStarts += 1
+      await directPending
+      return { mode: 'desktop-turn-start', turnId: TURN_IDS[1] }
     }
   })
-  const cancelledWatch = cancellationSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
+  const uncancelled = uncancelledSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
 
   await Promise.resolve()
-  await cancellationSupervisor.handleDiagnostic(normalCompletion(TURN_IDS[0]))
-  releaseWatch()
-  assert.deepStrictEqual(await cancelledWatch, { action: 'ignored', reason: 'progress-resumed' })
-  assert.strictEqual(cancelledWatchStarts, 0)
-  assert.strictEqual(
-    cancellationEvents.some(event => event.type === 'watchCancelled'),
-    true
-  )
+  await uncancelledSupervisor.handleDiagnostic(normalCompletion(TURN_IDS[0]))
+  releaseDirect()
+  assert.strictEqual((await uncancelled).action, 'started')
+  assert.strictEqual(uncancelledStarts, 1)
 
-  let inspectionAttempts = 0
-  const inspection = await waitForTaskIdle(
-    THREAD_ID,
-    async () => {
-      inspectionAttempts += 1
-      if (inspectionAttempts < 3) throw new Error('这个任务仍在运行')
-      return { codexPath: 'codex.exe', cwd: 'C:\\work' }
-    },
-    { idleAttempts: 3, idleDelayMs: 1, delay: async () => {} }
-  )
-
-  assert.strictEqual(inspection.cwd, 'C:\\work')
-  assert.strictEqual(inspectionAttempts, 3)
-
-  const idleAbort = new AbortController()
-  let releaseIdleDelay
-  const idleDelay = new Promise(resolve => {
-    releaseIdleDelay = resolve
-  })
-  const abortedInspection = waitForTaskIdle(
-    THREAD_ID,
-    async () => {
-      throw new Error('这个任务仍在运行')
-    },
-    { signal: idleAbort.signal, idleAttempts: 3, delay: async () => idleDelay }
-  )
-
-  await Promise.resolve()
-  idleAbort.abort(new Error('new response arrived'))
-  releaseIdleDelay()
-  await assert.rejects(abortedInspection, error => error?.code === AUTO_CONTINUATION_CANCELLED)
-
-  const desktopCalls = []
+  const inspectCalls = []
+  const desktopStartCalls = []
   const visible = await startVisibleTaskContinuation({
     threadId: THREAD_ID,
+    sourceTurnId: TURN_IDS[0],
     prompt: '继续',
-    inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
+    terminationKind: 'refusal',
+    inspectTask: async (threadId, options) => {
+      inspectCalls.push({ threadId, options })
+      return { codexPath: 'codex.exe', cwd: 'C:\\work', runtimeStatus: 'idle' }
+    },
     runDesktopRequest: async request => {
-      desktopCalls.push(request)
+      desktopStartCalls.push(request)
+      return { result: { turn: { id: TURN_IDS[1] } } }
+    },
+    runDesktopSteer: async () => {
+      throw new Error('steer must not run for a completed refusal')
+    },
+    startFallback: () => {
+      throw new Error('fallback must not run')
+    }
+  })
+
+  assert.deepStrictEqual(visible, { mode: 'desktop-turn-start', turnId: TURN_IDS[1] })
+  assert.deepStrictEqual(inspectCalls, [
+    { threadId: THREAD_ID, options: { allowActive: true, skipRuntimeInspection: true } }
+  ])
+  assert.deepStrictEqual(desktopStartCalls[0].input, [{ type: 'text', text: '继续' }])
+
+  const steerCalls = []
+  const activeSteer = await startVisibleTaskContinuation({
+    threadId: THREAD_ID,
+    sourceTurnId: TURN_IDS[0],
+    terminationKind: 'blocked_tool_call',
+    inspectTask: async () => ({
+      codexPath: 'codex.exe',
+      cwd: 'C:\\work',
+      runtimeStatus: 'active',
+      lastTurnId: TURN_IDS[0]
+    }),
+    runDesktopRequest: async () => {
+      throw new Error('turn/start must not run while the source turn is active')
+    },
+    runDesktopSteer: async request => {
+      steerCalls.push(request)
+      return { result: {} }
+    },
+    startFallback: () => {
+      throw new Error('fallback must not run')
+    }
+  })
+
+  assert.deepStrictEqual(activeSteer, { mode: 'desktop-turn-steer', turnId: TURN_IDS[0] })
+  assert.strictEqual(steerCalls[0].expectedTurnId, TURN_IDS[0])
+  assert.deepStrictEqual(steerCalls[0].input, [{ type: 'text', text: '继续' }])
+
+  let startAfterIdleSteer = 0
+  const steerThenStart = await startVisibleTaskContinuation({
+    threadId: THREAD_ID,
+    sourceTurnId: TURN_IDS[0],
+    terminationKind: 'transport_interrupted',
+    inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
+    runDesktopSteer: async () => {
+      throw new Error('no active turn for thread')
+    },
+    runDesktopRequest: async () => {
+      startAfterIdleSteer += 1
       return { result: { turn: { id: TURN_IDS[1] } } }
     },
     startFallback: () => {
@@ -283,15 +302,40 @@ async function main() {
     }
   })
 
-  assert.deepStrictEqual(visible, { mode: 'desktop-app-server', turnId: TURN_IDS[1] })
-  assert.deepStrictEqual(desktopCalls[0].input, [{ type: 'text', text: '继续' }])
+  assert.deepStrictEqual(steerThenStart, { mode: 'desktop-turn-start', turnId: TURN_IDS[1] })
+  assert.strictEqual(startAfterIdleSteer, 1)
+
+  let steerAfterActiveStart = 0
+  const startThenSteer = await startVisibleTaskContinuation({
+    threadId: THREAD_ID,
+    sourceTurnId: TURN_IDS[0],
+    terminationKind: 'refusal',
+    inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
+    runDesktopRequest: async () => {
+      throw new Error('active turn already running')
+    },
+    runDesktopSteer: async request => {
+      steerAfterActiveStart += 1
+      assert.strictEqual(request.expectedTurnId, TURN_IDS[0])
+    },
+    startFallback: () => {
+      throw new Error('fallback must not run')
+    }
+  })
+
+  assert.deepStrictEqual(startThenSteer, { mode: 'desktop-turn-steer', turnId: TURN_IDS[0] })
+  assert.strictEqual(steerAfterActiveStart, 1)
 
   let fallbackRequest
   const fallback = await startVisibleTaskContinuation({
     threadId: THREAD_ID,
+    sourceTurnId: TURN_IDS[0],
     inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
     runDesktopRequest: async () => {
       throw new Error('failed to connect to control socket')
+    },
+    runDesktopSteer: async () => {
+      throw new Error('steer must not run')
     },
     startFallback: request => {
       fallbackRequest = request
@@ -306,13 +350,34 @@ async function main() {
   await assert.rejects(
     startVisibleTaskContinuation({
       threadId: THREAD_ID,
+      sourceTurnId: TURN_IDS[0],
       inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
       runDesktopRequest: async () => {
         throw new Error('permission denied by policy')
       },
+      runDesktopSteer: async () => {
+        throw new Error('steer must not run')
+      },
       startFallback: () => ({ completion: Promise.resolve() })
     }),
     /permission denied/
+  )
+
+  await assert.rejects(
+    startVisibleTaskContinuation({
+      threadId: THREAD_ID,
+      sourceTurnId: TURN_IDS[0],
+      terminationKind: 'blocked_tool_call',
+      inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
+      runDesktopRequest: async () => {
+        throw new Error('start must not run')
+      },
+      runDesktopSteer: async () => {
+        throw new Error('active_turn_not_steerable during review')
+      },
+      startFallback: () => ({ completion: Promise.resolve() })
+    }),
+    /active_turn_not_steerable/
   )
 
   console.log('task auto-continuation tests passed')

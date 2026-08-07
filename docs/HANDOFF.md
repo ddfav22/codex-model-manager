@@ -91,13 +91,13 @@ Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。�
 
 恢复通过 `codex exec --json --skip-git-repo-check resume <id> -` 执行，固定恢复指令走 stdin，禁止出现在命令参数和日志。只有 CLI 在 `turn.started`/工具或文件事件出现之前，以明确 session/rollout/history 损坏或不兼容分类失败时，才允许调用一次 `thread/fork` 并恢复新任务；认证、额度、高负载、权限、审批、网络和未知错误直接停止。恢复子进程不脱离客户端，客户端退出时必须终止，且不得使用绕过审批或沙箱的参数。
 
-### 原生 Responses 终止续接必须创建可见新 turn
+### 原生 Responses 终止续接必须立即发送可见消息
 
-协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。refusal、没有最终文本/工具调用的 completed，或没有工具调用的 incomplete 可立即标记为可续接；终态工具调用和真实网络中断只建立可取消的停滞观察，不得立即续接。认证、额度、权限、客户端主动取消、内部代理错误和 `response.failed` 不得触发。
+协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。refusal、没有最终文本/工具调用的 completed、没有工具调用的 incomplete、终态工具调用和真实网络中断都可立即标记为可续接。认证、额度、权限、客户端主动取消、内部代理错误和 `response.failed` 不得触发。
 
-任务监督器收到可续接终止后，先用 `thread/read(includeTurns: true)` 等待当前 turn 不再 active/inProgress，再优先通过正在运行的桌面 app-server `turn/start` 向同一 thread 提交 `{type:"text", text:"继续"}`。终态工具调用或网络中断的观察期间，只要同一任务产生任何后续协议诊断，就必须中止待发续接；只有任务持续空闲才发送。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；两条路径都不得添加审批、沙箱或权限绕过参数。
+任务监督器收到可续接终止后，不得建立观察延迟、等待后续诊断或轮询 `thread/read` 确认空闲。它只解析本地任务位置并立即通过桌面 app-server 提交 `{type:"text", text:"继续"}`：有活动回合时使用官方 `turn/steer` 和诊断中的 `expectedTurnId`，回合已经结束时使用 `turn/start`；发送瞬间状态变化允许在两者之间切换一次。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；三条路径都不得添加审批、沙箱或权限绕过参数。
 
-计数以同一 thread 的连续终止链为范围，成功创建一个“继续”turn 才计一次，最多三次。相同 turn 的重复诊断必须去重；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限、客户端取消或内部代理错误立即停止。真实网络错误和上游超时允许在确认任务空闲后续接。第四次终止只记录熔断，不再创建 turn。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-app-server`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。运行日志没有面向用户的界面入口，仅用于维护诊断。
+计数以同一 thread 的连续终止链为范围，成功发送一次“继续”才计一次，最多三次。相同 turn 的重复诊断必须去重；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限、客户端取消或内部代理错误立即停止。第四次终止只记录熔断，不再发送。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-turn-steer`/`desktop-turn-start`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。运行日志没有面向用户的界面入口，仅用于维护诊断。
 
 ### 未来承诺不是 Grok 的终态
 

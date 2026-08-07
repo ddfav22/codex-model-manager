@@ -82,12 +82,24 @@ const taskAutoContinuation = createTaskAutoContinuationSupervisor({
   startContinuation: request =>
     startVisibleTaskContinuation({
       ...request,
-      inspectTask: threadId => manager.inspectCodexTaskRecovery(threadId),
+      inspectTask: (threadId, inspectOptions) => manager.inspectCodexTaskRecovery(threadId, inspectOptions),
       runDesktopRequest: ({ codexPath, cwd, threadId, input }) =>
         manager.runCodexAppServerRequest(
           codexPath,
           'turn/start',
           { threadId, input },
+          {
+            cwd,
+            env: { ...process.env, CODEX_HOME: manager.getPaths().codexHome },
+            timeoutMs: 15000,
+            connectDesktop: true
+          }
+        ),
+      runDesktopSteer: ({ codexPath, cwd, threadId, input, expectedTurnId }) =>
+        manager.runCodexAppServerRequest(
+          codexPath,
+          'turn/steer',
+          { threadId, input, expectedTurnId },
           {
             cwd,
             env: { ...process.env, CODEX_HOME: manager.getPaths().codexHome },
