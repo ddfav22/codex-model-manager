@@ -36,7 +36,6 @@ contextBridge.exposeInMainWorld('codexManager', {
     ipcRenderer.on('codex:taskRecoveryProgress', handler)
     return () => ipcRenderer.removeListener('codex:taskRecoveryProgress', handler)
   },
-  openRuntimeLog: () => ipcRenderer.invoke('codex:openRuntimeLog'),
   testRelay: payload => ipcRenderer.invoke('codex:testRelay', payload),
   testSavedRelay: (id, model) => ipcRenderer.invoke('codex:testSavedRelay', id, model),
   applyRelay: (id, model, operationId) => ipcRenderer.invoke('codex:applyRelay', id, model, operationId),

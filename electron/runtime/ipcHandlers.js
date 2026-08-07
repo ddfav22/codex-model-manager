@@ -21,7 +21,6 @@ function registerIpcHandlers({
   logError,
   logEvent,
   manager,
-  openRuntimeLog,
   updater,
   writeRuntimeDiagnostic
 }) {
@@ -47,7 +46,6 @@ function registerIpcHandlers({
     'codex:initializeLocalToolRuntime': (_event, mode) => manager.initializeLocalToolRuntime(mode),
     'codex:repairLocalToolRuntime': (_event, mode) => manager.repairLocalToolRuntime(mode),
     'codex:inspectDiskUsage': () => manager.inspectCodexDiskUsage(),
-    'codex:openRuntimeLog': () => openRuntimeLog(),
     'codex:testRelay': (_event, payload) => manager.testAndSaveRelay(payload),
     'codex:testSavedRelay': (_event, id, model) => manager.testSavedRelay(id, model),
     'codex:restoreDefault': () => manager.restoreDefaultProvider(),

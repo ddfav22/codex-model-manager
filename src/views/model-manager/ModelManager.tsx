@@ -236,17 +236,6 @@ const ModelManager = () => {
     }
   }
 
-  const openRuntimeLog = async () => {
-    try {
-      const result = await requireBridge().openRuntimeLog()
-
-      if (!result.ok) throw new Error(result.error || '运行日志暂不可用')
-      setMessage({ type: 'success', text: `已定位运行日志：${result.path}` })
-    } catch (error) {
-      setMessage({ type: 'error', text: cleanErrorMessage(error) })
-    }
-  }
-
   const maintainDisk = async () => {
     setDiskMaintenanceBusy(true)
 
@@ -953,7 +942,7 @@ const ModelManager = () => {
         result.restart?.ok === false
           ? {
               type: 'info',
-              text: `客户端索引已处理，但仍有异常；请查看日志后手动重新打开 Codex。`
+              text: `客户端索引已处理，但仍有异常；请手动关闭并重新打开 Codex 后重试。`
             }
           : {
               type: 'success',
@@ -1570,11 +1559,6 @@ const ModelManager = () => {
           severity={runtimeDiagnostic.severity === 'error' ? 'error' : 'warning'}
           variant='outlined'
           onClose={() => setRuntimeDiagnostic(undefined)}
-          action={
-            <Button color='inherit' size='small' onClick={openRuntimeLog}>
-              查看日志
-            </Button>
-          }
         >
           <Stack spacing={0.5}>
             <Typography variant='body2' fontWeight={600}>
@@ -1662,15 +1646,6 @@ const ModelManager = () => {
                 onClick={() => refresh(true)}
               >
                 重新扫描
-              </Button>
-              <Button
-                variant='outlined'
-                color='secondary'
-                disabled={busy}
-                startIcon={<i className='ri-file-list-3-line' />}
-                onClick={openRuntimeLog}
-              >
-                打开运行日志
               </Button>
               <Button
                 variant='outlined'

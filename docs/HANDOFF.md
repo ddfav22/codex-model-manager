@@ -57,7 +57,7 @@ Responses 的 `custom_tool_call` 项 ID 使用 `ctc_`，`function_call` 项 ID �
 
 Grok 可能返回计划句但不发工具调用。只有紧邻当前工具结果或明确需要工具的当前任务才允许恢复；历史工具结果不能触发新任务恢复。正常计划续接没有固定次数和总耗时上限，但单次请求仍有超时，连续五次渠道失败或连续五次完全相同计划会熔断。
 
-托管 NewAPI 渠道会在 Codex 配置中注册 `chatgpt_model_manager_image` Streamable HTTP MCP 服务，其 `generate_image` 工具通过当前渠道的 `POST /v1/images/generations` 执行并返回标准 MCP 图片内容。MCP 默认请求 `b64_json`；上游仍返回 URL 时，管理器必须无凭据下载、验证图片魔数和 20 MiB 上限，再保存到 `data/generated-images` 并返回 `image` 内容块与可直接嵌入最终回答的本地绝对路径 Markdown。下载失败只能降级为原 URL Markdown，不得再次生成导致重复计费。同步账号后，管理器会从全部可用 Token 中独立选择 `/v1/models` 实际返回图片模型的 Key；该选择不改变当前聊天 Token。MCP URL 必须复用协议代理的随机能力路径，API Key 只能由管理器内部解析；不得写入 Codex 配置、工具参数或日志。若该 MCP 工具未出现在当前 Codex 请求中，兼容层才退回运行时已有的 `exec`/`image_gen__imagegen` 提示，绝不能伪造未注册工具。
+托管 NewAPI 渠道会在 Codex 配置中注册 `chatgpt_model_manager_image` Streamable HTTP MCP 服务，其 `generate_image` 工具通过当前渠道的 `POST /v1/images/generations` 执行并返回标准 MCP 图片内容。MCP 默认请求 `b64_json`；上游仍返回 URL 时，管理器必须无凭据下载、验证图片魔数和 20 MiB 上限，再保存到 `data/generated-images` 并返回 `image` 内容块与可直接嵌入最终回答的本地绝对路径 Markdown。下载失败只能降级为原 URL Markdown，不得再次生成导致重复计费。若原生 Responses 上游直接返回 `image_generation_call.result` Base64，代理也必须保留原调用、校验并物化图片，再于终态事件前追加标准 assistant `output_text` Markdown；不得依赖模型在下一轮复述路径。无效图片只做脱敏计数并原样交付响应。同步账号后，管理器会从全部可用 Token 中独立选择 `/v1/models` 实际返回图片模型的 Key；该选择不改变当前聊天 Token。MCP URL 必须复用协议代理的随机能力路径，API Key 只能由管理器内部解析；不得写入 Codex 配置、工具参数或日志。若该 MCP 工具未出现在当前 Codex 请求中，兼容层才退回运行时已有的 `exec`/`image_gen__imagegen` 提示，绝不能伪造未注册工具。
 
 Grok 返回工具 JSON 时不一定严格使用 `name` + `arguments`。兼容层允许常见的 `tool_call`/`function` 信封、`tool`/`tool_name` 名称、`args` 和 `exec.input`，但最终工具名仍必须存在于本轮 Codex 允许列表中。
 
@@ -93,11 +93,11 @@ Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。�
 
 ### 原生 Responses 终止续接必须创建可见新 turn
 
-协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。只有 refusal、没有最终文本/工具调用的 completed，或没有工具调用的 incomplete 才标记为可续接；HTTP 认证、额度、权限、网络错误和 `response.failed` 不得触发。
+协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。refusal、没有最终文本/工具调用的 completed，或没有工具调用的 incomplete 可立即标记为可续接；终态工具调用和真实网络中断只建立可取消的停滞观察，不得立即续接。认证、额度、权限、客户端主动取消、内部代理错误和 `response.failed` 不得触发。
 
-任务监督器收到可续接终止后，先用 `thread/read(includeTurns: true)` 等待当前 turn 不再 active/inProgress，再优先通过正在运行的桌面 app-server `turn/start` 向同一 thread 提交 `{type:"text", text:"继续"}`。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；两条路径都不得添加审批、沙箱或权限绕过参数。
+任务监督器收到可续接终止后，先用 `thread/read(includeTurns: true)` 等待当前 turn 不再 active/inProgress，再优先通过正在运行的桌面 app-server `turn/start` 向同一 thread 提交 `{type:"text", text:"继续"}`。终态工具调用或网络中断的观察期间，只要同一任务产生任何后续协议诊断，就必须中止待发续接；只有任务持续空闲才发送。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；两条路径都不得添加审批、沙箱或权限绕过参数。
 
-计数以同一 thread 的连续终止链为范围，成功创建一个“继续”turn 才计一次，最多三次。相同 turn 的重复诊断必须去重；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限/网络或代理错误立即停止。第四次终止只记录熔断，不再创建 turn。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-app-server`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。
+计数以同一 thread 的连续终止链为范围，成功创建一个“继续”turn 才计一次，最多三次。相同 turn 的重复诊断必须去重；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限、客户端取消或内部代理错误立即停止。真实网络错误和上游超时允许在确认任务空闲后续接。第四次终止只记录熔断，不再创建 turn。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-app-server`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。运行日志没有面向用户的界面入口，仅用于维护诊断。
 
 ### 未来承诺不是 Grok 的终态
 

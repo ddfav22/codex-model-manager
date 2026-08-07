@@ -1186,6 +1186,40 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'gpt-native-image-base64') {
+        const imageItem = {
+          id: 'ig_wire_native_base64',
+          type: 'image_generation_call',
+          status: 'completed',
+          result: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII='
+        }
+
+        assert.strictEqual(request.url, '/v1/responses')
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            type: 'response.output_item.done',
+            output_index: 0,
+            item: imageItem
+          })}\n\n`
+        )
+        response.end(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp-native-image-base64',
+              status: 'completed',
+              model: requestBody.model,
+              output: [imageItem]
+            }
+          })}\n\n`
+        )
+        return
+      }
+
       if (requestBody.model === 'gpt-native-responses-test' || requestBody.model === 'gpt-5.6-sol') {
         assert.strictEqual(request.url, '/v1/responses')
         response.writeHead(200, {
@@ -1753,6 +1787,7 @@ async function main() {
     'gpt-native-terminal-reasoning',
     'gpt-native-terminal-incomplete',
     'gpt-native-terminal-json',
+    'gpt-native-image-base64',
     'grok-custom-proxy-test',
     'grok-transport-error',
     'grok-reject-tools-test',
@@ -2478,7 +2513,8 @@ async function main() {
   assert.strictEqual(transportFailure.status, 502)
   assert.strictEqual(transportFailureBody.error.type, 'protocol_proxy_error')
   assert.strictEqual(transportFailureDiagnostic.diagnosticKind, 'proxy_transport_error')
-  assert.strictEqual(transportFailureDiagnostic.diagnosticSeverity, 'error')
+  assert.strictEqual(transportFailureDiagnostic.diagnosticSeverity, 'warn')
+  assert.strictEqual(transportFailureDiagnostic.transportFailureKind, 'network_error')
   assert.strictEqual(transportFailureDiagnostic.codexThreadId, '019fd610-8202-7ff0-91b7-6eb858a9f684')
   assert.strictEqual(transportFailureDiagnostic.codexTurnId, '019fd611-1111-7222-8333-444444444444')
   upstreamRequests.length = 0
@@ -3689,6 +3725,35 @@ async function main() {
   assert.strictEqual(proxyDiagnostics.at(-1).taskTermination.shouldContinue, false)
   assert.strictEqual(proxyDiagnostics.at(-1).taskTermination.normalCompletion, true)
   assert.strictEqual(proxyDiagnostics.at(-1).taskTermination.kind, 'normal')
+  upstreamRequests.length = 0
+
+  const nativeImageRoot = path.join(wireCodexHome, 'generated-images')
+  const nativeImagesBefore = fs.existsSync(nativeImageRoot) ? fs.readdirSync(nativeImageRoot) : []
+  const nativeImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-native-image-base64',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Generate a sun.' }] }]
+    })
+  })
+  const nativeImageText = await nativeImageResponse.text()
+  const nativeImageDiagnostic = proxyDiagnostics.at(-1)
+  const nativeImagesAfter = fs.readdirSync(nativeImageRoot)
+
+  assert.strictEqual(nativeImageResponse.status, 200)
+  assert.strictEqual(nativeImagesAfter.length, nativeImagesBefore.length + 1)
+  assert.ok(nativeImageText.includes('response.output_text.delta'))
+  assert.ok(nativeImageText.includes('![Generated image 1](<'))
+  assert.ok(nativeImageText.includes(nativeImagesAfter.find(name => !nativeImagesBefore.includes(name))))
+  assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.imageCount, 1)
+  assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.materializedCount, 1)
+  assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.failedCount, 0)
+  assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.injected, true)
+  assert.strictEqual(nativeImageDiagnostic.taskTermination.kind, 'image_delivered')
+  assert.strictEqual(nativeImageDiagnostic.taskTermination.normalCompletion, true)
+  assert.doesNotMatch(JSON.stringify(nativeImageDiagnostic), /iVBORw0KGgo/)
   upstreamRequests.length = 0
 
   const nativeEmptyResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {

@@ -348,6 +348,35 @@ function localImageMarkdown(filePath, index) {
   return `![Generated image ${index + 1}](<${normalizedPath}>)`
 }
 
+function nativeImageGenerationBase64(item) {
+  if (String(item?.type || '') !== 'image_generation_call') return ''
+  if (typeof item?.result === 'string') return item.result
+  if (typeof item?.result?.b64_json === 'string') return item.result.b64_json
+  if (typeof item?.b64_json === 'string') return item.b64_json
+
+  return ''
+}
+
+function materializeNativeImageGenerationCall(item, options = {}) {
+  const encoded = nativeImageGenerationBase64(item)
+
+  if (!encoded) return null
+  const decoded = decodeImageBase64(encoded)
+  const filePath = persistGeneratedImage(
+    decoded,
+    options.generatedImagesRoot,
+    Number(options.index || 0),
+    options.fsModule || fs
+  )
+
+  return {
+    filePath,
+    markdown: localImageMarkdown(filePath, Number(options.index || 0)),
+    mimeType: decoded.mimeType,
+    bytes: decoded.bytes
+  }
+}
+
 function imageToolResult(payload) {
   const items = Array.isArray(payload?.data) ? payload.data : []
 
@@ -737,7 +766,9 @@ module.exports = {
   imageGenerationPayload,
   imageToolDefinition,
   imageToolResult,
+  materializeNativeImageGenerationCall,
   materializedImageToolResult,
+  nativeImageGenerationBase64,
   ImageGenerationValidationError,
   isImageGenerationModel,
   isAllowedMcpOrigin,

@@ -2,6 +2,8 @@ const assert = require('assert')
 
 const {
   AUTO_CONTINUATION_PROMPT,
+  AUTO_CONTINUATION_CANCELLED,
+  DEFAULT_IDLE_ATTEMPTS,
   MAX_AUTO_CONTINUATIONS,
   createTaskAutoContinuationSupervisor,
   desktopProxyUnavailable,
@@ -48,9 +50,38 @@ function normalCompletion(turnId) {
   }
 }
 
+function toolCall(turnId, capturedAt = '2026-08-07T06:29:33.093Z') {
+  return {
+    codexThreadId: THREAD_ID,
+    codexTurnId: turnId,
+    capturedAt,
+    outcome: 'upstream_accepted',
+    taskTermination: {
+      terminal: true,
+      status: 'completed',
+      kind: 'tool_call',
+      shouldContinue: false,
+      normalCompletion: false,
+      observedBytes: 183541
+    }
+  }
+}
+
+function transportFailure(turnId) {
+  return {
+    codexThreadId: THREAD_ID,
+    codexTurnId: turnId,
+    capturedAt: '2026-08-07T06:21:40.246Z',
+    outcome: 'proxy_error',
+    diagnosticKind: 'proxy_transport_error',
+    transportFailureKind: 'network_error'
+  }
+}
+
 async function main() {
   assert.strictEqual(AUTO_CONTINUATION_PROMPT, '继续')
   assert.strictEqual(MAX_AUTO_CONTINUATIONS, 3)
+  assert.strictEqual(DEFAULT_IDLE_ATTEMPTS, 150)
   assert.strictEqual(desktopProxyUnavailable(new Error('failed to connect to control socket')), true)
   assert.strictEqual(desktopProxyUnavailable(new Error('permission denied by policy')), false)
 
@@ -135,6 +166,77 @@ async function main() {
   assert.strictEqual(failedSupervisor.getState(THREAD_ID).attempts, 0)
   assert.strictEqual(failureEvents.at(-1).errorCode, 'ESTART')
 
+  const watchedStarts = []
+  const watchEvents = []
+  const watchSupervisor = createTaskAutoContinuationSupervisor({
+    watchGraceMs: 0,
+    delay: async () => {},
+    onEvent: event => watchEvents.push(event),
+    startContinuation: async request => {
+      watchedStarts.push(request)
+      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+    }
+  })
+  const blockedTool = await watchSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
+
+  assert.strictEqual(blockedTool.action, 'started')
+  assert.strictEqual(watchedStarts[0].terminationKind, 'blocked_tool_call')
+  assert.strictEqual(
+    watchEvents.some(event => event.type === 'watching'),
+    true
+  )
+
+  const transportStarts = []
+  const transportSupervisor = createTaskAutoContinuationSupervisor({
+    watchGraceMs: 0,
+    delay: async () => {},
+    startContinuation: async request => {
+      transportStarts.push(request)
+      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+    }
+  })
+  assert.strictEqual((await transportSupervisor.handleDiagnostic(transportFailure(TURN_IDS[0]))).action, 'started')
+  assert.strictEqual(transportStarts[0].terminationKind, 'transport_interrupted')
+  assert.strictEqual(
+    (
+      await transportSupervisor.handleDiagnostic({
+        codexThreadId: THREAD_ID,
+        codexTurnId: TURN_IDS[2],
+        outcome: 'client_cancelled',
+        diagnosticKind: 'client_cancelled',
+        transportFailureKind: 'client_request_aborted'
+      })
+    ).action,
+    'observed'
+  )
+
+  let releaseWatch
+  const watchDelay = new Promise(resolve => {
+    releaseWatch = resolve
+  })
+  let cancelledWatchStarts = 0
+  const cancellationEvents = []
+  const cancellationSupervisor = createTaskAutoContinuationSupervisor({
+    watchGraceMs: 1,
+    delay: async () => watchDelay,
+    onEvent: event => cancellationEvents.push(event),
+    startContinuation: async () => {
+      cancelledWatchStarts += 1
+      return { mode: 'desktop-app-server', turnId: TURN_IDS[1] }
+    }
+  })
+  const cancelledWatch = cancellationSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
+
+  await Promise.resolve()
+  await cancellationSupervisor.handleDiagnostic(normalCompletion(TURN_IDS[0]))
+  releaseWatch()
+  assert.deepStrictEqual(await cancelledWatch, { action: 'ignored', reason: 'progress-resumed' })
+  assert.strictEqual(cancelledWatchStarts, 0)
+  assert.strictEqual(
+    cancellationEvents.some(event => event.type === 'watchCancelled'),
+    true
+  )
+
   let inspectionAttempts = 0
   const inspection = await waitForTaskIdle(
     THREAD_ID,
@@ -148,6 +250,24 @@ async function main() {
 
   assert.strictEqual(inspection.cwd, 'C:\\work')
   assert.strictEqual(inspectionAttempts, 3)
+
+  const idleAbort = new AbortController()
+  let releaseIdleDelay
+  const idleDelay = new Promise(resolve => {
+    releaseIdleDelay = resolve
+  })
+  const abortedInspection = waitForTaskIdle(
+    THREAD_ID,
+    async () => {
+      throw new Error('这个任务仍在运行')
+    },
+    { signal: idleAbort.signal, idleAttempts: 3, delay: async () => idleDelay }
+  )
+
+  await Promise.resolve()
+  idleAbort.abort(new Error('new response arrived'))
+  releaseIdleDelay()
+  await assert.rejects(abortedInspection, error => error?.code === AUTO_CONTINUATION_CANCELLED)
 
   const desktopCalls = []
   const visible = await startVisibleTaskContinuation({

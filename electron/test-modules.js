@@ -48,7 +48,13 @@ const {
   requestLikelyRequiresTool,
   shouldAcceptContinuationRecovery
 } = require('./protocol/toolContinuation')
-const { readResponseBufferLimited, readResponseJsonLimited } = require('./protocol/upstreamRequest')
+const {
+  createUpstreamSignal,
+  readResponseBufferLimited,
+  readResponseJsonLimited,
+  transportFailureKind,
+  upstreamAbortKind
+} = require('./protocol/upstreamRequest')
 const { readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
   deterministicToolCallId,
@@ -67,11 +73,14 @@ const {
   imageToolResult,
   isImageGenerationModel,
   isAllowedMcpOrigin,
+  materializeNativeImageGenerationCall,
   materializedImageToolResult,
+  nativeImageGenerationBase64,
   preferredImageGenerationModel,
   safeImageUrl,
   upstreamImagesUrl
 } = require('./protocol/newApiImageGeneration')
+const { nativeResponseImageDelivery, ssePayload } = require('./protocol/nativeResponseImages')
 const {
   legacyCleanupCommand,
   legacyScanDecision,
@@ -289,6 +298,33 @@ async function main() {
     diagnosticKind: 'task_terminated',
     diagnosticSeverity: 'warn'
   })
+  assert.deepStrictEqual(diagnosticClassification({ outcome: 'proxy_error', transportFailureKind: 'network_error' }), {
+    diagnosticKind: 'proxy_transport_error',
+    diagnosticSeverity: 'warn'
+  })
+  assert.deepStrictEqual(
+    diagnosticClassification({ outcome: 'proxy_error', transportFailureKind: 'proxy_internal_error' }),
+    { diagnosticKind: 'proxy_internal_error', diagnosticSeverity: 'error' }
+  )
+  assert.deepStrictEqual(diagnosticClassification({ outcome: 'client_cancelled' }), {
+    diagnosticKind: 'client_cancelled',
+    diagnosticSeverity: 'info'
+  })
+  assert.strictEqual(
+    transportFailureKind(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })),
+    'network_error'
+  )
+  assert.strictEqual(transportFailureKind(new Error('response format invariant failed')), 'proxy_internal_error')
+  const abortedRequest = new EventEmitter()
+  const abortedResponse = new EventEmitter()
+
+  abortedResponse.writableEnded = false
+  const abortedSignal = createUpstreamSignal(abortedRequest, abortedResponse, 60000)
+
+  abortedRequest.emit('aborted')
+  assert.strictEqual(abortedSignal.aborted, true)
+  assert.strictEqual(upstreamAbortKind(abortedSignal), 'client_request_aborted')
+  assert.strictEqual(transportFailureKind(abortedSignal.reason, abortedSignal), 'client_request_aborted')
   assert.deepStrictEqual(
     diagnosticClassification({
       emulation: {
@@ -313,6 +349,17 @@ async function main() {
   assert.strictEqual(publicDiagnostic.kind, 'upstream_capacity')
   assert.strictEqual(publicDiagnostic.upstreamRetryCount, 2)
   assert.doesNotMatch(JSON.stringify(publicDiagnostic), /must-not-enter-public-diagnostics/)
+  const transportPublicDiagnostic = publicDiagnosticSummary(
+    annotateDiagnostic({
+      capturedAt: '2026-08-07T06:21:40.000Z',
+      outcome: 'proxy_error',
+      transportFailureKind: 'network_error',
+      codexThreadId: '019fda1e-e700-79b3-a9c1-2046deca8557'
+    })
+  )
+
+  assert.match(transportPublicDiagnostic.message, /自动发送“继续”/)
+  assert.doesNotMatch(transportPublicDiagnostic.message, /日志/)
   assert.strictEqual(publicDiagnosticSummary({ diagnosticSeverity: 'info' }), null)
   assert.strictEqual(upstreamImagesUrl('https://ainiubi.org'), 'https://ainiubi.org/v1/images/generations')
   assert.strictEqual(upstreamImagesUrl('https://ainiubi.org/v1'), 'https://ainiubi.org/v1/images/generations')
@@ -392,6 +439,69 @@ async function main() {
   const generatedImagesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-generated-images-'))
 
   try {
+    const nativeItem = {
+      id: 'ig_module_base64',
+      type: 'image_generation_call',
+      status: 'completed',
+      result: inlinePng
+    }
+    const nativeMaterialized = materializeNativeImageGenerationCall(nativeItem, { generatedImagesRoot })
+
+    assert.strictEqual(nativeImageGenerationBase64(nativeItem), inlinePng)
+    assert.strictEqual(nativeMaterialized.mimeType, 'image/png')
+    assert.strictEqual(fs.existsSync(nativeMaterialized.filePath), true)
+    assert.match(nativeMaterialized.markdown, /!\[Generated image 1\]\(<.*generated-.*\.png>\)/)
+    assert.strictEqual(nativeImageGenerationBase64({ type: 'message', result: inlinePng }), '')
+    const nativeSse = [
+      {
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: nativeItem
+      },
+      {
+        type: 'response.completed',
+        response: { id: 'resp_module_image', status: 'completed', output: [nativeItem] }
+      }
+    ]
+      .map(payload => `event: ${payload.type}\ndata: ${JSON.stringify(payload)}\n\n`)
+      .join('')
+    const nativeDelivery = nativeResponseImageDelivery(
+      new Response(nativeSse, { headers: { 'content-type': 'text/event-stream; charset=utf-8' } }),
+      { generatedImagesRoot }
+    )
+    const nativeDeliveredText = await nativeDelivery.delivery.text()
+    const nativeDeliveryStats = await nativeDelivery.completion
+
+    assert.strictEqual(nativeDeliveryStats.imageCount, 1)
+    assert.strictEqual(nativeDeliveryStats.materializedCount, 1)
+    assert.strictEqual(nativeDeliveryStats.failedCount, 0)
+    assert.strictEqual(nativeDeliveryStats.injected, true)
+    assert.match(nativeDeliveredText, /response\.output_text\.delta/)
+    assert.match(nativeDeliveredText, /!\[Generated image 1\]\(<.*generated-.*\.png>\)/)
+    assert.strictEqual(ssePayload('data: [DONE]'), null)
+    const invalidNativeSse = [
+      {
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: { id: 'ig_invalid', type: 'image_generation_call', result: 'not-base64-image' }
+      },
+      { type: 'response.completed', response: { status: 'completed', output: [] } }
+    ]
+      .map(payload => `data: ${JSON.stringify(payload)}\n\n`)
+      .join('')
+    const invalidNativeDelivery = nativeResponseImageDelivery(
+      new Response(invalidNativeSse, { headers: { 'content-type': 'text/event-stream' } }),
+      { generatedImagesRoot }
+    )
+
+    assert.match(await invalidNativeDelivery.delivery.text(), /ig_invalid/)
+    assert.deepStrictEqual(await invalidNativeDelivery.completion, {
+      observed: true,
+      imageCount: 1,
+      materializedCount: 0,
+      failedCount: 1,
+      injected: false
+    })
     const materialized = await materializedImageToolResult(
       { created: 124, data: [{ url: 'https://cdn.example.com/generated.png' }] },
       {
@@ -631,6 +741,7 @@ async function main() {
       packageMetadata.build?.nsis?.installerIcon,
       packageMetadata.build?.nsis?.uninstallerIcon,
       packageMetadata.build?.nsis?.installerHeaderIcon,
+      'electron/assets/app.ico',
       'src/app/favicon.ico'
     ])
   ].map(iconPath => path.resolve(projectRoot, String(iconPath || '')))
@@ -674,6 +785,38 @@ async function main() {
     'the runtime window icon must remain available in the packaged app'
   )
   assert.match(mainProcessSource, /assets['"],\s*['"]app-icon\.ico['"]/, 'the window must use the custom icon')
+  assert.strictEqual(
+    (mainProcessSource.match(/assets['"],\s*['"]app-icon\.ico['"]/g) || []).length,
+    2,
+    'the window and tray must use the same multi-size custom icon'
+  )
+  assert.doesNotMatch(
+    mainProcessSource,
+    /assets['"],\s*['"]app\.ico['"]/,
+    'the tray must not use the removed legacy icon'
+  )
+  assert.doesNotMatch(
+    mainProcessSource,
+    /openRuntimeLog|打开运行日志/,
+    'the client must not expose the debug log opener'
+  )
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(projectRoot, 'electron', 'preload.js'), 'utf8'),
+    /openRuntimeLog/,
+    'the debug log opener must not remain exposed through preload'
+  )
+  const globalStyles = fs.readFileSync(path.join(projectRoot, 'src', 'app', 'globals.css'), 'utf8')
+
+  assert.match(
+    globalStyles,
+    /@keyframes\s+manager-circular-progress-spin/,
+    'busy indicators need an explicit spin animation'
+  )
+  assert.match(
+    globalStyles,
+    /\.MuiCircularProgress-root[\s\S]*animation:/,
+    'busy indicators must apply the spin animation'
+  )
   assert.match(
     mainProcessSource,
     /app\.disableHardwareAcceleration\(\)/,
@@ -745,7 +888,19 @@ async function main() {
     const iconBytes = fs.readFileSync(iconPath)
 
     assert.deepStrictEqual([...iconBytes.subarray(0, 4)], [0, 0, 1, 0], 'application icon must be a valid ICO')
-    assert.ok(iconBytes.readUInt16LE(4) >= 6, 'application icon must include the Windows small and large sizes')
+    const iconEntryCount = iconBytes.readUInt16LE(4)
+
+    assert.ok(iconEntryCount >= 6, 'application icon must include the Windows small and large sizes')
+    for (let index = 0; index < iconEntryCount; index += 1) {
+      const directoryOffset = 6 + index * 16
+      const imageOffset = iconBytes.readUInt32LE(directoryOffset + 12)
+
+      assert.strictEqual(
+        iconBytes.readUInt32LE(imageOffset),
+        40,
+        'Windows icon sizes must use broadly compatible DIB frames instead of PNG-only frames'
+      )
+    }
   }
 
   const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-mm-legacy-'))

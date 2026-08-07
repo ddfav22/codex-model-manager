@@ -433,6 +433,16 @@ async function main() {
       const runtimeLogButton = Array.from(document.querySelectorAll('button')).find(
         element => String(element.textContent || '').trim() === '打开运行日志'
       )
+      const debugLogTextFound = /打开运行日志|查看日志/.test(document.body?.textContent || '')
+      const spinnerProbe = document.createElement('span')
+
+      spinnerProbe.className = 'MuiCircularProgress-root'
+      document.body.appendChild(spinnerProbe)
+      const spinnerStyle = getComputedStyle(spinnerProbe)
+      const spinnerAnimationName = spinnerStyle.animationName
+      const spinnerAnimationDuration = spinnerStyle.animationDuration
+
+      spinnerProbe.remove()
       const runtimeDiagnostic = await bridge.getRuntimeDiagnosticSummary()
       const unsubscribeRuntimeDiagnostic = bridge.onRuntimeDiagnostic(() => {})
       const runtimeDiagnosticSubscription = typeof unsubscribeRuntimeDiagnostic === 'function'
@@ -454,7 +464,10 @@ async function main() {
         buttonFound: Boolean(updateButton),
         buttonDisabled: Boolean(updateButton?.disabled),
         runtimeLogBridge: typeof bridge?.openRuntimeLog,
-        runtimeLogButtonFound: Boolean(runtimeLogButton)
+        runtimeLogButtonFound: Boolean(runtimeLogButton),
+        debugLogTextFound,
+        spinnerAnimationName,
+        spinnerAnimationDuration
       }
     })()`)
     const onlineLoginDialog = await cdp.evaluate(`(async () => {
@@ -728,8 +741,11 @@ async function main() {
       result.updateSurface?.runtimeDiagnosticSubscription === true,
       result.updateSurface?.buttonFound === true,
       result.updateSurface?.buttonDisabled === true,
-      result.updateSurface?.runtimeLogBridge === 'function',
-      result.updateSurface?.runtimeLogButtonFound === true,
+      result.updateSurface?.runtimeLogBridge === 'undefined',
+      result.updateSurface?.runtimeLogButtonFound === false,
+      result.updateSurface?.debugLogTextFound === false,
+      result.updateSurface?.spinnerAnimationName === 'manager-circular-progress-spin',
+      result.updateSurface?.spinnerAnimationDuration === '1s',
       result.onlineLoginDialog?.addOpened === true,
       result.onlineLoginDialog?.newApiSelected === true,
       result.onlineLoginDialog?.dialogFound === true,

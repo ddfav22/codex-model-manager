@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes manager-circular-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.MuiCircularProgress-root {
+  transform-origin: center;
+  animation: manager-circular-progress-spin 1s linear infinite !important;
+}
+
 :root {
   --border-radius: var(--mui-shape-borderRadius);
   --border-color: var(--mui-palette-divider);

@@ -2,21 +2,28 @@ const { once } = require('events')
 
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 180000
 const MAX_UPSTREAM_BUFFER_BYTES = 32 * 1024 * 1024
+const upstreamAbortMetadata = new WeakMap()
 
 function createUpstreamSignal(request, response, timeoutMs = DEFAULT_UPSTREAM_TIMEOUT_MS) {
   const controller = new AbortController()
-  const abort = message => {
-    if (!controller.signal.aborted) controller.abort(new Error(message))
+  const metadata = { kind: '' }
+
+  upstreamAbortMetadata.set(controller.signal, metadata)
+  const abort = (kind, message) => {
+    if (!controller.signal.aborted) {
+      metadata.kind = kind
+      controller.abort(new Error(message))
+    }
   }
   const onRequestAborted = () => {
-    abort('Codex 已取消请求')
+    abort('client_request_aborted', 'Codex 已取消请求')
     cleanup()
   }
   const onResponseClose = () => {
-    if (!response.writableEnded) abort('Codex 已关闭响应连接')
+    if (!response.writableEnded) abort('client_response_closed', 'Codex 已关闭响应连接')
     cleanup()
   }
-  const timer = setTimeout(() => abort('上游模型请求超时'), timeoutMs)
+  const timer = setTimeout(() => abort('upstream_timeout', '上游模型请求超时'), timeoutMs)
   const cleanup = () => {
     clearTimeout(timer)
     request.off('aborted', onRequestAborted)
@@ -29,6 +36,32 @@ function createUpstreamSignal(request, response, timeoutMs = DEFAULT_UPSTREAM_TI
   response.once('finish', cleanup)
 
   return controller.signal
+}
+
+function upstreamAbortKind(signal) {
+  return String(upstreamAbortMetadata.get(signal)?.kind || '')
+}
+
+function transportFailureKind(error, signal) {
+  const aborted = upstreamAbortKind(signal)
+
+  if (aborted) return aborted
+  const name = String(error?.name || '')
+  const message = String(error?.message || error || '')
+  const causeCode = String(error?.cause?.code || error?.code || '').toUpperCase()
+
+  if (/timeout/i.test(name) || /timeout|timed.?out/i.test(message) || /TIMEOUT/.test(causeCode)) {
+    return 'upstream_timeout'
+  }
+  if (
+    name === 'TypeError' ||
+    /fetch failed|network|socket|connection|terminated|econn|enotfound|dns/i.test(message) ||
+    /^(?:ECONN|ENET|EHOST|ENOTFOUND|EPIPE|UND_ERR_)/.test(causeCode)
+  ) {
+    return 'network_error'
+  }
+
+  return 'proxy_internal_error'
 }
 
 async function readResponseBufferLimited(response, limit = MAX_UPSTREAM_BUFFER_BYTES) {
@@ -92,5 +125,7 @@ module.exports = {
   pipeResponseBodyLimited,
   readResponseBufferLimited,
   readResponseJsonLimited,
-  readResponseTextLimited
+  readResponseTextLimited,
+  transportFailureKind,
+  upstreamAbortKind
 }

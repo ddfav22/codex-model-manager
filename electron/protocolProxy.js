@@ -44,7 +44,8 @@ const {
   pipeResponseBodyLimited,
   readResponseBufferLimited,
   readResponseJsonLimited,
-  readResponseTextLimited
+  readResponseTextLimited,
+  transportFailureKind
 } = require('./protocol/upstreamRequest')
 const { readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
@@ -72,6 +73,7 @@ const {
   handleImageMcpRequest,
   ImageGenerationValidationError
 } = require('./protocol/newApiImageGeneration')
+const { nativeResponseImageDelivery } = require('./protocol/nativeResponseImages')
 const {
   RECOVERY_DECISION,
   parseAgentRecoveryDecision,
@@ -2818,17 +2820,31 @@ async function handleResponsesRequest(
     if (upstream.ok) {
       reportWireApi('responses')
       const observed = observeNativeResponses(upstream)
-      const [, taskTermination] = await Promise.all([
-        pipeFetchBody(observed.delivery, response, upstreamResponseHeaders(observed.delivery, body.stream)),
-        observed.completion
+      const imageDelivery = nativeResponseImageDelivery(observed.delivery, {
+        generatedImagesRoot: requestOptions.generatedImagesRoot
+      })
+      const [, taskTermination, nativeImageDelivery] = await Promise.all([
+        pipeFetchBody(imageDelivery.delivery, response, upstreamResponseHeaders(imageDelivery.delivery, body.stream)),
+        observed.completion,
+        imageDelivery.completion
       ])
+      const deliveredTaskTermination = nativeImageDelivery.injected
+        ? {
+            ...taskTermination,
+            kind: 'image_delivered',
+            shouldContinue: false,
+            normalCompletion: true,
+            hasFinalText: true
+          }
+        : taskTermination
 
       if (typeof onDiagnostic === 'function') {
         try {
           onDiagnostic({
             ...upstreamDiagnostic(diagnostic, observed.delivery),
             outcome: 'upstream_accepted',
-            taskTermination
+            taskTermination: deliveredTaskTermination,
+            nativeImageDelivery
           })
         } catch {
           // Diagnostics must never interrupt the model request.
@@ -3235,6 +3251,7 @@ function createProtocolProxy({
   const server = http.createServer(async (request, response) => {
     let requestChannelId = ''
     let requestCodexContext = {}
+    let requestUpstreamSignal
 
     try {
       const url = new URL(request.url || '/', 'http://127.0.0.1')
@@ -3307,6 +3324,7 @@ function createProtocolProxy({
         )
         return
       }
+      requestUpstreamSignal = createUpstreamSignal(request, response)
       await handleResponsesRequest(
         request,
         response,
@@ -3322,19 +3340,26 @@ function createProtocolProxy({
         },
         {
           compactV1: responsesMatch[2] === '/compact',
+          generatedImagesRoot,
+          signal: requestUpstreamSignal,
           onRequestContext: context => {
             requestCodexContext = context
           }
         }
       )
     } catch (error) {
+      const failureKind = transportFailureKind(error, requestUpstreamSignal)
+      const clientCancelled = failureKind.startsWith('client_')
+
       publishDiagnostic({
         capturedAt: new Date().toISOString(),
         channelId: requestChannelId,
         ...requestCodexContext,
-        outcome: 'proxy_error',
+        outcome: clientCancelled ? 'client_cancelled' : 'proxy_error',
         errorName: String(error?.name || 'Error'),
-        errorCode: String(error?.code || '')
+        errorCode: String(error?.code || ''),
+        errorCauseCode: String(error?.cause?.code || '').slice(0, 64),
+        transportFailureKind: failureKind
       })
       if (response.headersSent) {
         if (!response.writableEnded) response.end()

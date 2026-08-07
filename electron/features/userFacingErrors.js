@@ -1,4 +1,4 @@
-const DEFAULT_ERROR_MESSAGE = '操作未完成。请重试；如果仍然失败，请打开程序日志并联系技术人员。'
+const DEFAULT_ERROR_MESSAGE = '操作未完成。请重试；如果仍然失败，请联系维护人员。'
 
 const stripTechnicalPrefixes = value => {
   let text = String(value || '').trim()

@@ -59,7 +59,15 @@ function diagnosticClassification(diagnostic) {
   }
 
   if (diagnostic?.outcome === 'proxy_error') {
-    return { diagnosticKind: 'proxy_transport_error', diagnosticSeverity: 'error' }
+    const transportKind = String(diagnostic?.transportFailureKind || '')
+
+    return /^(?:network_error|upstream_timeout)$/.test(transportKind)
+      ? { diagnosticKind: 'proxy_transport_error', diagnosticSeverity: 'warn' }
+      : { diagnosticKind: 'proxy_internal_error', diagnosticSeverity: 'error' }
+  }
+
+  if (diagnostic?.outcome === 'client_cancelled') {
+    return { diagnosticKind: 'client_cancelled', diagnosticSeverity: 'info' }
   }
 
   if (Number(diagnostic?.upstreamRetryCount || 0) > 0) {
@@ -97,7 +105,9 @@ function diagnosticMessage(diagnostic) {
     case 'context_too_large':
       return '当前对话上下文过大，请先让 Codex 压缩上下文或新建任务。'
     case 'proxy_transport_error':
-      return '客户端与模型渠道的连接中断，详细信息已写入运行日志。'
+      return '客户端与模型渠道的连接中断；如果当前任务因此停止，客户端会在同一对话中自动发送“继续”。'
+    case 'proxy_internal_error':
+      return '客户端处理模型响应时出现异常，当前任务未完成。'
     case 'agent_loop_transport_stalled':
       return 'Agent Loop 因连续连接失败而暂停，已保留当前任务。'
     case 'agent_loop_repeated_stall':
@@ -107,7 +117,7 @@ function diagnosticMessage(diagnostic) {
     case 'task_terminated':
       return '当前任务异常终止，客户端将尝试在同一对话中继续。'
     default:
-      return '模型请求出现异常，详细信息已写入运行日志。'
+      return '模型请求出现异常，当前任务未完成。'
   }
 }
 

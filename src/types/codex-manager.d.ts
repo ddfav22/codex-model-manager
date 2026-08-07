@@ -465,7 +465,6 @@ declare global {
       repairConversationIndex: () => Promise<ConversationIndexRepair>
       recoverTask: (taskId: string) => Promise<CodexTaskRecoveryResult>
       onTaskRecoveryProgress: (listener: (progress: CodexTaskRecoveryProgress) => void) => () => void
-      openRuntimeLog: () => Promise<{ ok: boolean; path: string; error?: string }>
       testRelay: (payload: RelayInput) => Promise<{ test: RelayTest; channel?: RelayProvider; status: CodexStatus }>
       testSavedRelay: (
         id: string,

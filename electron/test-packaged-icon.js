@@ -49,6 +49,10 @@ function assertPackagedIcon(executablePath) {
   assert.ok(totalPixels >= 256, 'packaged executable icon is unexpectedly small')
   assert.ok(result.visiblePixels > 0, 'packaged executable icon is empty')
   assert.ok(
+    result.visiblePixels <= Math.floor(totalPixels * 0.8),
+    'packaged executable icon lost its transparent background or decoded as color noise'
+  )
+  assert.ok(
     result.saturatedBluePixels >= Math.ceil(totalPixels * 0.04),
     'packaged executable still uses the gray Electron default icon instead of the blue routing icon'
   )

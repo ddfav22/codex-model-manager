@@ -58,7 +58,7 @@ function recoveryFailureMessage(category) {
   if (category === 'network') return '任务恢复因网络或连接问题停止；客户端不会在后台循环重试。'
   if (category === 'session') return '原任务记录无法恢复，可尝试从已保存历史创建 Fork。'
 
-  return '任务恢复未能启动或完成，请查看运行日志中的分类信息。'
+  return '任务恢复未能启动或完成，请稍后重试或联系维护人员。'
 }
 
 function recoveryEventType(event) {

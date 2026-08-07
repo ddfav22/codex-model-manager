@@ -1,6 +1,6 @@
 const path = require('path')
 const fs = require('fs')
-const { app, BrowserWindow, dialog, shell, Menu, Tray } = require('electron')
+const { app, BrowserWindow, dialog, Menu, Tray } = require('electron')
 const packageMetadata = require('../package.json')
 const { startupCompatibility } = require('./runtime/startupCompatibility')
 
@@ -357,33 +357,12 @@ function showMainWindow() {
   mainWindow.focus()
 }
 
-async function openRuntimeLog() {
-  const logPath = getRuntimeLogPath()
-
-  if (logPath && fs.existsSync(logPath)) {
-    shell.showItemInFolder(logPath)
-    return { ok: true, path: logPath }
-  }
-
-  if (!logPath) return { ok: false, path: '', error: '运行日志路径尚未初始化' }
-  const logDirectory = path.dirname(logPath)
-
-  if (!fs.existsSync(logDirectory)) return { ok: false, path: logPath, error: '运行日志目录尚未创建' }
-  const error = await shell.openPath(logDirectory)
-
-  return { ok: !error, path: logPath, error }
-}
-
 function createTray() {
-  tray = new Tray(path.join(__dirname, 'assets', 'app.ico'))
+  tray = new Tray(path.join(__dirname, 'assets', 'app-icon.ico'))
   tray.setToolTip('ChatGPT Model Manager')
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '打开管理器', click: showMainWindow },
-      {
-        label: '打开运行日志',
-        click: () => openRuntimeLog().catch(error => logError('runtimeLog.open.failed', error))
-      },
       { type: 'separator' },
       {
         label: '退出',
@@ -405,7 +384,6 @@ function registerIpc() {
     logEvent,
     manager,
     getRuntimeDiagnosticSummary: () => publicDiagnosticSummary(runtimeDiagnostic.lastProxyRequest),
-    openRuntimeLog,
     updater: appUpdater,
     writeRuntimeDiagnostic
   })
