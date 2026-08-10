@@ -646,6 +646,48 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-sse-boundary-compat') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write('data: {"type":"ping","cost":"0"}\n\n')
+        const reasoningEvent = Buffer.from(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-sse-boundary',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { reasoning_content: '先检查工具。' }, finish_reason: null }]
+          })}\n\n`,
+          'utf8'
+        )
+        const splitAt = reasoningEvent.indexOf(Buffer.from('先', 'utf8')) + 1
+
+        response.write(reasoningEvent.subarray(0, splitAt))
+        setTimeout(() => {
+          response.write(reasoningEvent.subarray(splitAt))
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-sse-boundary',
+              object: 'chat.completion.chunk',
+              model: requestBody.model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: [{ type: 'text', text: '中文回答完成。' }] },
+                  finish_reason: null
+                }
+              ]
+            })}\n\n`
+          )
+          response.write(
+            'data: {"choices":[],"x-opencode-type":"inference-cost","cost":"0.0001","normalizedUsage":{"inputTokens":10}}\n\n'
+          )
+          response.end('data: [DONE]\n\n')
+        }, 5)
+        return
+      }
+
       if (requestBody.model === 'grok-newapi-strict-tool-compat') {
         newApiStrictToolRequests += 1
         if (requestBody.stream_options) {
@@ -702,7 +744,7 @@ async function main() {
                       index: 0,
                       id: 'call_newapi_shared',
                       type: 'function',
-                      function: { name: 'command', arguments: '"echo one"}' }
+                      function: { name: 'command', arguments: '{"command":"echo one"}' }
                     },
                     {
                       index: 1,
@@ -1819,6 +1861,7 @@ async function main() {
     'grok-high-demand-retry',
     'grok-high-demand-exhausted',
     'grok-context-too-large',
+    'grok-sse-boundary-compat',
     'grok-newapi-strict-tool-compat'
   ]
   const modelCapabilities = Object.fromEntries(
@@ -2174,6 +2217,34 @@ async function main() {
   ])
   assert.strictEqual(proxyDiagnostics.at(-1).chatCompatibilityRetryCount, 3)
   assert.ok(proxyDiagnostics.at(-1).effectiveChatRequestBytes > 0)
+  upstreamRequests.length = 0
+  const sseBoundaryResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-sse-boundary-compat',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '检查流兼容性。' }] }]
+    })
+  })
+  const sseBoundaryBody = await sseBoundaryResponse.text()
+  const sseBoundaryEvents = sseBoundaryBody
+    .split(/\n\n/)
+    .map(block => block.split(/\r?\n/).find(line => line.startsWith('data: ')))
+    .filter(Boolean)
+    .map(line => JSON.parse(line.slice('data: '.length)))
+
+  assert.strictEqual(sseBoundaryResponse.status, 200)
+  assert.ok(sseBoundaryBody.includes('先检查工具。'))
+  assert.ok(sseBoundaryBody.includes('中文回答完成。'))
+  assert.ok(sseBoundaryBody.includes('"phase":"commentary"'))
+  assert.ok(!sseBoundaryBody.includes('\uFFFD'))
+  assert.ok(!sseBoundaryBody.includes('inference-cost'))
+  assert.ok(!sseBoundaryBody.includes('"type":"ping"'))
+  assert.deepStrictEqual(
+    sseBoundaryEvents.map(event => event.sequence_number),
+    sseBoundaryEvents.map((_, index) => index)
+  )
   upstreamRequests.length = 0
   const fastResponses = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

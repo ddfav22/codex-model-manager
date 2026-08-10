@@ -58,10 +58,14 @@ const {
 const { readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
   deterministicToolCallId,
+  isIgnorableChatStreamFrame,
+  mergeStreamedToolArguments,
   mergeStreamedToolName,
   normalizeToolArguments,
+  reasoningFromChatDelta,
   rejectedOptionalChatParameter,
   sanitizeChatToolHistory,
+  textFromChatDelta,
   withoutRejectedChatParameter
 } = require('./protocol/newApiChatCompatibility')
 const {
@@ -618,6 +622,21 @@ async function main() {
   assert.strictEqual(mergeStreamedToolName('shell_', 'command'), 'shell_command')
   assert.strictEqual(mergeStreamedToolName('shell_command', 'shell_command'), 'shell_command')
   assert.strictEqual(mergeStreamedToolName('shell_', 'shell_command'), 'shell_command')
+  assert.strictEqual(mergeStreamedToolArguments('{"command":', '"echo ok"}'), '{"command":"echo ok"}')
+  assert.strictEqual(mergeStreamedToolArguments('{"command":', '{"command":"echo ok"}'), '{"command":"echo ok"}')
+  assert.strictEqual(
+    mergeStreamedToolArguments('{"command":"echo ok"}', '{"command":"echo ok"}'),
+    '{"command":"echo ok"}'
+  )
+  assert.strictEqual(textFromChatDelta([{ type: 'text', text: '中文' }, '回答']), '中文回答')
+  assert.strictEqual(reasoningFromChatDelta({ reasoning_content: [{ text: '先检查' }] }), '先检查')
+  assert.strictEqual(reasoningFromChatDelta({ thinking: '再执行' }), '再执行')
+  assert.strictEqual(isIgnorableChatStreamFrame({ type: 'ping', cost: '0' }), true)
+  assert.strictEqual(
+    isIgnorableChatStreamFrame({ choices: [], 'x-opencode-type': 'inference-cost', normalizedUsage: {} }),
+    true
+  )
+  assert.strictEqual(isIgnorableChatStreamFrame({ id: 'chatcmpl-ok', choices: [{ delta: { content: 'ok' } }] }), false)
   assert.strictEqual(
     deterministicToolCallId('shell_command', '{"command":"echo ok"}', 0),
     deterministicToolCallId('shell_command', '{"command":"echo ok"}', 0),

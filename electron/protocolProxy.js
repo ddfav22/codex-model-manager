@@ -51,10 +51,14 @@ const { readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
   MAX_OPTIONAL_PARAMETER_RETRIES,
   deterministicToolCallId,
+  isIgnorableChatStreamFrame,
+  mergeStreamedToolArguments,
   mergeStreamedToolName,
   normalizeToolArguments,
+  reasoningFromChatDelta,
   rejectedOptionalChatParameter,
   sanitizeChatToolHistory,
+  textFromChatDelta,
   uniqueToolCallId,
   withoutRejectedChatParameter
 } = require('./protocol/newApiChatCompatibility')
@@ -90,6 +94,7 @@ const UPSTREAM_CAPACITY_MAX_RETRIES = 2
 const UPSTREAM_CAPACITY_RETRY_BASE_MS = 750
 const UPSTREAM_CAPACITY_RETRY_MAX_MS = 5000
 const UPSTREAM_FAILURE_CLASSIFICATION_BYTES = 64 * 1024
+const responseEventSequences = new WeakMap()
 
 function jsonByteLength(value) {
   try {
@@ -1457,7 +1462,10 @@ function baseResponse(state, status, output, usage = null) {
 }
 
 function writeEvent(response, type, payload) {
-  response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`)
+  const sequenceNumber = responseEventSequences.get(response) || 0
+
+  responseEventSequences.set(response, sequenceNumber + 1)
+  response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...payload, sequence_number: sequenceNumber })}\n\n`)
 }
 
 function createStreamState(body, toolNames, response) {
@@ -1478,6 +1486,7 @@ function createStreamState(body, toolNames, response) {
     usage: null,
     progressOutput: [],
     liveProgress: null,
+    reasoningClosed: false,
     outputOffset: 0,
     finished: false
   }
@@ -1679,15 +1688,21 @@ function flushToolArgumentDelta(state, tool) {
 }
 
 function consumeChatChunk(state, chunk) {
+  if (isIgnorableChatStreamFrame(chunk)) return
   if (chunk?.id && !state.started) state.responseId = chunk.id.replace(/^chatcmpl-/, 'resp_')
   if (chunk?.model) state.model = chunk.model
   if (chunk?.usage) state.usage = chunk.usage
 
   for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
     const delta = choice.delta && Object.keys(choice.delta).length ? choice.delta : choice.message || choice.delta || {}
-    const text = typeof delta.content === 'string' ? sanitizeVisibleAssistantDelta(delta.content) : ''
+    const reasoning = sanitizeVisibleAssistantDelta(reasoningFromChatDelta(delta))
+    const text = sanitizeVisibleAssistantDelta(textFromChatDelta(delta.content))
+
+    if (reasoning && !state.reasoningClosed) appendLiveProgress(state, reasoning)
 
     if (text) {
+      state.reasoningClosed = true
+      finishLiveProgress(state)
       ensureTextStarted(state)
       state.text += text
       writeEvent(state.response, 'response.output_text.delta', {
@@ -1701,11 +1716,10 @@ function consumeChatChunk(state, chunk) {
 
     for (const [toolPosition, chatTool] of (Array.isArray(delta.tool_calls) ? delta.tool_calls : []).entries()) {
       const tool = toolStateFor(state, chatTool, toolPosition)
-      const argumentDelta = normalizeToolArguments(chatTool.function?.arguments)
 
-      if (argumentDelta) {
-        tool.arguments += argumentDelta
-      }
+      state.reasoningClosed = true
+      tool.arguments = mergeStreamedToolArguments(tool.arguments, chatTool.function?.arguments)
+      finishLiveProgress(state)
       announceTool(state, tool)
       flushToolArgumentDelta(state, tool)
     }
@@ -1721,12 +1735,10 @@ function consumeChatChunk(state, chunk) {
         0
       )
 
+      state.reasoningClosed = true
+      finishLiveProgress(state)
       announceTool(state, legacyTool)
-      const argumentDelta = normalizeToolArguments(delta.function_call.arguments)
-
-      if (argumentDelta) {
-        legacyTool.arguments += argumentDelta
-      }
+      legacyTool.arguments = mergeStreamedToolArguments(legacyTool.arguments, delta.function_call.arguments)
       flushToolArgumentDelta(state, legacyTool)
     }
   }
@@ -1860,14 +1872,23 @@ async function pipeChatStreamToResponses(upstream, body, toolNames, response, pr
   })
   const reader = upstream.body.getReader()
   const decoder = new TextDecoder()
+  let byteCount = 0
 
   while (!state.finished) {
     const { done, value } = await reader.read()
 
     if (done) break
+    byteCount += value.byteLength
+    if (byteCount > MAX_UPSTREAM_BUFFER_BYTES) {
+      await reader.cancel('上游响应过大')
+      throw new Error(`上游响应超过 ${MAX_UPSTREAM_BUFFER_BYTES} 字节限制`)
+    }
     parser.feed(decoder.decode(value, { stream: true }))
   }
 
+  const tail = decoder.decode()
+
+  if (tail) parser.feed(tail)
   parser.reset({ consume: true })
   finishResponseStream(state)
 }

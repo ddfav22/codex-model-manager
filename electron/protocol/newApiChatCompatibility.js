@@ -21,6 +21,66 @@ function normalizeToolArguments(value) {
   }
 }
 
+function textFromChatDelta(value) {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+
+  return value
+    .map(part => {
+      if (typeof part === 'string') return part
+      if (typeof part?.text === 'string') return part.text
+      if (typeof part?.content === 'string') return part.content
+
+      return ''
+    })
+    .join('')
+}
+
+function reasoningFromChatDelta(delta) {
+  if (!delta || typeof delta !== 'object') return ''
+
+  for (const value of [delta.reasoning_content, delta.reasoning, delta.thinking]) {
+    const text = textFromChatDelta(value)
+
+    if (text) return text
+  }
+
+  return ''
+}
+
+function mergeStreamedToolArguments(currentValue, incomingValue) {
+  const current = String(currentValue || '')
+  const incoming = normalizeToolArguments(incomingValue)
+
+  if (!incoming) return current
+  if (!current) return incoming
+  if (incoming === current) return current
+
+  const currentTrimmed = current.trimStart()
+  const incomingTrimmed = incoming.trimStart()
+  const looksLikeJsonSnapshot =
+    incoming.length > current.length &&
+    incoming.startsWith(current) &&
+    ((currentTrimmed.startsWith('{') && incomingTrimmed.startsWith('{')) ||
+      (currentTrimmed.startsWith('[') && incomingTrimmed.startsWith('[')))
+
+  return looksLikeJsonSnapshot ? incoming : `${current}${incoming}`
+}
+
+function isIgnorableChatStreamFrame(frame) {
+  if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false
+  if (frame['x-opencode-type']) return true
+  if (String(frame.type || '').toLowerCase() === 'ping') return true
+
+  const choices = Array.isArray(frame.choices) ? frame.choices : null
+
+  return Boolean(
+    choices?.length === 0 &&
+    !frame.usage &&
+    (frame.cost !== undefined || frame.normalizedUsage !== undefined || frame.normalized_usage !== undefined)
+  )
+}
+
 function deterministicToolCallId(name, argumentsValue, index = 0) {
   const digest = createHash('sha256')
     .update(`${String(name || '')}\0${normalizeToolArguments(argumentsValue)}\0${Number(index) || 0}`)
@@ -253,10 +313,14 @@ module.exports = {
   MAX_OPTIONAL_PARAMETER_RETRIES,
   OPTIONAL_CHAT_PARAMETERS,
   deterministicToolCallId,
+  isIgnorableChatStreamFrame,
+  mergeStreamedToolArguments,
   mergeStreamedToolName,
   normalizeToolArguments,
+  reasoningFromChatDelta,
   rejectedOptionalChatParameter,
   sanitizeChatToolHistory,
   uniqueToolCallId,
+  textFromChatDelta,
   withoutRejectedChatParameter
 }

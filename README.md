@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.89**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.90**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -11,7 +11,7 @@
 - NewAPI 登录页默认使用 `https://ainiubi.org`，也可以改为其他兼容平台地址。
 - 对每个模型执行聊天、流式、工具调用和工具结果续答检测；未知接口明确标记为暂不支持。
 - 在 Codex 内通过原生可见槽位切换已验证模型，并保持真实上游模型路由。
-- 为仅提供 Chat Completions 的 Grok 渠道适配 Responses 事件、工具调用、工具结果与无固定轮数的 Agent Loop 恢复；计划型中间消息按 `commentary` delta 渐进显示，恢复阶段通过“继续工具/确实完成/需要输入”三态决策收口，只有重复内容或连续连接失败才触发熔断，内部工具历史和恢复控制不会出现在对话正文。
+- 为仅提供 Chat Completions 的 Grok 渠道适配严格、带单调 `sequence_number` 的 Responses 事件、工具调用、工具结果与无固定轮数的 Agent Loop 恢复；兼容 NewAPI 的 ping/计费尾帧、中文 UTF-8 跨分片、数组文本、Grok reasoning commentary 和累计式工具参数。计划型中间消息按 `commentary` delta 渐进显示，恢复阶段通过“继续工具/确实完成/需要输入”三态决策收口，只有重复内容或连续连接失败才触发熔断，内部工具历史和恢复控制不会出现在对话正文。
 - 保留 Codex 的 `sessions`、Projects、Skills、Agents 和登录配置；历史任务目录会同步为 Codex 桌面端 Local Projects，导入、导出和删除操作包含隔离与失败回滚。
 - 对话管理可粘贴任务 UUID 或从对话行恢复未完成任务：用户确认后先检查最后一轮、工作区和 Git 现场，再继续原任务；只有恢复尚未开始且会话记录不可用时才 Fork 一次。认证、额度、权限、网络或高负载错误不会自动重试。
 - 原生 Responses 渠道若以 refusal、空输出、仅推理无最终答复、incomplete、受阻工具调用或真实网络中断终止，客户端不会等待任务空闲，而是立即向同一 Codex 对话发送一条可见的“继续”：活动回合走官方 `turn/steer`，已结束回合走 `turn/start`。同一连续终止链最多三次，正常完成、用户新消息或不可恢复错误会停止并重置。

@@ -168,6 +168,15 @@ npm run test:installer
 - Release 工作流必须先通过 lint、类型、模块、核心、wire、构建和纯净包测试。
 - 当前未配置商业 Windows 代码签名证书，这是已知发布风险，不得隐藏。
 
+## 2026-08-10：参考 RongleCat/grok-app 加固 Grok/NewAPI→Codex 流边界（1.2.90）
+
+- 对照项目的可复用结论不是把 Grok Build ACP 运行时搬进 Codex，而是保留“Agent 内核归客户端、适配层只负责协议边界”的分工。当前客户端继续由 Codex 执行工具和维护会话，NewAPI 代理不代替 Codex 执行工具。
+- 吸收其第三方中转 SSE 清洗经验：Chat→Responses 转换明确忽略 ping、`x-opencode-type` 与无有效选择的计费尾帧；对 Codex 输出的每个合成 Responses 事件都带从 0 开始、严格递增的 `sequence_number`。
+- 吸收其中文流分片回归：`TextDecoder` 始终以流式方式读取，并在 EOF 刷新尾部缓冲；同时对转换流执行 32 MiB 上限，超限会取消上游而不是继续占用内存。
+- Grok/NewAPI 增量兼容新增数组文本、`reasoning_content`/`reasoning`/`thinking` commentary，以及累计式 JSON 工具参数识别。推理 commentary 只允许出现在首个正文或工具事件之前，避免后续交错事件复用 output index。
+- 不照搬的部分：Grok App 使用 `grok agent stdio`/ACP、独立 `GROK_HOME` 和官方辅助 MCP；本客户端的宿主是 Codex，已有 Responses 工具协议、Codex Home 和 NewAPI 图片工具，复制这些运行时会形成双 Agent Loop 和认证冲突。
+- 回归范围：模块测试覆盖元数据分类、数组文本、reasoning 字段和增量/累计工具参数；wire 测试通过真实 HTTP SSE 在一个中文字符的多字节中间切包，断言无替换字符、commentary/正文完整、元数据不泄漏，并断言所有合成事件序号精确为 `0..n-1`。
+
 ## 2026-08-05：1.2.69 流式控制标志与脚本续接
 
 - `.230` 的 1.2.68 日志显示，Grok 经过多轮标准工具调用后，在工具结果后回复“接下来用更稳妥的脚本方式排查认证”；旧逻辑没有把“接下来用”识别为计划，只做一次终局确认，确认请求 15 秒超时后把计划误判成最终答案。

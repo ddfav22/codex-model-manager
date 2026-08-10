@@ -2,6 +2,18 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.90 - 2026-08-10
+
+### Grok/NewAPI 流式协议兼容
+
+- 参考 Grok App 对第三方中转采用的“宽进严出”边界，为 Chat Completions→Responses 合成事件补充从 0 开始的单调 `sequence_number`，避免把兼容渠道的不完整事件形状直接暴露给 Codex。
+- 忽略 NewAPI/OpenCode 风格的 ping 和计费元数据尾帧；流式 UTF-8 解码在结束时刷新缓冲并保留跨网络分片的中文字符，同时限制转换流的最大读取大小。
+- 支持数组形式的文本增量、Grok `reasoning_content`/`thinking` 可见 commentary，以及既可能是增量、也可能是累计快照的工具参数，避免重复拼接后生成无效 JSON。
+
+### 测试
+
+- 新增协议单元回归和真实 HTTP/SSE wire 场景，覆盖中文字符在多字节中间断开、非标准元数据帧、reasoning commentary、数组文本、累计工具参数和严格连续 Responses 序号。
+
 ## 1.2.87 - 2026-08-07
 
 ### 修复 WindowsApps CLI 的 spawn EPERM
