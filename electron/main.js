@@ -30,8 +30,6 @@ process.env.CODEX_MANAGER_STATE_DIR = portableStorage.managerState
 const { configureRuntimeLogger, getRuntimeLogPath, logError, logEvent } = require('./runtimeLogger')
 const { createAppUpdater, repositoryFromPackageMetadata } = require('./features/appUpdater')
 const { completePendingPatch } = require('./features/patchInstaller')
-const { createTaskAutoContinuationRuntime } = require('./features/taskAutoContinuationRuntime')
-const { redactedTaskId } = require('./features/taskRecovery')
 const { toUserFacingErrorMessage } = require('./features/userFacingErrors')
 const manager = require('./codexManager')
 const { createProtocolProxy } = require('./protocolProxy')
@@ -75,12 +73,6 @@ const appUpdater = createAppUpdater({
     setImmediate(() => app.quit())
   }
 })
-const taskAutoContinuation = createTaskAutoContinuationRuntime({
-  manager,
-  logEvent,
-  getRuntimeTargets: () => runtimeDiagnostic?.lastApply?.restart?.targets || []
-})
-
 logEvent('info', 'process.start', {
   version: app.getVersion(),
   packaged: app.isPackaged,
@@ -353,11 +345,6 @@ async function initializeProtocolRuntime() {
     generatedImagesRoot: portableStorage.generatedImages,
     resolveChannel: id => manager.getRelayRuntime(id),
     onDiagnostic: diagnostic => {
-      taskAutoContinuation.handleDiagnostic(diagnostic).catch(error => {
-        logError('task.autoContinue.supervisorError', error, {
-          threadRef: diagnostic?.codexThreadId ? redactedTaskId(diagnostic.codexThreadId) : ''
-        })
-      })
       writeRuntimeDiagnostic({ lastProxyRequest: diagnostic }, { lightweight: true })
       const publicSummary = publicDiagnosticSummary(diagnostic)
 

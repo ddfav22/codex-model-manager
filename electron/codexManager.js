@@ -96,7 +96,6 @@ let codexTargetsCache = { expiresAt: 0, targets: [], appLaunchers: [] }
 let codexInstallationEvidenceCache = { expiresAt: 0, evidence: null }
 const sessionMetaCache = new Map()
 const activeTaskRecoveries = new Map()
-const continuationRuntimeCopies = new Map()
 
 function execFileText(file, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -6480,41 +6479,32 @@ async function inspectCodexTaskRecovery(taskId, options = {}) {
   const request = options.runAppServerRequest || runCodexAppServerRequest
   let runtimeStatus = 'unknown'
   let lastTurnStatus = 'unknown'
-  let lastTurnId = ''
   let inspectionCategory = ''
 
   try {
-    if (options.skipRuntimeInspection) {
-      inspectionCategory = 'skipped'
-    } else {
-      const response = await request(
-        codexPath,
-        'thread/read',
-        { threadId: normalizedTaskId, includeTurns: true },
-        {
-          cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
-          env: { ...process.env, CODEX_HOME: paths.codexHome },
-          timeoutMs: options.inspectTimeoutMs || 30000
-        }
-      )
+    const response = await request(
+      codexPath,
+      'thread/read',
+      { threadId: normalizedTaskId, includeTurns: true },
+      {
+        cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
+        env: { ...process.env, CODEX_HOME: paths.codexHome },
+        timeoutMs: options.inspectTimeoutMs || 30000
+      }
+    )
 
-      const thread = response?.result?.thread || {}
-      const turns = Array.isArray(thread.turns) ? thread.turns : []
-      const lastTurn = turns[turns.length - 1]
+    const thread = response?.result?.thread || {}
+    const turns = Array.isArray(thread.turns) ? thread.turns : []
+    const lastTurn = turns[turns.length - 1]
 
-      runtimeStatus = String(thread.status?.type || 'unknown')
-      lastTurnStatus = String(lastTurn?.status || 'unknown')
-      lastTurnId = String(lastTurn?.id || '')
-    }
+    runtimeStatus = String(thread.status?.type || 'unknown')
+    lastTurnStatus = String(lastTurn?.status || 'unknown')
   } catch (error) {
     inspectionCategory = recoveryFailureCategory(error instanceof Error ? error.message : String(error))
     if (inspectionCategory !== 'session') throw error
   }
 
-  if (
-    !options.allowActive &&
-    (runtimeStatus === 'active' || /^(?:inprogress|in_progress|running)$/i.test(lastTurnStatus))
-  ) {
+  if (runtimeStatus === 'active' || /^(?:inprogress|in_progress|running)$/i.test(lastTurnStatus)) {
     throw new Error('这个任务仍在运行，已拒绝创建重复恢复回合')
   }
 
@@ -6525,213 +6515,8 @@ async function inspectCodexTaskRecovery(taskId, options = {}) {
     cwd: session.cwd && fs.existsSync(session.cwd) ? session.cwd : os.homedir(),
     runtimeStatus,
     lastTurnStatus,
-    lastTurnId,
     inspectionCategory,
     workspace: taskRecoveryWorkspaceSnapshot(session, options)
-  }
-}
-
-function windowsAppsRoot(options = {}) {
-  return path.resolve(options.windowsAppsRoot || 'C:\\Program Files\\WindowsApps')
-}
-
-function isWindowsAppsPath(candidate, options = {}) {
-  const root = windowsAppsRoot(options)
-  const resolved = path.resolve(String(candidate || ''))
-
-  return resolved.toLowerCase().startsWith(root.toLowerCase() + path.sep)
-}
-
-function trustedWindowsAppsCodexPackage(candidate, options = {}) {
-  if (!isWindowsAppsPath(candidate, options)) return ''
-
-  const relative = path.relative(windowsAppsRoot(options), path.resolve(candidate))
-  const parts = relative.split(path.sep)
-  const validResourcePath =
-    (parts.length === 4 && /^app$/i.test(parts[1]) && /^resources$/i.test(parts[2])) ||
-    (parts.length === 5 && /^app$/i.test(parts[1]) && /^resources$/i.test(parts[2]) && /^codex$/i.test(parts[3]))
-
-  if (!validResourcePath || !/^OpenAI\.(?:Codex|ChatGPT)_/i.test(parts[0])) return ''
-  if (String(parts.at(-1) || '').toLowerCase() !== 'codex.exe') return ''
-  return parts[0]
-}
-
-async function materializeCodexContinuationRuntime(sourcePath, options = {}) {
-  const packageName = trustedWindowsAppsCodexPackage(sourcePath, options)
-
-  if (!packageName) throw new Error('拒绝复制未经验证的 WindowsApps Codex 运行时')
-
-  const source = path.resolve(sourcePath)
-  const sourceStat = await fs.promises.stat(source)
-
-  if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('WindowsApps Codex 运行时文件无效')
-
-  const paths = getPaths(options)
-  const safePackage = packageName.replace(/[^a-z0-9._-]+/gi, '-')
-  const runtimeRoot = path.resolve(
-    options.continuationRuntimeDir ||
-      path.join(paths.stateDir, 'continuation-runtime', safePackage + '-' + sourceStat.size)
-  )
-  const targetPath = path.join(runtimeRoot, 'codex.exe')
-  const resourceRoot = path.dirname(source)
-  const companionNames = [
-    'codex-command-runner.exe',
-    'codex-windows-sandbox-setup.exe',
-    'rg.exe',
-    'codex-code-mode-host.exe'
-  ]
-  const sourceEntries = [{ name: 'codex.exe', source, size: sourceStat.size }]
-
-  for (const name of companionNames) {
-    const companionSource = path.join(resourceRoot, name)
-
-    try {
-      const companionStat = await fs.promises.stat(companionSource)
-
-      if (companionStat.isFile() && companionStat.size > 0) {
-        sourceEntries.push({ name, source: companionSource, size: companionStat.size })
-      }
-    } catch (error) {
-      if (error?.code !== 'ENOENT') throw error
-    }
-  }
-
-  const helperNames = new Set(sourceEntries.map(entry => entry.name))
-  const hasCommandRunner = helperNames.has('codex-command-runner.exe')
-  const hasSandboxSetup = helperNames.has('codex-windows-sandbox-setup.exe')
-
-  if (hasCommandRunner !== hasSandboxSetup) {
-    throw new Error('WindowsApps Codex runtime has incomplete sandbox helpers')
-  }
-
-  const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json')
-  const manifestFiles = sourceEntries.map(({ name, size }) => ({ name, size }))
-  const copyKey =
-    source.toLowerCase() +
-    '|' +
-    manifestFiles.map(file => file.name.toLowerCase() + ':' + file.size).join('|') +
-    '|' +
-    runtimeRoot.toLowerCase()
-  const reusableTarget = async () => {
-    try {
-      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'))
-
-      if (JSON.stringify(manifest?.files) !== JSON.stringify(manifestFiles)) return false
-
-      for (const file of manifestFiles) {
-        const targetStat = await fs.promises.stat(path.join(runtimeRoot, file.name))
-
-        if (!targetStat.isFile() || targetStat.size !== file.size) return false
-      }
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  if (await reusableTarget()) return targetPath
-  if (continuationRuntimeCopies.has(copyKey)) return continuationRuntimeCopies.get(copyKey)
-
-  const operation = (async () => {
-    await fs.promises.mkdir(runtimeRoot, { recursive: true })
-    const temporaryPaths = []
-
-    try {
-      for (const file of sourceEntries) {
-        const destination = path.join(runtimeRoot, file.name)
-        let destinationValid = false
-
-        try {
-          const destinationStat = await fs.promises.stat(destination)
-
-          destinationValid = destinationStat.isFile() && destinationStat.size === file.size
-        } catch {}
-        if (destinationValid) continue
-
-        const temporaryPath = path.join(
-          runtimeRoot,
-          '.codex-copy-' + process.pid + '-' + Date.now() + '-' + file.name + '.tmp'
-        )
-
-        temporaryPaths.push(temporaryPath)
-        await fs.promises.copyFile(file.source, temporaryPath)
-        const copiedStat = await fs.promises.stat(temporaryPath)
-
-        if (!copiedStat.isFile() || copiedStat.size !== file.size) {
-          throw new Error('WindowsApps Codex 运行时复制后校验失败：' + file.name)
-        }
-        await fs.promises.rm(destination, { force: true })
-        await fs.promises.rename(temporaryPath, destination)
-      }
-
-      const manifestTemporaryPath = path.join(
-        runtimeRoot,
-        '.codex-copy-' + process.pid + '-' + Date.now() + '-manifest.tmp'
-      )
-
-      temporaryPaths.push(manifestTemporaryPath)
-      await fs.promises.writeFile(manifestTemporaryPath, JSON.stringify({ files: manifestFiles }), 'utf8')
-      await fs.promises.rm(manifestPath, { force: true })
-      await fs.promises.rename(manifestTemporaryPath, manifestPath)
-
-      if (!(await reusableTarget())) throw new Error('WindowsApps Codex 运行时成组复制后校验失败')
-      return targetPath
-    } finally {
-      await Promise.all(temporaryPaths.map(file => fs.promises.rm(file, { force: true }).catch(() => {})))
-    }
-  })()
-
-  continuationRuntimeCopies.set(copyKey, operation)
-
-  try {
-    return await operation
-  } finally {
-    continuationRuntimeCopies.delete(copyKey)
-  }
-}
-
-async function resolveCodexContinuationTarget(options = {}) {
-  const paths = getPaths(options)
-  const discoverCodexCli = typeof options.findCodexCli === 'function' ? options.findCodexCli : findCodexCli
-  const explicitCandidate = String(options.codexCliPath || '').trim()
-  const runtimeCandidates = Array.isArray(options.codexTargets) ? options.codexTargets : []
-  const candidates = [
-    explicitCandidate,
-    ...runtimeCandidates,
-    options.skipCodexDiscovery === true ? '' : discoverCodexCli(options)
-  ]
-    .map(candidate => String(candidate || '').trim())
-    .filter(
-      (candidate, index, items) =>
-        candidate &&
-        path.basename(candidate).toLowerCase() === 'codex.exe' &&
-        fs.existsSync(candidate) &&
-        items.findIndex(item => item.toLowerCase() === candidate.toLowerCase()) === index
-    )
-  let codexPath =
-    explicitCandidate && candidates.includes(explicitCandidate) && !isWindowsAppsPath(explicitCandidate, options)
-      ? explicitCandidate
-      : ''
-  const protectedSource = [...runtimeCandidates, explicitCandidate, ...candidates]
-    .map(candidate => String(candidate || '').trim())
-    .find(candidate => trustedWindowsAppsCodexPackage(candidate, options))
-  let protectedError = null
-
-  if (!codexPath && protectedSource) {
-    try {
-      codexPath = await materializeCodexContinuationRuntime(protectedSource, options)
-    } catch (error) {
-      protectedError = error
-    }
-  }
-  if (!codexPath) codexPath = candidates.find(candidate => !isWindowsAppsPath(candidate, options))
-  if (!codexPath && protectedError) throw protectedError
-
-  if (!codexPath) throw new Error('没有找到 ChatGPT/Codex 自带的 codex.exe')
-
-  return {
-    codexPath: String(codexPath),
-    cwd: fs.existsSync(paths.codexHome) ? paths.codexHome : os.homedir()
   }
 }
 
@@ -6985,10 +6770,8 @@ module.exports = {
   migrateManagedProviderAuth,
   repairLocalToolRuntime,
   repairCodexConversationIndex,
-  resolveCodexContinuationTarget,
   recoverCodexTask,
   readStatus,
-  runCodexAppServerRequest,
   refreshManagedProviderProxyBaseUrl,
   removeRelay,
   deleteConversationData,
@@ -7032,13 +6815,11 @@ module.exports = {
     preferredCodexTarget,
     repairGeneratedCodexFiles,
     readResponseTextLimited,
-    materializeCodexContinuationRuntime,
     runCodexAppServerRequest,
     runCodexAppServerBatchRequests,
     removeRootKey,
     removeTableBlock,
     setRootKey,
-    trustedWindowsAppsCodexPackage,
     writeApiKeyAuth,
     writeChannelModelCatalog
   }

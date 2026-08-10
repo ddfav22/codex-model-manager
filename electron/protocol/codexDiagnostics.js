@@ -37,10 +37,6 @@ function codexRequestContext(body) {
 function diagnosticClassification(diagnostic) {
   const continuation = diagnostic?.emulation?.continuationRecovery
 
-  if (diagnostic?.taskTermination?.shouldContinue) {
-    return { diagnosticKind: 'task_terminated', diagnosticSeverity: 'warn' }
-  }
-
   if (continuation?.exhausted) {
     if (continuation.recoveryCircuitBreaker === 'consecutive_transport_failures') {
       return { diagnosticKind: 'agent_loop_transport_stalled', diagnosticSeverity: 'warn' }
@@ -105,7 +101,7 @@ function diagnosticMessage(diagnostic) {
     case 'context_too_large':
       return '当前对话上下文过大，请先让 Codex 压缩上下文或新建任务。'
     case 'proxy_transport_error':
-      return '客户端与模型渠道的连接中断；如果当前任务因此停止，客户端会在同一对话中自动发送“继续”。'
+      return '客户端与模型渠道的连接中断，当前请求未完成。'
     case 'proxy_internal_error':
       return '客户端处理模型响应时出现异常，当前任务未完成。'
     case 'agent_loop_transport_stalled':
@@ -114,8 +110,6 @@ function diagnosticMessage(diagnostic) {
       return 'Agent Loop 连续返回相同的中间计划，已暂停并保留当前任务。'
     case 'agent_loop_stalled':
       return 'Agent Loop 未进入完成状态，已暂停并保留当前任务。'
-    case 'task_terminated':
-      return '当前任务异常终止，客户端将尝试在同一对话中继续。'
     default:
       return '模型请求出现异常，当前任务未完成。'
   }

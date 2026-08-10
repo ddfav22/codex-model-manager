@@ -60,8 +60,16 @@ assert.deepStrictEqual(forbiddenFiles, [], `纯净完整目录发现用户数据
 
 const archiveEntries = asar.listPackage(archivePath).map(entry => entry.replace(/\\/g, '/'))
 const archiveDataEntries = archiveEntries.filter(entry => /^\/?data(?:\/|$)/i.test(entry))
+const removedAutoContinuationEntries = archiveEntries.filter(entry =>
+  /taskAutoContinuation|test-task-auto-continuation/i.test(entry)
+)
 
 assert.deepStrictEqual(archiveDataEntries, [], `app.asar 不得包含 data：${archiveDataEntries.join(', ')}`)
+assert.deepStrictEqual(
+  removedAutoContinuationEntries,
+  [],
+  `app.asar 不得包含已删除的任务自动续接代码：${removedAutoContinuationEntries.join(', ')}`
+)
 console.log(
   JSON.stringify(
     {
@@ -69,7 +77,8 @@ console.log(
       completeRoot,
       fileCount: files.length,
       forbiddenFileCount: forbiddenFiles.length,
-      archiveDataEntryCount: archiveDataEntries.length
+      archiveDataEntryCount: archiveDataEntries.length,
+      removedAutoContinuationEntryCount: removedAutoContinuationEntries.length
     },
     null,
     2

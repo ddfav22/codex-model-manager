@@ -298,10 +298,6 @@ async function main() {
     diagnosticClassification({ outcome: 'upstream_error', upstreamFailureKind: 'upstream_timeout' }),
     { diagnosticKind: 'upstream_timeout', diagnosticSeverity: 'warn' }
   )
-  assert.deepStrictEqual(diagnosticClassification({ taskTermination: { shouldContinue: true, kind: 'refusal' } }), {
-    diagnosticKind: 'task_terminated',
-    diagnosticSeverity: 'warn'
-  })
   assert.deepStrictEqual(diagnosticClassification({ outcome: 'proxy_error', transportFailureKind: 'network_error' }), {
     diagnosticKind: 'proxy_transport_error',
     diagnosticSeverity: 'warn'
@@ -362,7 +358,8 @@ async function main() {
     })
   )
 
-  assert.match(transportPublicDiagnostic.message, /自动发送“继续”/)
+  assert.match(transportPublicDiagnostic.message, /连接中断/)
+  assert.doesNotMatch(transportPublicDiagnostic.message, /继续|自动发送/)
   assert.doesNotMatch(transportPublicDiagnostic.message, /日志/)
   assert.strictEqual(publicDiagnosticSummary({ diagnosticSeverity: 'info' }), null)
   assert.strictEqual(upstreamImagesUrl('https://ainiubi.org'), 'https://ainiubi.org/v1/images/generations')

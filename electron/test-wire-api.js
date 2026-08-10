@@ -3793,9 +3793,7 @@ async function main() {
   assert.strictEqual(upstreamRequests[0].body.input[0].id, 'ctc_53e2893f954b40c8af50100324613d7c')
   assert.strictEqual(upstreamRequests[0].body.input[0].call_id, 'call_cross_model_native')
   assert.ok(nativeResponsesText.includes('response.completed'))
-  assert.strictEqual(proxyDiagnostics.at(-1).taskTermination.shouldContinue, false)
-  assert.strictEqual(proxyDiagnostics.at(-1).taskTermination.normalCompletion, true)
-  assert.strictEqual(proxyDiagnostics.at(-1).taskTermination.kind, 'normal')
+  assert.strictEqual('taskTermination' in proxyDiagnostics.at(-1), false)
   upstreamRequests.length = 0
 
   const nativeImageRoot = path.join(wireCodexHome, 'generated-images')
@@ -3822,8 +3820,7 @@ async function main() {
   assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.materializedCount, 1)
   assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.failedCount, 0)
   assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.injected, true)
-  assert.strictEqual(nativeImageDiagnostic.taskTermination.kind, 'image_delivered')
-  assert.strictEqual(nativeImageDiagnostic.taskTermination.normalCompletion, true)
+  assert.strictEqual('taskTermination' in nativeImageDiagnostic, false)
   assert.doesNotMatch(JSON.stringify(nativeImageDiagnostic), /iVBORw0KGgo/)
   upstreamRequests.length = 0
 
@@ -3845,10 +3842,8 @@ async function main() {
   assert.strictEqual(upstreamRequests.length, 1)
   assert.ok(nativeEmptyText.includes('response.completed'))
   assert.ok(!nativeEmptyText.includes('继续'))
-  assert.strictEqual(nativeEmptyDiagnostic.diagnosticKind, 'task_terminated')
-  assert.strictEqual(nativeEmptyDiagnostic.diagnosticSeverity, 'warn')
-  assert.strictEqual(nativeEmptyDiagnostic.taskTermination.kind, 'empty')
-  assert.strictEqual(nativeEmptyDiagnostic.taskTermination.shouldContinue, true)
+  assert.strictEqual('taskTermination' in nativeEmptyDiagnostic, false)
+  assert.strictEqual(nativeEmptyDiagnostic.diagnosticSeverity, 'info')
   upstreamRequests.length = 0
 
   const nativeRefusalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
@@ -3867,10 +3862,8 @@ async function main() {
   assert.strictEqual(nativeTerminationRequests.get('gpt-native-terminal-refusal'), 1)
   assert.strictEqual(upstreamRequests.length, 1)
   assert.ok(nativeRefusalText.includes('REFUSAL_FIXTURE'))
-  assert.strictEqual(nativeRefusalDiagnostic.diagnosticKind, 'task_terminated')
-  assert.strictEqual(nativeRefusalDiagnostic.taskTermination.kind, 'refusal')
-  assert.strictEqual(nativeRefusalDiagnostic.taskTermination.hasRefusal, true)
-  assert.strictEqual(nativeRefusalDiagnostic.taskTermination.shouldContinue, true)
+  assert.strictEqual('taskTermination' in nativeRefusalDiagnostic, false)
+  assert.strictEqual(nativeRefusalDiagnostic.diagnosticSeverity, 'info')
   upstreamRequests.length = 0
 
   const nativeReasoningResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
@@ -3889,9 +3882,8 @@ async function main() {
   assert.strictEqual(nativeTerminationRequests.get('gpt-native-terminal-reasoning'), 1)
   assert.strictEqual(upstreamRequests.length, 1)
   assert.ok(nativeReasoningText.includes('REASONING_ONLY_FIXTURE'))
-  assert.strictEqual(nativeReasoningDiagnostic.taskTermination.kind, 'reasoning_only')
-  assert.strictEqual(nativeReasoningDiagnostic.taskTermination.hasReasoning, true)
-  assert.strictEqual(nativeReasoningDiagnostic.taskTermination.shouldContinue, true)
+  assert.strictEqual('taskTermination' in nativeReasoningDiagnostic, false)
+  assert.strictEqual(nativeReasoningDiagnostic.diagnosticSeverity, 'info')
   upstreamRequests.length = 0
 
   const nativeIncompleteResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
@@ -3910,10 +3902,8 @@ async function main() {
   assert.strictEqual(nativeTerminationRequests.get('gpt-native-terminal-incomplete'), 1)
   assert.strictEqual(upstreamRequests.length, 1)
   assert.ok(nativeIncompleteText.includes('PARTIAL_FIXTURE'))
-  assert.strictEqual(nativeIncompleteDiagnostic.taskTermination.kind, 'incomplete')
-  assert.strictEqual(nativeIncompleteDiagnostic.taskTermination.hasFinalText, true)
-  assert.strictEqual(nativeIncompleteDiagnostic.taskTermination.incompleteReason, 'max_output_tokens')
-  assert.strictEqual(nativeIncompleteDiagnostic.taskTermination.shouldContinue, true)
+  assert.strictEqual('taskTermination' in nativeIncompleteDiagnostic, false)
+  assert.strictEqual(nativeIncompleteDiagnostic.diagnosticSeverity, 'info')
   upstreamRequests.length = 0
 
   const nativeEmptyJsonResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
@@ -3932,8 +3922,8 @@ async function main() {
   assert.deepStrictEqual(nativeEmptyJsonPayload.output, [])
   assert.strictEqual(nativeTerminationRequests.get('gpt-native-terminal-json'), 1)
   assert.strictEqual(upstreamRequests.length, 1)
-  assert.strictEqual(nativeEmptyJsonDiagnostic.taskTermination.kind, 'empty')
-  assert.strictEqual(nativeEmptyJsonDiagnostic.taskTermination.shouldContinue, true)
+  assert.strictEqual('taskTermination' in nativeEmptyJsonDiagnostic, false)
+  assert.strictEqual(nativeEmptyJsonDiagnostic.diagnosticSeverity, 'info')
   upstreamRequests.length = 0
 
   const child = spawn(

@@ -2470,221 +2470,6 @@ async function pipeFetchBody(upstream, response, headers = {}) {
   return pipeResponseBodyLimited(upstream, response, headers)
 }
 
-function nativeResponsesObservationState() {
-  return {
-    bytes: 0,
-    status: '',
-    incompleteReason: '',
-    hasFinalText: false,
-    hasRefusal: false,
-    hasToolCall: false,
-    hasReasoning: false,
-    observed: true,
-    overflowed: false
-  }
-}
-
-function markResponsesContent(state, content) {
-  for (const part of Array.isArray(content) ? content : []) {
-    const type = String(part?.type || '')
-
-    if (type === 'refusal') state.hasRefusal = true
-    if (['output_text', 'text'].includes(type) && Boolean(String(part?.text || '').trim())) state.hasFinalText = true
-  }
-}
-
-function responsesItemIsToolCall(type) {
-  return (
-    type.endsWith('_call') ||
-    ['function_call', 'custom_tool_call', 'computer_call', 'web_search_call', 'mcp_call'].includes(type)
-  )
-}
-
-function observeResponsesItem(state, item) {
-  const type = String(item?.type || '')
-
-  if (type === 'message') {
-    markResponsesContent(state, item.content)
-    return
-  }
-  if (type === 'reasoning') {
-    state.hasReasoning ||= (Array.isArray(item.summary) ? item.summary : []).some(part =>
-      Boolean(String(part?.text || '').trim())
-    )
-    return
-  }
-  if (responsesItemIsToolCall(type)) state.hasToolCall = true
-  if (/refusal|content_filter|guardrail|safety/i.test(type)) state.hasRefusal = true
-}
-
-function sanitizedIncompleteReason(value) {
-  const reason = String(value || '').toLowerCase()
-
-  if (/content.?filter|safety|guardrail|refusal/.test(reason)) return 'content_filter'
-  if (/max.?output|max.?token|length/.test(reason)) return 'max_output_tokens'
-
-  return reason ? 'other' : ''
-}
-
-function observeResponsesPayload(state, payload) {
-  const status = String(payload?.status || '').toLowerCase()
-
-  if (['completed', 'incomplete', 'failed', 'cancelled'].includes(status)) state.status = status
-  if (Boolean(String(payload?.output_text || '').trim())) state.hasFinalText = true
-  for (const item of Array.isArray(payload?.output) ? payload.output : []) observeResponsesItem(state, item)
-  state.incompleteReason ||= sanitizedIncompleteReason(
-    payload?.incomplete_details?.reason || payload?.incompleteDetails?.reason
-  )
-}
-
-function observeResponsesEvent(state, chunk) {
-  const type = String(chunk?.type || '')
-
-  if (['response.output_text.delta', 'response.output_text.done'].includes(type)) {
-    if (Boolean(String(chunk?.delta || chunk?.text || '').trim())) state.hasFinalText = true
-  } else if (type.startsWith('response.refusal.')) {
-    state.hasRefusal = true
-  } else if (type === 'response.reasoning_summary_text.delta') {
-    if (Boolean(String(chunk?.delta || '').trim())) state.hasReasoning = true
-  } else if (type === 'response.output_item.added' || type === 'response.output_item.done') {
-    observeResponsesItem(state, chunk.item)
-  } else if (type === 'response.content_part.added' || type === 'response.content_part.done') {
-    markResponsesContent(state, [chunk.part])
-  }
-
-  if (type === 'response.completed') {
-    state.status = 'completed'
-    observeResponsesPayload(state, chunk.response)
-  } else if (type === 'response.incomplete') {
-    state.status = 'incomplete'
-    observeResponsesPayload(state, chunk.response)
-  } else if (type === 'response.failed' || type === 'error') {
-    state.status = 'failed'
-    if (chunk.response) observeResponsesPayload(state, chunk.response)
-  }
-}
-
-function nativeTaskTerminationSummary(state) {
-  const terminal = ['completed', 'incomplete', 'failed', 'cancelled'].includes(state.status)
-  const refused = state.hasRefusal
-  const emptyCompletion = state.status === 'completed' && !state.hasFinalText && !state.hasToolCall
-  const incomplete = state.status === 'incomplete' && !state.hasToolCall
-  const shouldContinue = terminal && (refused || emptyCompletion || incomplete)
-  const kind = refused
-    ? 'refusal'
-    : incomplete
-      ? 'incomplete'
-      : emptyCompletion
-        ? state.hasReasoning
-          ? 'reasoning_only'
-          : 'empty'
-        : state.status === 'failed' || state.status === 'cancelled'
-          ? state.status
-          : state.hasToolCall
-            ? 'tool_call'
-            : state.hasFinalText
-              ? 'normal'
-              : 'unknown'
-
-  return {
-    observed: state.observed,
-    terminal,
-    status: state.status,
-    kind,
-    shouldContinue,
-    normalCompletion: state.status === 'completed' && state.hasFinalText && !refused && !state.hasToolCall,
-    hasFinalText: state.hasFinalText,
-    hasRefusal: refused,
-    hasToolCall: state.hasToolCall,
-    hasReasoning: state.hasReasoning,
-    incompleteReason: state.incompleteReason,
-    observedBytes: state.bytes,
-    overflowed: state.overflowed
-  }
-}
-
-function clonedFetchResponse(upstream, body) {
-  return new Response(body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: upstream.headers
-  })
-}
-
-async function inspectNativeResponsesBody(body, isSse) {
-  const state = nativeResponsesObservationState()
-  const reader = body.getReader()
-  const decoder = new TextDecoder()
-  let jsonText = ''
-  const parser = isSse
-    ? createParser({
-        onEvent(event) {
-          if (!event.data || event.data === '[DONE]') return
-
-          try {
-            observeResponsesEvent(state, JSON.parse(event.data))
-          } catch {
-            // Unrecognized provider metadata must pass through unchanged.
-          }
-        }
-      })
-    : null
-
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-
-      if (done) break
-      state.bytes += value.byteLength
-      if (state.bytes > MAX_UPSTREAM_BUFFER_BYTES) {
-        state.overflowed = true
-        state.observed = false
-        await reader.cancel('native responses observation limit reached').catch(() => {})
-        break
-      }
-      const text = decoder.decode(value, { stream: true })
-
-      if (parser) parser.feed(text)
-      else jsonText += text
-    }
-    const tail = decoder.decode()
-
-    if (parser) {
-      if (tail) parser.feed(tail)
-      parser.reset({ consume: true })
-    } else {
-      jsonText += tail
-      try {
-        observeResponsesPayload(state, JSON.parse(jsonText || '{}'))
-      } catch {
-        // Non-JSON compatible responses pass through unchanged.
-      }
-    }
-  } catch {
-    state.observed = false
-  } finally {
-    reader.releaseLock()
-  }
-
-  return nativeTaskTerminationSummary(state)
-}
-
-function observeNativeResponses(upstream) {
-  if (!upstream.body) {
-    const state = nativeResponsesObservationState()
-
-    state.observed = false
-    return { delivery: upstream, completion: Promise.resolve(nativeTaskTerminationSummary(state)) }
-  }
-  const [observationBody, deliveryBody] = upstream.body.tee()
-  const isSse = /text\/event-stream/i.test(String(upstream.headers.get('content-type') || ''))
-
-  return {
-    delivery: clonedFetchResponse(upstream, deliveryBody),
-    completion: inspectNativeResponsesBody(observationBody, isSse)
-  }
-}
-
 function upstreamResponseHeaders(upstream, stream) {
   return {
     'content-type':
@@ -2840,31 +2625,19 @@ async function handleResponsesRequest(
 
     if (upstream.ok) {
       reportWireApi('responses')
-      const observed = observeNativeResponses(upstream)
-      const imageDelivery = nativeResponseImageDelivery(observed.delivery, {
+      const imageDelivery = nativeResponseImageDelivery(upstream, {
         generatedImagesRoot: requestOptions.generatedImagesRoot
       })
-      const [, taskTermination, nativeImageDelivery] = await Promise.all([
+      const [, nativeImageDelivery] = await Promise.all([
         pipeFetchBody(imageDelivery.delivery, response, upstreamResponseHeaders(imageDelivery.delivery, body.stream)),
-        observed.completion,
         imageDelivery.completion
       ])
-      const deliveredTaskTermination = nativeImageDelivery.injected
-        ? {
-            ...taskTermination,
-            kind: 'image_delivered',
-            shouldContinue: false,
-            normalCompletion: true,
-            hasFinalText: true
-          }
-        : taskTermination
 
       if (typeof onDiagnostic === 'function') {
         try {
           onDiagnostic({
-            ...upstreamDiagnostic(diagnostic, observed.delivery),
+            ...upstreamDiagnostic(diagnostic, imageDelivery.delivery),
             outcome: 'upstream_accepted',
-            taskTermination: deliveredTaskTermination,
             nativeImageDelivery
           })
         } catch {
