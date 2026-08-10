@@ -3,6 +3,8 @@ const assert = require('assert')
 const {
   AUTO_CONTINUATION_PROMPT,
   MAX_AUTO_CONTINUATIONS,
+  MAX_FALLBACK_START_ATTEMPTS,
+  continuationCandidate,
   createTaskAutoContinuationSupervisor,
   desktopProxyUnavailable,
   desktopTurnIsActive,
@@ -75,15 +77,34 @@ function transportFailure(turnId) {
   }
 }
 
+function failedAfterTool(turnId, sourceFollowsToolResult = true) {
+  return {
+    codexThreadId: THREAD_ID,
+    codexTurnId: turnId,
+    outcome: 'upstream_accepted',
+    sourceFollowsToolResult,
+    taskTermination: {
+      terminal: true,
+      status: 'failed',
+      kind: 'failed',
+      shouldContinue: false,
+      normalCompletion: false
+    }
+  }
+}
+
 async function main() {
   assert.strictEqual(AUTO_CONTINUATION_PROMPT, '继续')
   assert.strictEqual(MAX_AUTO_CONTINUATIONS, 3)
+  assert.strictEqual(MAX_FALLBACK_START_ATTEMPTS, 3)
   assert.strictEqual(desktopProxyUnavailable(new Error('failed to connect to control socket')), true)
   assert.strictEqual(desktopProxyUnavailable(new Error('permission denied by policy')), false)
   assert.strictEqual(desktopTurnNeedsStart(new Error('no active turn for thread')), true)
   assert.strictEqual(desktopTurnNeedsStart(new Error('permission denied by policy')), false)
   assert.strictEqual(desktopTurnIsActive(new Error('active turn already running')), true)
   assert.strictEqual(desktopTurnIsActive(new Error('no active turn')), false)
+  assert.deepStrictEqual(continuationCandidate(failedAfterTool(TURN_IDS[0])), { kind: 'failed_after_tool' })
+  assert.strictEqual(continuationCandidate(failedAfterTool(TURN_IDS[0], false)), null)
 
   const events = []
   const starts = []
@@ -172,6 +193,31 @@ async function main() {
   assert.strictEqual(failureEvents.at(-1).errorPhase, 'resolve-target')
   assert.strictEqual(failureEvents.at(-1).errorMessage, 'cannot resolve continuation target; [redacted]')
   assert.strictEqual(failureEvents.at(-1).terminationKind, 'refusal')
+
+  let fieldAttempt = 0
+  const fieldEvents = []
+  const fieldSupervisor = createTaskAutoContinuationSupervisor({
+    onEvent: event => fieldEvents.push(event),
+    startContinuation: async request => {
+      fieldAttempt += 1
+      if (fieldAttempt === 1) {
+        throw Object.assign(new Error('Codex exec resume did not start'), {
+          code: 'ECODEXRESUME',
+          continuationPhase: 'exec-resume'
+        })
+      }
+      return { mode: 'desktop-turn-start', turnId: TURN_IDS[1], request }
+    }
+  })
+  const fieldFallbackFailure = await fieldSupervisor.handleDiagnostic(toolCall(TURN_IDS[0]))
+  const fieldFailedTermination = await fieldSupervisor.handleDiagnostic(failedAfterTool(TURN_IDS[0]))
+
+  assert.strictEqual(fieldFallbackFailure.action, 'failed')
+  assert.strictEqual(fieldSupervisor.getState(THREAD_ID).attempts, 1)
+  assert.strictEqual(fieldFailedTermination.action, 'started')
+  assert.strictEqual(fieldFailedTermination.terminationKind, undefined)
+  assert.strictEqual(fieldEvents[0].terminationKind, 'blocked_tool_call')
+  assert.strictEqual(fieldEvents[1].terminationKind, 'failed_after_tool')
 
   let legacyDelayCalled = false
   const directStarts = []
@@ -346,13 +392,73 @@ async function main() {
     },
     startFallback: request => {
       fallbackRequest = request
-      return { completion: Promise.resolve({ ok: true }) }
+      return { completion: Promise.resolve({ ok: true, turnStarted: true, workStarted: false }) }
     }
   })
 
   assert.deepStrictEqual(fallback, { mode: 'exec-resume', turnId: '' })
   assert.strictEqual(fallbackRequest.prompt, '继续')
   assert.strictEqual(fallbackRequest.threadId, THREAD_ID)
+
+  let failedFallbackStarts = 0
+
+  await assert.rejects(
+    startVisibleTaskContinuation({
+      threadId: THREAD_ID,
+      sourceTurnId: TURN_IDS[0],
+      inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
+      runDesktopRequest: async () => {
+        throw new Error('control socket closed')
+      },
+      runDesktopSteer: async () => {},
+      startFallback: () => {
+        failedFallbackStarts += 1
+        return {
+          started: Promise.resolve({
+            ok: false,
+            turnStarted: false,
+            workStarted: false,
+            failureCategory: 'session',
+            exitCode: 1
+          }),
+          completion: Promise.resolve({ ok: false })
+        }
+      },
+      waitForFallbackRetry: async () => {}
+    }),
+    error =>
+      error?.code === 'ECODEXRESUME' && error?.continuationPhase === 'exec-resume' && /session/.test(error.message)
+  )
+  assert.strictEqual(failedFallbackStarts, 3)
+
+  let authenticationFallbackStarts = 0
+
+  await assert.rejects(
+    startVisibleTaskContinuation({
+      threadId: THREAD_ID,
+      sourceTurnId: TURN_IDS[0],
+      inspectTask: async () => ({ codexPath: 'codex.exe', cwd: 'C:\\work' }),
+      runDesktopRequest: async () => {
+        throw new Error('control socket closed')
+      },
+      runDesktopSteer: async () => {},
+      startFallback: () => {
+        authenticationFallbackStarts += 1
+        return {
+          started: Promise.resolve({
+            ok: false,
+            turnStarted: false,
+            workStarted: false,
+            failureCategory: 'authentication',
+            exitCode: 1
+          })
+        }
+      },
+      waitForFallbackRetry: async () => {}
+    }),
+    error => error?.code === 'ECODEXRESUME' && /authentication/.test(error.message)
+  )
+  assert.strictEqual(authenticationFallbackStarts, 1)
 
   await assert.rejects(
     startVisibleTaskContinuation({

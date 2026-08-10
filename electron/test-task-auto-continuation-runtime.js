@@ -1,6 +1,9 @@
 const assert = require('assert')
+const { EventEmitter } = require('events')
+const { PassThrough } = require('stream')
 
 const { createTaskAutoContinuationRuntime } = require('./features/taskAutoContinuationRuntime')
+const { startCodexExecRecovery } = require('./features/taskRecovery')
 
 const THREAD_ID = '019fd644-3128-7d70-9f84-b95bec943f21'
 const TURN_ID = '019fdb85-dc30-7c50-bae1-c776c584b5d8'
@@ -21,6 +24,82 @@ function toolTermination() {
 }
 
 async function main() {
+  const recoveryChild = new EventEmitter()
+
+  recoveryChild.stdout = new PassThrough()
+  recoveryChild.stderr = new PassThrough()
+  recoveryChild.stdin = new PassThrough()
+  recoveryChild.killed = false
+  recoveryChild.kill = () => {
+    recoveryChild.killed = true
+  }
+  const recovery = startCodexExecRecovery({
+    taskId: THREAD_ID,
+    codexPath: 'codex.exe',
+    cwd: 'C:\\codex-home',
+    startupTimeoutMs: 1000,
+    timeoutMs: 2000,
+    spawnProcess: () => recoveryChild
+  })
+
+  recoveryChild.stdout.write(`${JSON.stringify({ type: 'turn.started' })}\n`)
+  const recoveryStarted = await recovery.started
+
+  assert.strictEqual(recoveryStarted.ok, true)
+  assert.strictEqual(recoveryStarted.turnStarted, true)
+  recoveryChild.emit('exit', 0, null)
+  assert.strictEqual((await recovery.completion).ok, true)
+
+  const failedRecoveryChild = new EventEmitter()
+
+  failedRecoveryChild.stdout = new PassThrough()
+  failedRecoveryChild.stderr = new PassThrough()
+  failedRecoveryChild.stdin = new PassThrough()
+  failedRecoveryChild.killed = false
+  failedRecoveryChild.kill = () => {
+    failedRecoveryChild.killed = true
+  }
+  const failedRecovery = startCodexExecRecovery({
+    taskId: THREAD_ID,
+    codexPath: 'codex.exe',
+    cwd: 'C:\\codex-home',
+    startupTimeoutMs: 1000,
+    timeoutMs: 2000,
+    spawnProcess: () => failedRecoveryChild
+  })
+
+  failedRecoveryChild.stderr.write('resume session not found')
+  failedRecoveryChild.emit('exit', 1, null)
+  const failedRecoveryStartup = await failedRecovery.started
+
+  assert.strictEqual(failedRecoveryStartup.ok, false)
+  assert.strictEqual(failedRecoveryStartup.turnStarted, false)
+  assert.strictEqual(failedRecoveryStartup.failureCategory, 'session')
+
+  const timedOutRecoveryChild = new EventEmitter()
+
+  timedOutRecoveryChild.stdout = new PassThrough()
+  timedOutRecoveryChild.stderr = new PassThrough()
+  timedOutRecoveryChild.stdin = new PassThrough()
+  timedOutRecoveryChild.killed = false
+  timedOutRecoveryChild.kill = () => {
+    timedOutRecoveryChild.killed = true
+  }
+  const timedOutRecovery = startCodexExecRecovery({
+    taskId: THREAD_ID,
+    codexPath: 'codex.exe',
+    cwd: 'C:\\codex-home',
+    startupTimeoutMs: 25,
+    timeoutMs: 2000,
+    spawnProcess: () => timedOutRecoveryChild
+  })
+  const timedOutRecoveryStartup = await timedOutRecovery.started
+
+  assert.strictEqual(timedOutRecoveryStartup.ok, false)
+  assert.strictEqual(timedOutRecoveryStartup.timedOut, true)
+  assert.strictEqual(timedOutRecoveryStartup.failureCategory, 'network')
+  assert.strictEqual(timedOutRecoveryChild.killed, true)
+
   const calls = []
   const logs = []
   const manager = {
@@ -103,7 +182,7 @@ async function main() {
     },
     startRecovery: request => {
       fallbackCalls.push(request)
-      return { completion: Promise.resolve({ ok: true }) }
+      return { completion: Promise.resolve({ ok: true, turnStarted: true, workStarted: false }) }
     }
   })
   const resumed = await fallbackRuntime.handleDiagnostic(toolTermination())
@@ -113,6 +192,45 @@ async function main() {
   assert.strictEqual(fallbackCalls.length, 1)
   assert.strictEqual(fallbackCalls[0].taskId, THREAD_ID)
   assert.strictEqual(fallbackCalls[0].prompt, '继续')
+
+  const fallbackFailureLogs = []
+  let fallbackFailureStartCount = 0
+  const fallbackFailureRuntime = createTaskAutoContinuationRuntime({
+    manager: {
+      getPaths: manager.getPaths,
+      resolveCodexContinuationTarget: () => ({ codexPath: 'codex.exe', cwd: 'C:\\codex-home' }),
+      runCodexAppServerRequest: async () => {
+        throw Object.assign(new Error('control socket closed'), { code: 'EPIPE' })
+      }
+    },
+    logEvent: (level, event, details) => fallbackFailureLogs.push({ level, event, details }),
+    startRecovery: () => {
+      fallbackFailureStartCount += 1
+      return {
+        started: Promise.resolve({
+          ok: false,
+          turnStarted: false,
+          workStarted: false,
+          failureCategory: 'session',
+          exitCode: 1
+        }),
+        completion: Promise.resolve({
+          ok: false,
+          turnStarted: false,
+          workStarted: false,
+          failureCategory: 'session',
+          exitCode: 1
+        })
+      }
+    }
+  })
+  const fallbackFailed = await fallbackFailureRuntime.handleDiagnostic(toolTermination())
+
+  assert.strictEqual(fallbackFailed.action, 'failed')
+  assert.strictEqual(fallbackFailureLogs.at(-1).event, 'task.autoContinue.failed')
+  assert.strictEqual(fallbackFailureLogs.at(-1).details.errorCode, 'ECODEXRESUME')
+  assert.strictEqual(fallbackFailureLogs.at(-1).details.errorPhase, 'exec-resume')
+  assert.strictEqual(fallbackFailureStartCount, 3)
 
   const failureLogs = []
   const failedRuntime = createTaskAutoContinuationRuntime({

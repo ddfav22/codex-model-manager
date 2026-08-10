@@ -734,6 +734,7 @@ async function main() {
       codexHome: tempRoot,
       stateDir: continuationStateDir,
       windowsAppsRoot,
+      codexCliPath: continuationCodexPath,
       codexTargets: [protectedCodexPath, continuationCodexPath],
       skipCodexDiscovery: true
     }),
@@ -762,6 +763,15 @@ async function main() {
   assert.ok(materializedCodexPath.startsWith(continuationStateDir + path.sep))
   assert.strictEqual(path.basename(materializedCodexPath), 'codex.exe')
   assert.strictEqual(fs.readFileSync(materializedCodexPath, 'utf8'), 'protected store codex executable')
+  const storeMatchedTarget = await manager.resolveCodexContinuationTarget({
+    codexHome: tempRoot,
+    stateDir: continuationStateDir,
+    windowsAppsRoot,
+    codexTargets: [protectedCodexPath],
+    findCodexCli: () => continuationCodexPath
+  })
+
+  assert.strictEqual(storeMatchedTarget.codexPath, materializedCodexPath)
   for (const [name, contents] of Object.entries(protectedCompanions)) {
     assert.strictEqual(fs.readFileSync(path.join(path.dirname(materializedCodexPath), name), 'utf8'), contents)
   }

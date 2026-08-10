@@ -93,11 +93,11 @@ Codex 左侧栏还读取 `pinned-project-ids` 决定显示哪些项目分组。�
 
 ### 原生 Responses 终止续接必须立即发送可见消息
 
-协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。refusal、没有最终文本/工具调用的 completed、没有工具调用的 incomplete、终态工具调用和真实网络中断都可立即标记为可续接。认证、额度、权限、客户端主动取消、内部代理错误和 `response.failed` 不得触发。
+协议代理不得在空响应后修改原 input 并偷偷重发同一 HTTP 请求。它必须原样交付响应，同时完整观察终态并区分最终文本、工具调用、reasoning、refusal、空输出与 incomplete。refusal、没有最终文本/工具调用的 completed、没有工具调用的 incomplete、终态工具调用和真实网络中断都可立即标记为可续接。认证、额度、权限、客户端主动取消和内部代理错误不得触发；普通 `response.failed` 也不触发，但紧跟工具结果、没有最终输出且会让桌面端显示任务阻断的 `response.failed` 必须视为 `failed_after_tool` 续接终止。
 
-任务监督器收到可续接终止后，不得建立观察延迟、等待后续诊断、扫描 session/工作区/Git 现场，或轮询 `thread/read` 确认空闲。它只解析已经存在且可由普通桌面进程执行的 `codex.exe`，以 Codex Home 作为安全启动目录，并立即通过桌面 app-server 提交 `{type:"text", text:"继续"}`：有活动回合时使用官方 `turn/steer` 和诊断中的 `expectedTurnId`，回合已经结束时使用 `turn/start`；发送瞬间状态变化允许在两者之间切换一次。Microsoft Store 受保护目录中的 CLI 不得直接 spawn；没有用户目录 CLI 时，只允许把已验证 OpenAI 包内固定位置的官方 CLI 原子复制到 manager 状态目录并校验后复用。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；三条路径都不得添加审批、沙箱或权限绕过参数。
+任务监督器收到可续接终止后，不得建立观察延迟、等待后续诊断、扫描 session/工作区/Git 现场，或轮询 `thread/read` 确认空闲。它只解析已经存在且可由普通桌面进程执行的 `codex.exe`，以 Codex Home 作为安全启动目录，并立即通过桌面 app-server 提交 `{type:"text", text:"继续"}`：有活动回合时使用官方 `turn/steer` 和诊断中的 `expectedTurnId`，回合已经结束时使用 `turn/start`；发送瞬间状态变化允许在两者之间切换一次。Microsoft Store 受保护目录中的 CLI 不得直接 spawn；默认应把已验证 OpenAI 桌面包内固定位置的同版本 CLI 及配套助手原子复制到 manager 状态目录、校验后复用，避免自动发现的旧用户 CLI 与桌面 session 不兼容；只有显式 `codexCliPath` 才优先覆盖同包 CLI，物化不可用时才回退用户 CLI。控制 socket 明确不可用时才允许使用官方 `codex exec resume <id> -` 兜底；三条路径都不得添加审批、沙箱或权限绕过参数。
 
-计数以同一 thread 的连续终止链为范围，成功发送一次“继续”才计一次，最多三次。相同 turn 的重复诊断必须去重；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限、客户端取消或内部代理错误立即停止。第四次终止只记录熔断，不再发送。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-turn-steer`/`desktop-turn-start`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。运行日志没有面向用户的界面入口，仅用于维护诊断。
+计数以同一 thread 的连续终止链为范围，成功发送一次“继续”才计一次，最多三次。`exec-resume` 只有观察到 `turn.started` 或工具/工作事件才算成功，启动前退出、session 不兼容和启动超时都不得记作已发送；桌面代理不可用时，同一个终止最多允许三次有限的 `exec-resume` 启动尝试，一旦确认新回合已经开始立即停止重试。相同 turn 的重复诊断必须去重，但一次未启动的发送失败不得屏蔽同 turn 随后的 `failed_after_tool` 终止；正常最终答复清零，用户发起不同 turn 时清零并把它视为新链，认证/额度/权限、客户端取消或内部代理错误立即停止。第四次终止只记录熔断，不再发送。日志仅保存脱敏任务引用、次数、终止类型和 `desktop-turn-steer`/`desktop-turn-start`/`exec-resume` 路径，不得保存 refusal 正文、普通对话或工具输出。运行日志没有面向用户的界面入口，仅用于维护诊断。
 
 ### 未来承诺不是 Grok 的终态
 

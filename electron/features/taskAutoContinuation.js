@@ -2,6 +2,7 @@ const { normalizeTaskId } = require('./taskRecovery')
 
 const AUTO_CONTINUATION_PROMPT = '继续'
 const MAX_AUTO_CONTINUATIONS = 3
+const MAX_FALLBACK_START_ATTEMPTS = 3
 
 function normalizedOptionalTaskId(value) {
   try {
@@ -49,6 +50,9 @@ function continuationCandidate(diagnostic) {
 
   if (termination?.shouldContinue) return { kind: kind || 'terminated' }
   if (termination?.terminal && kind === 'tool_call') return { kind: 'blocked_tool_call' }
+  if (termination?.terminal && kind === 'failed' && diagnostic?.sourceFollowsToolResult === true) {
+    return { kind: 'failed_after_tool' }
+  }
   if (
     diagnostic?.outcome === 'proxy_error' &&
     diagnostic?.diagnosticKind === 'proxy_transport_error' &&
@@ -270,6 +274,16 @@ function turnIdFromResponse(response) {
   return normalizedOptionalTaskId(response?.result?.turn?.id || response?.turn?.id)
 }
 
+function fallbackStartupRetryable(error, category = '') {
+  if (/^(?:authentication|capacity|permission|network)$/.test(String(category || ''))) return false
+
+  const text = `${String(error?.code || '')} ${String(error?.message || error || '')}`.toLowerCase()
+
+  return !/eperm|eacces|permission|access denied|unauthori[sz]ed|authentication|api[ _-]?key|token|\b429\b|high demand|rate.?limit|quota|capacity|network|socket|connect|权限|认证|凭据|额度|限流|高负载|网络|连接/.test(
+    text
+  )
+}
+
 async function startVisibleTaskContinuation(options = {}) {
   const threadId = normalizeTaskId(options.threadId)
   const prompt = String(options.prompt || AUTO_CONTINUATION_PROMPT)
@@ -277,6 +291,10 @@ async function startVisibleTaskContinuation(options = {}) {
   const runDesktopRequest = options.runDesktopRequest
   const runDesktopSteer = options.runDesktopSteer
   const startFallback = options.startFallback
+  const waitForFallbackRetry =
+    typeof options.waitForFallbackRetry === 'function'
+      ? options.waitForFallbackRetry
+      : milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 
   if (typeof inspectTask !== 'function') throw new Error('任务自动续接缺少状态检查器')
   if (typeof runDesktopRequest !== 'function') throw new Error('任务自动续接缺少桌面请求器')
@@ -297,22 +315,47 @@ async function startVisibleTaskContinuation(options = {}) {
     input
   }
 
-  const fallback = () => {
-    let recovery
+  const fallback = async () => {
+    let lastError
 
-    try {
-      recovery = startFallback({
-        codexPath: inspection.codexPath,
-        cwd: inspection.cwd,
-        threadId,
-        prompt
-      })
-    } catch (error) {
-      throw continuationPhaseError(error, 'exec-resume')
+    for (let attempt = 1; attempt <= MAX_FALLBACK_START_ATTEMPTS; attempt += 1) {
+      let retryable = true
+
+      try {
+        const recovery = startFallback({
+          codexPath: inspection.codexPath,
+          cwd: inspection.cwd,
+          threadId,
+          prompt
+        })
+        const startup = recovery?.started || recovery?.completion
+
+        if (!startup || typeof startup.then !== 'function') {
+          throw new Error('Codex exec resume 未返回启动确认')
+        }
+        const result = await startup
+
+        if (result?.turnStarted === true || result?.workStarted === true) {
+          return { mode: 'exec-resume', turnId: '' }
+        }
+        const category = String(result?.failureCategory || 'unknown')
+        const error = new Error(
+          `Codex exec resume 未启动新回合（${category}，exit ${String(result?.exitCode ?? 'unknown')}，启动尝试 ${attempt}/${MAX_FALLBACK_START_ATTEMPTS}）`
+        )
+
+        error.code = 'ECODEXRESUME'
+        lastError = error
+        retryable = fallbackStartupRetryable(error, category)
+      } catch (error) {
+        lastError = error
+        retryable = fallbackStartupRetryable(error)
+      }
+
+      if (!retryable) break
+      if (attempt < MAX_FALLBACK_START_ATTEMPTS) await waitForFallbackRetry(attempt * 250)
     }
 
-    recovery?.completion?.catch?.(() => {})
-    return { mode: 'exec-resume', turnId: '' }
+    throw continuationPhaseError(lastError || new Error('Codex exec resume 未能启动'), 'exec-resume')
   }
   const startTurn = async () => {
     const response = await runContinuationPhase('turn-start', () => runDesktopRequest(request))
@@ -357,6 +400,7 @@ async function startVisibleTaskContinuation(options = {}) {
 module.exports = {
   AUTO_CONTINUATION_PROMPT,
   MAX_AUTO_CONTINUATIONS,
+  MAX_FALLBACK_START_ATTEMPTS,
   continuationCandidate,
   createTaskAutoContinuationSupervisor,
   desktopProxyUnavailable,

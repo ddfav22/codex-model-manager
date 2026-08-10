@@ -4,6 +4,7 @@ const { execFileSync, spawn } = require('child_process')
 
 const CODEX_TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DEFAULT_RECOVERY_TIMEOUT_MS = 12 * 60 * 60 * 1000
+const DEFAULT_RECOVERY_STARTUP_TIMEOUT_MS = 30 * 1000
 const MAX_DIAGNOSTIC_TEXT = 8192
 const TASK_RECOVERY_PROMPT = [
   '上次任务异常、中断或没有完成。请从当前任务现场继续，不要从头重做。',
@@ -78,6 +79,7 @@ function startCodexExecRecovery(options = {}) {
   const spawnProcess = options.spawnProcess || spawn
   const prompt = String(options.prompt || TASK_RECOVERY_PROMPT)
   const timeoutMs = Number(options.timeoutMs || DEFAULT_RECOVERY_TIMEOUT_MS)
+  const startupTimeoutMs = Number(options.startupTimeoutMs || DEFAULT_RECOVERY_STARTUP_TIMEOUT_MS)
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {}
 
   if (!codexPath) throw new Error('没有找到 Codex 本地运行时')
@@ -98,7 +100,19 @@ function startCodexExecRecovery(options = {}) {
   let terminalTurnStatus = ''
   let diagnosticText = ''
   let settled = false
+  let startupSettled = false
   let timer
+  let startupTimer
+  let resolveStartup
+  const started = new Promise(resolve => {
+    resolveStartup = resolve
+  })
+  const finishStartup = result => {
+    if (startupSettled) return
+    startupSettled = true
+    clearTimeout(startupTimer)
+    resolveStartup(result)
+  }
   const stopWithParent = () => {
     if (!child.killed) child.kill()
   }
@@ -115,14 +129,17 @@ function startCodexExecRecovery(options = {}) {
       clearTimeout(timer)
       process.removeListener('exit', stopWithParent)
       output.close()
-      resolve({
+      const completedResult = {
         ...result,
         eventCount,
         turnStarted,
         workStarted,
         terminalTurnStatus,
         failureCategory: result.ok ? '' : recoveryFailureCategory(diagnosticText)
-      })
+      }
+
+      finishStartup(completedResult)
+      resolve(completedResult)
     }
     const output = readline.createInterface({ input: child.stdout })
 
@@ -145,6 +162,9 @@ function startCodexExecRecovery(options = {}) {
         onProgress({ stage: 'running', status: 'running', message: '原任务已恢复，正在继续未完成工作' })
       }
       if (/item[/.](?:started|completed)|command|file.?change|tool/i.test(type)) workStarted = true
+      if (turnStarted || workStarted) {
+        finishStartup({ ok: true, eventCount, turnStarted, workStarted, terminalTurnStatus: '' })
+      }
       if (/turn[/.]completed/i.test(type)) {
         terminalTurnStatus = String(event?.turn?.status || event?.status || '').toLowerCase()
       }
@@ -169,13 +189,18 @@ function startCodexExecRecovery(options = {}) {
       appendDiagnostic('task recovery timeout')
       finish({ ok: false, exitCode: null, signal: '', timedOut: true })
     }, timeoutMs)
+    startupTimer = setTimeout(() => {
+      if (!child.killed) child.kill()
+      appendDiagnostic('task recovery startup timeout')
+      finish({ ok: false, exitCode: null, signal: '', timedOut: true })
+    }, startupTimeoutMs)
   })
 
   process.once('exit', stopWithParent)
   child.stdin.on('error', () => {})
   child.stdin.end(prompt)
 
-  return { child, completion }
+  return { child, completion, started }
 }
 
 function shouldForkAfterFailure(result) {
@@ -229,6 +254,7 @@ function taskRecoveryWorkspaceSnapshot(session, options = {}) {
 
 module.exports = {
   CODEX_TASK_ID_PATTERN,
+  DEFAULT_RECOVERY_STARTUP_TIMEOUT_MS,
   DEFAULT_RECOVERY_TIMEOUT_MS,
   TASK_RECOVERY_PROMPT,
   normalizeTaskId,

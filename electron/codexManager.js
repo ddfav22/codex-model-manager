@@ -6693,9 +6693,11 @@ async function materializeCodexContinuationRuntime(sourcePath, options = {}) {
 async function resolveCodexContinuationTarget(options = {}) {
   const paths = getPaths(options)
   const discoverCodexCli = typeof options.findCodexCli === 'function' ? options.findCodexCli : findCodexCli
+  const explicitCandidate = String(options.codexCliPath || '').trim()
+  const runtimeCandidates = Array.isArray(options.codexTargets) ? options.codexTargets : []
   const candidates = [
-    options.codexCliPath,
-    ...(Array.isArray(options.codexTargets) ? options.codexTargets : []),
+    explicitCandidate,
+    ...runtimeCandidates,
     options.skipCodexDiscovery === true ? '' : discoverCodexCli(options)
   ]
     .map(candidate => String(candidate || '').trim())
@@ -6706,13 +6708,25 @@ async function resolveCodexContinuationTarget(options = {}) {
         fs.existsSync(candidate) &&
         items.findIndex(item => item.toLowerCase() === candidate.toLowerCase()) === index
     )
-  let codexPath = candidates.find(candidate => !isWindowsAppsPath(candidate, options))
+  let codexPath =
+    explicitCandidate && candidates.includes(explicitCandidate) && !isWindowsAppsPath(explicitCandidate, options)
+      ? explicitCandidate
+      : ''
+  const protectedSource = [...runtimeCandidates, explicitCandidate, ...candidates]
+    .map(candidate => String(candidate || '').trim())
+    .find(candidate => trustedWindowsAppsCodexPackage(candidate, options))
+  let protectedError = null
 
-  if (!codexPath) {
-    const protectedSource = candidates.find(candidate => trustedWindowsAppsCodexPackage(candidate, options))
-
-    if (protectedSource) codexPath = await materializeCodexContinuationRuntime(protectedSource, options)
+  if (!codexPath && protectedSource) {
+    try {
+      codexPath = await materializeCodexContinuationRuntime(protectedSource, options)
+    } catch (error) {
+      protectedError = error
+    }
   }
+  if (!codexPath) codexPath = candidates.find(candidate => !isWindowsAppsPath(candidate, options))
+  if (!codexPath && protectedError) throw protectedError
+
   if (!codexPath) throw new Error('没有找到 ChatGPT/Codex 自带的 codex.exe')
 
   return {
