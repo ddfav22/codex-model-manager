@@ -57,9 +57,14 @@ function diagnosticClassification(diagnostic) {
   if (diagnostic?.outcome === 'proxy_error') {
     const transportKind = String(diagnostic?.transportFailureKind || '')
 
-    return /^(?:network_error|upstream_timeout)$/.test(transportKind)
-      ? { diagnosticKind: 'proxy_transport_error', diagnosticSeverity: 'warn' }
-      : { diagnosticKind: 'proxy_internal_error', diagnosticSeverity: 'error' }
+    if (transportKind === 'upstream_timeout') {
+      return { diagnosticKind: 'upstream_timeout', diagnosticSeverity: 'warn' }
+    }
+    if (transportKind === 'network_error') {
+      return { diagnosticKind: 'proxy_transport_error', diagnosticSeverity: 'warn' }
+    }
+
+    return { diagnosticKind: 'proxy_internal_error', diagnosticSeverity: 'error' }
   }
 
   if (diagnostic?.outcome === 'client_cancelled') {

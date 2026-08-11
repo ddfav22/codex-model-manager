@@ -303,6 +303,10 @@ async function main() {
     diagnosticSeverity: 'warn'
   })
   assert.deepStrictEqual(
+    diagnosticClassification({ outcome: 'proxy_error', transportFailureKind: 'upstream_timeout' }),
+    { diagnosticKind: 'upstream_timeout', diagnosticSeverity: 'warn' }
+  )
+  assert.deepStrictEqual(
     diagnosticClassification({ outcome: 'proxy_error', transportFailureKind: 'proxy_internal_error' }),
     { diagnosticKind: 'proxy_internal_error', diagnosticSeverity: 'error' }
   )

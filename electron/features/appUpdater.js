@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const { PATCH_HELPER_NAME, PATCH_STATE_NAME, readJson } = require('./patchInstaller')
+const { toUserFacingErrorMessage } = require('./userFacingErrors')
 
 function rawFileSystem() {
   try {
@@ -450,7 +451,7 @@ function createAppUpdater(options = {}) {
 
       return publishState({
         stage: 'error',
-        message: error instanceof Error ? error.message : '检查更新失败，请稍后再试。',
+        message: toUserFacingErrorMessage(error),
         manual,
         deliveryType: '',
         downloadPercent: 0,

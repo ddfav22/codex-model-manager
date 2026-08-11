@@ -378,6 +378,20 @@ async function main() {
 
   assert.strictEqual((await currentUpdater.check({ manual: true })).stage, 'up-to-date')
 
+  const networkFailureUpdater = createAppUpdater({
+    currentVersion: '1.2.52',
+    repository,
+    updatesRoot: path.join(tempRoot, 'network-failure'),
+    fetchFn: async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } })
+    }
+  })
+  const networkFailureResult = await networkFailureUpdater.check({ manual: true })
+
+  assert.strictEqual(networkFailureResult.stage, 'error')
+  assert.strictEqual(networkFailureResult.message, '网络请求失败。请检查网络、接口地址和代理设置。')
+  assert.doesNotMatch(networkFailureResult.message, /fetch failed|ENOTFOUND/i)
+
   const badRoot = path.join(tempRoot, 'bad')
   const badUpdater = createAppUpdater({
     currentVersion: '1.2.52',
