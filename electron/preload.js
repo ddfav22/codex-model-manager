@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('codexManager', {
   importConversationData: kind => ipcRenderer.invoke('codex:importConversationData', kind),
   exportConversationData: (kind, sourcePath) => ipcRenderer.invoke('codex:exportConversationData', kind, sourcePath),
   deleteProject: projectPath => ipcRenderer.invoke('codex:deleteProject', projectPath),
+  deleteSkill: identifier => ipcRenderer.invoke('codex:deleteSkill', identifier),
   importSkillZip: () => ipcRenderer.invoke('codex:importSkillZip'),
   importAgentZip: () => ipcRenderer.invoke('codex:importAgentZip'),
   importSkillFromGithub: url => ipcRenderer.invoke('codex:importSkillFromGithub', url),

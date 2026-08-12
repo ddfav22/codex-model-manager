@@ -1,5 +1,20 @@
 const TOOL_HTML_PATTERN = /(?:globalThis\s*\.\s*tools|\btools\s*\.\s*[a-zA-Z_]|\bshell_command\b|<codex_tool_call\b)/i
 
+// Grok/NewAPI may echo an empty adapter envelope as ordinary assistant text.
+// Keep this allowlist narrow so user-authored XML is not removed accidentally.
+const INTERNAL_EMPTY_TAG_NAME = /^(?:codex|tool|function|grok|newapi)(?:[_:-].*)?$/i
+
+function stripEmptyInternalXml(content) {
+  return String(content || '')
+    .replace(/<([a-z][\w:.-]*)\b[^>]*>\s*<\/\1\s*>/gi, (match, tagName) => {
+      return INTERNAL_EMPTY_TAG_NAME.test(tagName) ? '' : match
+    })
+    .replace(
+      /<(?:codex(?:[_:-][\w:.-]*)?|tool(?:[_:-][\w:.-]*)?|function(?:[_:-][\w:.-]*)?|grok(?:[_:-][\w:.-]*)?|newapi(?:[_:-][\w:.-]*)?)\b[^>]*\/>/gi,
+      ''
+    )
+}
+
 function decodeJsonString(content) {
   const text = String(content || '').trim()
 
@@ -44,7 +59,7 @@ function decodeRepeatedEscapedLineBreaks(content) {
 function sanitizeVisibleAssistantDelta(content) {
   let text = decodeJsonString(content)
 
-  text = stripToolHtmlScaffold(text)
+  text = stripEmptyInternalXml(stripToolHtmlScaffold(text))
     .replace(/(?:0x)?a0a1e\d+[a-zA-Z_][\s\S]*$/gi, '')
     .replace(/<codex_tool_call\b[^>]*>[\s\S]*?<\/codex_tool_call\s*>/gi, '')
     .replace(/<codex_tool_call\b[^>]*>[\s\S]*$/gi, '')
@@ -69,5 +84,6 @@ module.exports = {
   decodeRepeatedEscapedLineBreaks,
   normalizeVisibleAssistantText,
   sanitizeVisibleAssistantDelta,
+  stripEmptyInternalXml,
   stripToolHtmlScaffold
 }

@@ -1019,6 +1019,23 @@ const ModelManager = () => {
       if (result) setMessage({ type: 'success', text: `${displayName} 已导出。` })
     })
 
+  const deleteSkillPackage = (identifier: string) => {
+    const skill = (status?.skills || []).find(item => item.path === identifier)
+    const displayName = skill?.displayName || skill?.name || identifier.split(/[\\/]/).pop() || 'Skill'
+
+    setConfirmDialog({
+      title: '删除 Skill',
+      body: `将永久删除“${displayName}”及其目录内容。\n\n仅允许删除用户 Skill 目录，系统/bundled Skill 不会被删除。此操作不可恢复。`,
+      confirmText: '删除 Skill',
+      action: async () => {
+        const nextStatus = await requireBridge().deleteSkill(identifier)
+
+        setStatus(nextStatus)
+        setMessage({ type: 'success', text: `${displayName} 已删除。` })
+      }
+    })
+  }
+
   const checkForUpdates = async () => {
     setMessage(undefined)
 
@@ -1451,7 +1468,9 @@ const ModelManager = () => {
                   <Chip size='small' color='primary' variant='outlined' label={`${onlineSkillCatalog.length} 个可用`} />
                 </Stack>
                 {onlineSkillCatalog.map(skill => {
-                  const installed = items.some(item => item.displayName === 'security-pentest' || item.name === skill.id)
+                  const installed = items.some(
+                    item => item.displayName === 'security-pentest' || item.name === skill.id
+                  )
 
                   return (
                     <Box
@@ -1517,6 +1536,7 @@ const ModelManager = () => {
                   busy={busy}
                   onOpen={openPath}
                   onExport={identifier => exportPackage(kind, identifier)}
+                  onDelete={kind === 'skills' ? deleteSkillPackage : undefined}
                 />
                 {index < items.length - 1 && <Divider />}
               </Box>

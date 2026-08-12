@@ -169,6 +169,77 @@ async function main() {
   assert.strictEqual(spawnCalls[0].unrefCalled, true)
   assert.strictEqual(beforeInstallCalls, 1)
 
+  const resumeRoot = path.join(tempRoot, 'installer-resume')
+  const resumeInstalledRoot = path.join(resumeRoot, 'installed')
+  const resumeInstallerName = 'ChatGPT-Model-Manager-Setup-1.2.81-x64.exe'
+  const resumeInstallerUrl = `https://github.com/${repository}/releases/download/v1.2.81/${resumeInstallerName}`
+  const resumeBytes = Buffer.from('cross-version-installer-download-with-resume')
+  const resumeDigest = crypto.createHash('sha256').update(resumeBytes).digest('hex')
+  const resumePartialPath = path.join(resumeRoot, `${resumeInstallerName}.part`)
+  const resumeRangeHeaders = []
+  let resumeDownloadCalls = 0
+
+  fs.mkdirSync(resumeRoot, { recursive: true })
+  fs.writeFileSync(resumePartialPath, resumeBytes.subarray(0, 8))
+  const resumeUpdater = createAppUpdater({
+    currentVersion: '1.2.79',
+    currentExecutablePath: path.join(resumeInstalledRoot, 'ChatGPT Model Manager.exe'),
+    repository,
+    updatesRoot: resumeRoot,
+    fetchFn: async (url, options = {}) => {
+      if (url.includes('/releases/latest')) {
+        return mockResponse({
+          json: {
+            tag_name: 'v1.2.81',
+            draft: false,
+            prerelease: false,
+            assets: [
+              {
+                name: resumeInstallerName,
+                browser_download_url: resumeInstallerUrl,
+                size: resumeBytes.length,
+                digest: `sha256:${resumeDigest}`
+              }
+            ]
+          }
+        })
+      }
+
+      if (url === resumeInstallerUrl) {
+        resumeDownloadCalls += 1
+        resumeRangeHeaders.push(options.headers?.Range || '')
+
+        if (resumeDownloadCalls === 1) {
+          return mockResponse({
+            status: 206,
+            body: Readable.from(
+              (async function* () {
+                yield resumeBytes.subarray(8, 12)
+                throw new Error('net::ERR_CONNECTION_CLOSED')
+              })()
+            ),
+            headers: { 'content-length': String(resumeBytes.length - 8) }
+          })
+        }
+
+        return mockResponse({
+          status: 206,
+          body: Readable.from([resumeBytes.subarray(12)]),
+          headers: { 'content-length': String(resumeBytes.length - 12) }
+        })
+      }
+
+      throw new Error(`unexpected URL: ${url}`)
+    }
+  })
+  const resumedReady = await resumeUpdater.check({ manual: true })
+
+  assert.strictEqual(resumedReady.stage, 'ready')
+  assert.strictEqual(resumeDownloadCalls, 2)
+  assert.deepStrictEqual(resumeRangeHeaders, ['bytes=8-', 'bytes=12-'])
+  assert.strictEqual(fs.readFileSync(path.join(resumeRoot, resumeInstallerName), 'utf8'), resumeBytes.toString('utf8'))
+  assert.strictEqual(fs.existsSync(resumePartialPath), false)
+
   const patchRoot = path.join(tempRoot, 'patch-update')
   const patchInstallRoot = path.join(patchRoot, 'installed')
   const patchResourcesRoot = path.join(patchInstallRoot, 'resources')

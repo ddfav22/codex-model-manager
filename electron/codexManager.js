@@ -742,15 +742,19 @@ function listAgents(options = {}) {
 }
 
 function resolveListedPackage(items, identifier, label) {
+  return resolveListedPackageEntry(items, identifier, label).path
+}
+
+function resolveListedPackageEntry(items, identifier, label) {
   const requested = String(identifier || '').trim()
 
   if (!requested) throw new Error(`未指定 ${label}`)
   const exactPath = items.find(item => path.resolve(item.path).toLowerCase() === path.resolve(requested).toLowerCase())
 
-  if (exactPath) return exactPath.path
+  if (exactPath) return exactPath
   const byName = items.filter(item => item.name === requested)
 
-  if (byName.length === 1) return byName[0].path
+  if (byName.length === 1) return byName[0]
   if (byName.length > 1) throw new Error(`${label} 名称重复，请按完整路径导出`)
   throw new Error(`未找到 ${label}`)
 }
@@ -5093,6 +5097,53 @@ async function importAgentFromGithub(url, options = {}) {
   }
 }
 
+function deleteSkill(identifier, options = {}) {
+  const paths = getPaths(options)
+  const roots = [paths.skillsPath, paths.legacySkillsPath]
+    .filter(Boolean)
+    .map(root => path.resolve(root))
+    .filter((root, index, values) => values.findIndex(value => value.toLowerCase() === root.toLowerCase()) === index)
+  const requestedPath = String(identifier || '').trim()
+  const requestedResolved = requestedPath ? path.resolve(requestedPath).toLowerCase() : ''
+  const bundledRoots = roots.map(root => path.join(root, '.system').toLowerCase())
+
+  if (
+    requestedPath.toLowerCase() === '.system' ||
+    bundledRoots.some(root => requestedResolved === root || requestedResolved.startsWith(`${root}${path.sep}`))
+  ) {
+    throw new Error('禁止删除 bundled/system Skill')
+  }
+
+  const item = resolveListedPackageEntry(listSkills(options), identifier, 'Skill')
+  if (!['user', 'legacy'].includes(item.source)) throw new Error('禁止删除 bundled/system Skill')
+  const targetPath = path.resolve(item.path)
+  const root = roots.find(candidate => path.dirname(targetPath).toLowerCase() === candidate.toLowerCase())
+
+  if (!root) throw new Error('Skill 只能从用户或 legacy Skill 根目录的直接子目录中删除')
+  if (path.basename(targetPath).toLowerCase() === '.system') throw new Error('禁止删除 bundled/system Skill')
+
+  let targetStat
+  try {
+    targetStat = fs.lstatSync(targetPath)
+  } catch (error) {
+    throw new Error(`Skill 不存在或无法读取：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (targetStat.isSymbolicLink()) throw new Error('禁止删除符号链接 Skill')
+  if (!targetStat.isDirectory()) throw new Error('Skill 必须是目录')
+
+  const realRoot = fs.realpathSync(root)
+  const realTarget = fs.realpathSync(targetPath)
+  const relative = path.relative(realRoot, realTarget)
+
+  if (!relative || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`) || relative === '..') {
+    throw new Error('拒绝删除根目录之外的 Skill')
+  }
+
+  fs.rmSync(targetPath, { recursive: true, force: true })
+
+  return readStatus(options)
+}
+
 function exportSkill(name, destinationZip, options = {}) {
   const sourcePath = resolveListedPackage(listSkills(options), name, 'Skill')
 
@@ -6775,6 +6826,7 @@ module.exports = {
   refreshManagedProviderProxyBaseUrl,
   removeRelay,
   deleteConversationData,
+  deleteSkill,
   deleteProject,
   deleteSession,
   importSession,

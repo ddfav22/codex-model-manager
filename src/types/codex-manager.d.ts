@@ -495,6 +495,7 @@ declare global {
         sourcePath: string
       ) => Promise<ConversationExportResult | null>
       deleteProject: (projectPath: string) => Promise<CodexStatus>
+      deleteSkill: (identifier: string) => Promise<CodexStatus>
       importSkillZip: () => Promise<CodexStatus | null>
       importAgentZip: () => Promise<CodexStatus | null>
       importSkillFromGithub: (url: string) => Promise<CodexStatus>

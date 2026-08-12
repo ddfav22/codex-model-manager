@@ -53,6 +53,7 @@ function registerIpcHandlers({
     'codex:removeRelay': (_event, id) => manager.removeRelay(id),
     'codex:deleteSession': (_event, idOrPath) => manager.deleteSession(idOrPath),
     'codex:deleteProject': (_event, projectPath) => manager.deleteProject(projectPath),
+    'codex:deleteSkill': (_event, identifier) => manager.deleteSkill(identifier),
     'codex:importSkillFromGithub': (_event, url) => manager.importSkillFromGithub(url),
     'codex:importAgentFromGithub': (_event, url) => manager.importAgentFromGithub(url)
   }

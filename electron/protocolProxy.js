@@ -93,6 +93,8 @@ const PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES = 5
 const UPSTREAM_CAPACITY_MAX_RETRIES = 2
 const UPSTREAM_CAPACITY_RETRY_BASE_MS = 750
 const UPSTREAM_CAPACITY_RETRY_MAX_MS = 5000
+const UPSTREAM_TRANSIENT_MAX_RETRIES = 1
+const UPSTREAM_TRANSIENT_RETRY_BASE_MS = 1000
 const UPSTREAM_FAILURE_CLASSIFICATION_BYTES = 64 * 1024
 const responseEventSequences = new WeakMap()
 
@@ -164,15 +166,66 @@ function waitForRetry(delayMs, signal) {
   })
 }
 
-async function fetchWithCapacityRetry(fetcher, { signal, maxRetries = UPSTREAM_CAPACITY_MAX_RETRIES } = {}) {
+function transientUpstreamFailureKind(error, signal) {
+  if (signal?.aborted) return ''
+
+  const name = String(error?.name || '')
+  const message = String(error?.message || error || '')
+  const causeCode = String(error?.cause?.code || error?.code || '').toUpperCase()
+
+  if (
+    name === 'AbortError' ||
+    /ERR_STREAM_PREMATURE_CLOSE|fetch failed|terminated|socket|connection reset|network/i.test(message) ||
+    /^(?:ECONNRESET|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CONNECT_TIMEOUT|BODY_TIMEOUT))$/.test(causeCode)
+  ) {
+    return 'transient_transport'
+  }
+
+  return ''
+}
+
+async function fetchWithCapacityRetry(
+  fetcher,
+  {
+    signal,
+    maxRetries = UPSTREAM_CAPACITY_MAX_RETRIES,
+    transientMaxRetries = UPSTREAM_TRANSIENT_MAX_RETRIES,
+    transientRetryBaseMs = UPSTREAM_TRANSIENT_RETRY_BASE_MS
+  } = {}
+) {
   let retryCount = 0
   let retryDelayMs = 0
+  let transientRetryCount = 0
 
   while (true) {
-    const response = await fetcher()
+    let response
+
+    try {
+      response = await fetcher()
+    } catch (error) {
+      const failureKind = transientUpstreamFailureKind(error, signal)
+
+      if (!failureKind || transientRetryCount >= transientMaxRetries) {
+        error.codexRetryDiagnostic = {
+          retryCount,
+          retryDelayMs,
+          transientRetryCount,
+          failureKind: failureKind || 'transport_error'
+        }
+        throw error
+      }
+
+      transientRetryCount += 1
+      const delayMs = Math.min(transientRetryBaseMs * 2 ** (transientRetryCount - 1), UPSTREAM_CAPACITY_RETRY_MAX_MS)
+
+      retryCount += 1
+      retryDelayMs += delayMs
+      await waitForRetry(delayMs, signal)
+      continue
+    }
 
     if (response.ok) {
-      response.codexRetryDiagnostic = { retryCount, retryDelayMs, failureKind: '' }
+      response.codexRetryDiagnostic = { retryCount, retryDelayMs, transientRetryCount, failureKind: '' }
       return response
     }
     let errorText = ''
@@ -185,7 +238,7 @@ async function fetchWithCapacityRetry(fetcher, { signal, maxRetries = UPSTREAM_C
     const failureKind = upstreamFailureKind(response.status, errorText)
 
     if (failureKind !== 'upstream_capacity' || retryCount >= maxRetries) {
-      response.codexRetryDiagnostic = { retryCount, retryDelayMs, failureKind }
+      response.codexRetryDiagnostic = { retryCount, retryDelayMs, transientRetryCount, failureKind }
       return response
     }
 
@@ -199,6 +252,50 @@ async function fetchWithCapacityRetry(fetcher, { signal, maxRetries = UPSTREAM_C
     retryDelayMs += delayMs
     await response.body?.cancel?.()
     await waitForRetry(delayMs, signal)
+  }
+}
+
+async function readChatAssistantWithTransientRetry(upstream, retryUpstream, options = {}) {
+  const maxRetries = Math.max(0, Number(options.maxRetries ?? UPSTREAM_TRANSIENT_MAX_RETRIES))
+  const retryBaseMs = Math.max(0, Number(options.retryBaseMs ?? UPSTREAM_TRANSIENT_RETRY_BASE_MS))
+  let retryCount = 0
+  let receivedContent = false
+  const onContentDelta = (delta, snapshot) => {
+    if (String(delta || '')) receivedContent = true
+    options.onContentDelta?.(delta, snapshot)
+  }
+
+  while (true) {
+    try {
+      return await readChatAssistant(upstream, { ...options, onContentDelta })
+    } catch (error) {
+      const failureKind = transientUpstreamFailureKind(error, options.signal)
+
+      if (!failureKind || retryCount >= maxRetries || receivedContent || typeof retryUpstream !== 'function') {
+        error.codexRetryDiagnostic = {
+          ...(error.codexRetryDiagnostic || {}),
+          streamRetryCount: retryCount,
+          failureKind: failureKind || error.codexRetryDiagnostic?.failureKind || 'stream_error',
+          streamRetryExhausted: Boolean(failureKind),
+          partialContent: receivedContent
+        }
+        throw error
+      }
+
+      retryCount += 1
+      await waitForRetry(Math.min(retryBaseMs * 2 ** (retryCount - 1), UPSTREAM_CAPACITY_RETRY_MAX_MS), options.signal)
+      try {
+        await upstream.body?.cancel?.()
+      } catch {
+        // The failed stream is already unusable; continue with the bounded retry.
+      }
+      upstream = await retryUpstream()
+      if (!upstream?.ok) {
+        const finalError = new Error(`上游流在重试后仍未返回成功响应（HTTP ${upstream?.status || 0}）`)
+        finalError.codexRetryDiagnostic = { streamRetryCount: retryCount, failureKind }
+        throw finalError
+      }
+    }
   }
 }
 
@@ -1073,7 +1170,10 @@ async function synthesizeEmulatedToolResponse(
     return { finish, onContentDelta }
   }
   const initialProgressObserver = createProgressObserver()
-  let assistant = await readChatAssistant(upstream, { onContentDelta: initialProgressObserver.onContentDelta })
+  let assistant = await readChatAssistantWithTransientRetry(upstream, options.retryInitialUpstream, {
+    signal: options.signal,
+    onContentDelta: initialProgressObserver.onContentDelta
+  })
 
   initialProgressObserver.finish(assistant.content)
   const initialAssistant = assistant
@@ -2231,7 +2331,10 @@ async function requestCompactionSummary(channel, rawBody, capability, preferredW
     }
   }
 
-  const assistant = wireApi === 'responses' ? await readResponsesAssistant(upstream) : await readChatAssistant(upstream)
+  const assistant =
+    wireApi === 'responses'
+      ? await readResponsesAssistant(upstream)
+      : await readChatAssistantWithTransientRetry(upstream, sendChat, { signal: upstreamSignal })
 
   return {
     ok: true,
@@ -2865,7 +2968,11 @@ async function handleResponsesRequest(
                   const retryUpstream = await sendUpstream(retryPayload, recoverySignal)
 
                   if (retryUpstream.ok) {
-                    return readChatAssistant(retryUpstream, { onContentDelta: retryContext.onContentDelta })
+                    return readChatAssistantWithTransientRetry(
+                      retryUpstream,
+                      () => sendUpstream(retryPayload, recoverySignal),
+                      { signal: recoverySignal, onContentDelta: retryContext.onContentDelta }
+                    )
                   }
 
                   const retryError = await chatUpstreamErrorBody(retryUpstream)
@@ -2882,9 +2989,11 @@ async function handleResponsesRequest(
                     const compatibleRetryUpstream = await sendUpstream(compatibleRetryPayload, recoverySignal)
 
                     if (compatibleRetryUpstream.ok) {
-                      return readChatAssistant(compatibleRetryUpstream, {
-                        onContentDelta: retryContext.onContentDelta
-                      })
+                      return readChatAssistantWithTransientRetry(
+                        compatibleRetryUpstream,
+                        () => sendUpstream(compatibleRetryPayload, recoverySignal),
+                        { signal: recoverySignal, onContentDelta: retryContext.onContentDelta }
+                      )
                     }
                     retryContext.recordFailure?.(recoveryFailureKindForStatus(compatibleRetryUpstream.status))
                     await chatUpstreamErrorBody(compatibleRetryUpstream)
@@ -2897,12 +3006,15 @@ async function handleResponsesRequest(
               )
             } catch (error) {
               if (upstreamSignal.aborted) throw error
+              if (error?.codexRetryDiagnostic?.streamRetryExhausted) throw error
               retryContext.recordFailure?.(recoveryFailureKindForError(error))
               return null
             }
           },
           body.input,
           {
+            signal: upstreamSignal,
+            retryInitialUpstream: () => sendUpstream(emulation.payload, upstreamSignal),
             maximumRecoveryMs: PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
             onProgressStart: emulatedStreamState
               ? () => {
@@ -3144,6 +3256,7 @@ function createProtocolProxy({
     } catch (error) {
       const failureKind = transportFailureKind(error, requestUpstreamSignal)
       const clientCancelled = failureKind.startsWith('client_')
+      const retryDiagnostic = error?.codexRetryDiagnostic || {}
 
       publishDiagnostic({
         capturedAt: new Date().toISOString(),
@@ -3153,7 +3266,10 @@ function createProtocolProxy({
         errorName: String(error?.name || 'Error'),
         errorCode: String(error?.code || ''),
         errorCauseCode: String(error?.cause?.code || '').slice(0, 64),
-        transportFailureKind: failureKind
+        transportFailureKind: failureKind,
+        streamRetryCount: Number(retryDiagnostic.streamRetryCount || 0),
+        streamRetryExhausted: retryDiagnostic.streamRetryExhausted === true,
+        streamPartialContent: retryDiagnostic.partialContent === true
       })
       if (response.headersSent) {
         if (!response.writableEnded) response.end()
@@ -3223,6 +3339,10 @@ module.exports = {
   createProtocolProxy,
   endpointCompatibilityFailure,
   fetchWithCapacityRetry,
+  readChatAssistantWithTransientRetry,
+  transientUpstreamFailureKind,
+  UPSTREAM_TRANSIENT_MAX_RETRIES,
+  UPSTREAM_TRANSIENT_RETRY_BASE_MS,
   inferredWireApiForModel,
   modelIdentityLabel,
   modelIdentityInstruction,

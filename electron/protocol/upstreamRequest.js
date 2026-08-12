@@ -1,6 +1,9 @@
 const { once } = require('events')
 
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 180000
+// Long Grok tool turns can spend several minutes in model-side reasoning and
+// compatibility recovery. Keep a finite upper bound, but do not cut those
+// turns off at the old three-minute limit.
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 8 * 60 * 1000
 const MAX_UPSTREAM_BUFFER_BYTES = 32 * 1024 * 1024
 const upstreamAbortMetadata = new WeakMap()
 

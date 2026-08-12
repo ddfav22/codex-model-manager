@@ -2192,6 +2192,20 @@ async function main() {
     reimportedSkillStatus.skills.some(item => item.path === path.join(currentSkillsPath, 'release-helper')),
     true
   )
+  const bundledSkillPath = path.join(currentSkillsPath, '.system', 'bundled-only')
+  fs.mkdirSync(bundledSkillPath, { recursive: true })
+  fs.writeFileSync(path.join(bundledSkillPath, 'SKILL.md'), '# bundled\n', 'utf8')
+  assert.throws(() => manager.deleteSkill(bundledSkillPath, packageOptions), /bundled\/system Skill/)
+  const outsideSkillPath = path.join(packageManagementRoot, 'outside-skill')
+  fs.mkdirSync(outsideSkillPath, { recursive: true })
+  fs.writeFileSync(path.join(outsideSkillPath, 'SKILL.md'), '# outside\n', 'utf8')
+  assert.throws(() => manager.deleteSkill(outsideSkillPath, packageOptions), /未找到 Skill/)
+  const deletedSkillStatus = manager.deleteSkill(currentSkill.path, packageOptions)
+  assert.strictEqual(fs.existsSync(validSkillPath), false)
+  assert.strictEqual(
+    deletedSkillStatus.skills.some(item => item.path === validSkillPath),
+    false
+  )
 
   const directLoginAuthPath = path.join(tempRoot, 'direct-login-auth.json')
   const directLogin = manager._internal.loginFreshClientWithApiKey(

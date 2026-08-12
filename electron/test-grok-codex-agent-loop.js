@@ -43,6 +43,7 @@ const { encodedToolFrameStart, parseEncodedToolFrames } = require('./protocol/en
 const {
   decodeRepeatedEscapedLineBreaks,
   normalizeVisibleAssistantText,
+  stripEmptyInternalXml,
   stripToolHtmlScaffold
 } = require('./protocol/visibleAssistantText')
 
@@ -328,6 +329,18 @@ assert.strictEqual(emulatedToolSyntaxStart('<!DOCTYPE html>\n<html>', { includeP
 assert.strictEqual(normalizeVisibleAssistantText('\\n\\n\\n\\n'), '')
 assert.strictEqual(normalizeVisibleAssistantText('"\\n\\n\\n\\n"'), '')
 assert.strictEqual(normalizeVisibleAssistantText('first\\n\\n\\nsecond'), 'first\n\nsecond')
+assert.strictEqual(stripEmptyInternalXml('before<codex_tool_call></codex_tool_call>after'), 'beforeafter')
+assert.strictEqual(stripEmptyInternalXml('<tool_result />\n<function_call></function_call>done'), '\ndone')
+assert.strictEqual(
+  stripEmptyInternalXml('<note></note><xml></xml><note>value</note>'),
+  '<note></note><xml></xml><note>value</note>'
+)
+assert.strictEqual(
+  normalizeVisibleAssistantText(
+    '结果\n<codex_internal_adapter></codex_internal_adapter>\n<grok_tool_call></grok_tool_call>\n完成'
+  ),
+  '结果\n\n完成'
+)
 assert.strictEqual(
   decodeRepeatedEscapedLineBreaks('```js\nconst value = "\\n\\n"\n```'),
   '```js\nconst value = "\\n\\n"\n```'

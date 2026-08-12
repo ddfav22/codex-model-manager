@@ -14,12 +14,14 @@ export const PackageRow = ({
   item,
   busy,
   onOpen,
-  onExport
+  onExport,
+  onDelete
 }: {
   item: ToolPackage
   busy: boolean
   onOpen: (targetPath: string) => void
   onExport: (identifier: string) => void
+  onDelete?: (identifier: string) => void
 }) => (
   <Box
     sx={{
@@ -72,6 +74,13 @@ export const PackageRow = ({
       <Button size='small' variant='outlined' disabled={busy} onClick={() => onExport(item.path)}>
         导出
       </Button>
+      {onDelete && (
+        <Tooltip title='删除 Skill'>
+          <IconButton color='error' disabled={busy} aria-label='删除 Skill' onClick={() => onDelete(item.path)}>
+            <i className='ri-delete-bin-7-line' />
+          </IconButton>
+        </Tooltip>
+      )}
     </Stack>
   </Box>
 )

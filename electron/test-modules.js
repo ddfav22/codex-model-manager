@@ -15,8 +15,10 @@ const {
   adaptResponsesRequest,
   fetchWithCapacityRetry,
   normalizeResponsesToolItemIds,
+  readChatAssistantWithTransientRetry,
   responsesRequestToChat,
   runWithAbortTimeout,
+  transientUpstreamFailureKind,
   upstreamFailureKind,
   upstreamRejectsNativeTools
 } = require('./protocolProxy')
@@ -1561,8 +1563,130 @@ async function main() {
   assert.deepStrictEqual(recoveredCapacityResponse.codexRetryDiagnostic, {
     retryCount: 2,
     retryDelayMs: 0,
+    transientRetryCount: 0,
     failureKind: ''
   })
+  assert.strictEqual(
+    transientUpstreamFailureKind(
+      Object.assign(new Error('fetch failed'), { cause: { code: 'ERR_STREAM_PREMATURE_CLOSE' } })
+    ),
+    'transient_transport'
+  )
+  assert.strictEqual(transientUpstreamFailureKind(new Error('invalid request')), '')
+  let transientAttempts = 0
+  const recoveredTransientResponse = await fetchWithCapacityRetry(
+    async () => {
+      transientAttempts += 1
+      if (transientAttempts === 1) {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ERR_STREAM_PREMATURE_CLOSE' } })
+      }
+      return new Response('{}', { status: 200 })
+    },
+    { transientRetryBaseMs: 0 }
+  )
+  assert.strictEqual(recoveredTransientResponse.ok, true)
+  assert.strictEqual(transientAttempts, 2)
+  assert.strictEqual(recoveredTransientResponse.codexRetryDiagnostic.transientRetryCount, 1)
+  let nonTransientAttempts = 0
+  await assert.rejects(
+    fetchWithCapacityRetry(
+      async () => {
+        nonTransientAttempts += 1
+        throw new Error('invalid request body')
+      },
+      { transientRetryBaseMs: 0 }
+    ),
+    error => error.message === 'invalid request body' && error.codexRetryDiagnostic.failureKind === 'transport_error'
+  )
+  assert.strictEqual(nonTransientAttempts, 1)
+  let exhaustedTransientAttempts = 0
+  await assert.rejects(
+    fetchWithCapacityRetry(
+      async () => {
+        exhaustedTransientAttempts += 1
+        throw Object.assign(new Error('socket terminated'), { cause: { code: 'UND_ERR_SOCKET' } })
+      },
+      { transientRetryBaseMs: 0 }
+    ),
+    error =>
+      error.codexRetryDiagnostic.transientRetryCount === 1 &&
+      error.codexRetryDiagnostic.failureKind === 'transient_transport'
+  )
+  assert.strictEqual(exhaustedTransientAttempts, 2)
+  const sseResponse = stream => new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
+  const prematureClose = () =>
+    Object.assign(new Error('upstream stream closed early'), {
+      name: 'AbortError',
+      cause: { code: 'ERR_STREAM_PREMATURE_CLOSE' }
+    })
+  let preContentStreamAttempts = 0
+  const preContentFirst = sseResponse(
+    new ReadableStream({
+      start(controller) {
+        controller.error(prematureClose())
+      }
+    })
+  )
+  const preContentResult = await readChatAssistantWithTransientRetry(
+    preContentFirst,
+    async () => {
+      preContentStreamAttempts += 1
+      return sseResponse(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode('data: {"choices":[{"delta":{"content":"chain-ok"}}]}\n\ndata: [DONE]\n\n')
+            )
+            controller.close()
+          }
+        })
+      )
+    },
+    { retryBaseMs: 0 }
+  )
+  assert.strictEqual(preContentResult.content, 'chain-ok')
+  assert.strictEqual(preContentStreamAttempts, 1)
+  const intactHistory = [
+    { type: 'custom_tool_call', call_id: 'call_chain', name: 'exec', input: 'text(1)' },
+    { type: 'custom_tool_call_output', call_id: 'call_chain', output: 'one' }
+  ]
+  assert.strictEqual(followsImmediateResponsesToolResult(intactHistory), true)
+  let midStreamRetryCalls = 0
+  let midStreamSent = false
+  const midStreamFirst = sseResponse(
+    new ReadableStream({
+      pull(controller) {
+        if (!midStreamSent) {
+          midStreamSent = true
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'))
+          return
+        }
+        controller.error(prematureClose())
+      }
+    })
+  )
+  await assert.rejects(
+    readChatAssistantWithTransientRetry(
+      midStreamFirst,
+      async () => {
+        midStreamRetryCalls += 1
+        return sseResponse(
+          new ReadableStream({
+            start(controller) {
+              controller.close()
+            }
+          })
+        )
+      },
+      { retryBaseMs: 0 }
+    ),
+    error =>
+      error.codexRetryDiagnostic?.streamRetryExhausted === true &&
+      error.codexRetryDiagnostic?.partialContent === true &&
+      error.codexRetryDiagnostic?.failureKind === 'transient_transport'
+  )
+  assert.strictEqual(midStreamRetryCalls, 0)
+  assert.strictEqual(followsImmediateResponsesToolResult(intactHistory), true)
   let contextAttempts = 0
   const rejectedContextResponse = await fetchWithCapacityRetry(async () => {
     contextAttempts += 1

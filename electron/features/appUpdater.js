@@ -18,6 +18,8 @@ const MAX_PATCH_BYTES = 64 * 1024 * 1024
 const CHECK_TIMEOUT_MS = 20_000
 const DOWNLOAD_TIMEOUT_MS = 15 * 60_000
 const INSTALL_START_TIMEOUT_MS = 10_000
+const DOWNLOAD_RETRY_ATTEMPTS = 3
+const DOWNLOAD_RETRY_BACKOFF_MS = 1000
 
 function normalizeVersion(value) {
   const match = String(value || '')
@@ -129,6 +131,22 @@ function sha256File(filePath, fsModule = fs) {
   }
 
   return hash.digest('hex')
+}
+
+function retryableDownloadError(error) {
+  const text = `${error?.name || ''} ${error?.message || ''} ${error?.code || ''}`
+
+  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK|ECONNRESET|ETIMEDOUT|EPIPE|terminated|fetch failed|aborted/i.test(
+    text
+  )
+}
+
+function markDownloadError(error, preservePartial) {
+  const next = error instanceof Error ? error : new Error(String(error || '下载失败'))
+
+  next.preservePartial = preservePartial === true
+
+  return next
 }
 
 function createAppUpdater(options = {}) {
@@ -243,82 +261,178 @@ function createAppUpdater(options = {}) {
       })
     }
 
-    fsModule.rmSync(partialPath, { force: true })
+    let partialBytes = 0
+
+    if (fsModule.existsSync(partialPath)) {
+      partialBytes = Number(fsModule.statSync(partialPath).size || 0)
+
+      if (partialBytes >= asset.size) {
+        if (partialBytes === asset.size && sha256File(partialPath, fsModule) === digest) {
+          fsModule.rmSync(targetPath, { force: true })
+          fsModule.renameSync(partialPath, targetPath)
+          readyPath = targetPath
+          readyDigest = digest
+          readyDeliveryType = deliveryType
+
+          return publishState({
+            stage: 'ready',
+            latestVersion,
+            message: `${deliveryLabel}已下载，可以重启更新到 ${latestVersion}`,
+            manual,
+            deliveryType,
+            downloadPercent: 100,
+            downloadedBytes: asset.size,
+            totalBytes: asset.size,
+            releaseUrl,
+            releaseNotes
+          })
+        }
+
+        fsModule.rmSync(partialPath, { force: true })
+        partialBytes = 0
+      }
+    }
+
     publishState({
       stage: 'downloading',
       latestVersion,
-      message: `正在下载${deliveryLabel} ${latestVersion}`,
+      message:
+        partialBytes > 0 ? `正在续传${deliveryLabel} ${latestVersion}` : `正在下载${deliveryLabel} ${latestVersion}`,
       manual,
       deliveryType,
-      downloadPercent: 0,
-      downloadedBytes: 0,
+      downloadPercent: Math.min(99, Math.floor((partialBytes / asset.size) * 100)),
+      downloadedBytes: partialBytes,
       totalBytes: asset.size,
       releaseUrl,
       releaseNotes
     })
-    const response = await fetchWithTimeout(asset.browser_download_url, DOWNLOAD_TIMEOUT_MS, {
-      redirect: 'follow',
-      headers: { Accept: 'application/octet-stream' }
-    })
+    let downloadedBytes = partialBytes
+    let lastPercent = Math.min(99, Math.floor((partialBytes / asset.size) * 100))
+    let lastError = null
 
-    if (!response?.ok || !response.body) throw new Error(`${deliveryLabel}下载失败（HTTP ${response?.status || 0}）。`)
-    const declaredLength = Number(headerValue(response.headers, 'content-length') || asset.size)
+    for (let attempt = 1; attempt <= DOWNLOAD_RETRY_ATTEMPTS; attempt += 1) {
+      let response
+      let resumeOffset = Number(fsModule.existsSync(partialPath) ? fsModule.statSync(partialPath).size || 0 : 0)
+      const headers = { Accept: 'application/octet-stream' }
 
-    if (declaredLength > maximumBytes || declaredLength <= 0) throw new Error(`${deliveryLabel}大小异常，已停止下载。`)
-    const hash = crypto.createHash('sha256')
-    const fileHandle = await fsModule.promises.open(partialPath, 'w')
-    let downloadedBytes = 0
-    let lastPercent = -1
+      if (resumeOffset > 0 && resumeOffset < asset.size) headers.Range = `bytes=${resumeOffset}-`
 
-    try {
-      for await (const chunk of response.body) {
-        const buffer = Buffer.from(chunk)
+      try {
+        response = await fetchWithTimeout(asset.browser_download_url, DOWNLOAD_TIMEOUT_MS, {
+          redirect: 'follow',
+          headers
+        })
 
-        downloadedBytes += buffer.length
-        if (downloadedBytes > maximumBytes || downloadedBytes > asset.size) {
-          throw new Error(`${deliveryLabel}实际大小超过发布记录，已停止下载。`)
-        }
-        hash.update(buffer)
-        await fileHandle.write(buffer)
-        const downloadPercent = Math.min(99, Math.floor((downloadedBytes / asset.size) * 100))
-
-        if (downloadPercent !== lastPercent) {
-          lastPercent = downloadPercent
-          publishState({
-            stage: 'downloading',
-            message: `正在下载${deliveryLabel} ${latestVersion}（${downloadPercent}%）`,
-            downloadPercent,
-            downloadedBytes,
-            totalBytes: asset.size
+        if (response?.status === 416 && resumeOffset > 0) {
+          fsModule.rmSync(partialPath, { force: true })
+          resumeOffset = 0
+          response = await fetchWithTimeout(asset.browser_download_url, DOWNLOAD_TIMEOUT_MS, {
+            redirect: 'follow',
+            headers: { Accept: 'application/octet-stream' }
           })
         }
+
+        const resumed = resumeOffset > 0 && response?.status === 206
+
+        if (!resumed && resumeOffset > 0) {
+          fsModule.rmSync(partialPath, { force: true })
+          resumeOffset = 0
+        }
+        if (!response?.ok || !response.body) {
+          throw new Error(`${deliveryLabel}下载失败（HTTP ${response?.status || 0}）。`)
+        }
+
+        const expectedResponseBytes = asset.size - resumeOffset
+        const declaredLength = Number(headerValue(response.headers, 'content-length') || expectedResponseBytes)
+
+        if (declaredLength > maximumBytes || declaredLength <= 0 || declaredLength !== expectedResponseBytes) {
+          throw new Error(`${deliveryLabel}大小异常，已停止下载。`)
+        }
+
+        const hash = crypto.createHash('sha256')
+
+        if (resumeOffset > 0) hash.update(fsModule.readFileSync(partialPath))
+
+        const fileHandle = await fsModule.promises.open(partialPath, resumed ? 'a' : 'w')
+        downloadedBytes = resumeOffset
+
+        try {
+          for await (const chunk of response.body) {
+            const buffer = Buffer.from(chunk)
+
+            downloadedBytes += buffer.length
+            if (downloadedBytes > maximumBytes || downloadedBytes > asset.size) {
+              throw new Error(`${deliveryLabel}实际大小超过发布记录，已停止下载。`)
+            }
+            hash.update(buffer)
+            await fileHandle.write(buffer)
+            const downloadPercent = Math.min(99, Math.floor((downloadedBytes / asset.size) * 100))
+
+            if (downloadPercent !== lastPercent) {
+              lastPercent = downloadPercent
+              publishState({
+                stage: 'downloading',
+                message: `正在下载${deliveryLabel} ${latestVersion}（${downloadPercent}%）`,
+                downloadPercent,
+                downloadedBytes,
+                totalBytes: asset.size
+              })
+            }
+          }
+          await fileHandle.sync()
+        } finally {
+          await fileHandle.close()
+        }
+
+        if (downloadedBytes !== asset.size) {
+          throw markDownloadError(new Error(`${deliveryLabel}下载不完整，请重新检查更新。`), true)
+        }
+        if (hash.digest('hex') !== digest) {
+          fsModule.rmSync(partialPath, { force: true })
+          throw new Error(`${deliveryLabel}校验失败，文件可能损坏。`)
+        }
+
+        fsModule.rmSync(targetPath, { force: true })
+        fsModule.renameSync(partialPath, targetPath)
+        readyPath = targetPath
+        readyDigest = digest
+        readyDeliveryType = deliveryType
+        logEvent('info', 'update.download.complete', { latestVersion, deliveryType, bytes: downloadedBytes })
+
+        return publishState({
+          stage: 'ready',
+          latestVersion,
+          message: `${deliveryLabel}已下载，可以重启更新到 ${latestVersion}`,
+          manual,
+          deliveryType,
+          downloadPercent: 100,
+          downloadedBytes,
+          totalBytes: asset.size,
+          releaseUrl,
+          releaseNotes
+        })
+      } catch (error) {
+        lastError = error
+        const preservePartial = error?.preservePartial === true || retryableDownloadError(error)
+
+        if (!preservePartial) {
+          fsModule.rmSync(partialPath, { force: true })
+          throw error
+        }
+        if (attempt >= DOWNLOAD_RETRY_ATTEMPTS) throw markDownloadError(error, true)
+
+        publishState({
+          stage: 'downloading',
+          message: `下载连接中断，${DOWNLOAD_RETRY_BACKOFF_MS / 1000} 秒后续传（${attempt}/${DOWNLOAD_RETRY_ATTEMPTS - 1}）`,
+          downloadPercent: Math.min(99, Math.floor((downloadedBytes / asset.size) * 100)),
+          downloadedBytes,
+          totalBytes: asset.size
+        })
+        await new Promise(resolve => setTimeout(resolve, DOWNLOAD_RETRY_BACKOFF_MS * attempt))
       }
-      await fileHandle.sync()
-    } finally {
-      await fileHandle.close()
     }
 
-    if (downloadedBytes !== asset.size) throw new Error(`${deliveryLabel}下载不完整，请重新检查更新。`)
-    if (hash.digest('hex') !== digest) throw new Error(`${deliveryLabel}校验失败，文件可能损坏。`)
-    fsModule.rmSync(targetPath, { force: true })
-    fsModule.renameSync(partialPath, targetPath)
-    readyPath = targetPath
-    readyDigest = digest
-    readyDeliveryType = deliveryType
-    logEvent('info', 'update.download.complete', { latestVersion, deliveryType, bytes: downloadedBytes })
-
-    return publishState({
-      stage: 'ready',
-      latestVersion,
-      message: `${deliveryLabel}已下载，可以重启更新到 ${latestVersion}`,
-      manual,
-      deliveryType,
-      downloadPercent: 100,
-      downloadedBytes,
-      totalBytes: asset.size,
-      releaseUrl,
-      releaseNotes
-    })
+    throw lastError || new Error(`${deliveryLabel}下载失败。`)
   }
 
   const runCheck = async ({ manual = false, autoDownload = true } = {}) => {
@@ -421,7 +535,9 @@ function createAppUpdater(options = {}) {
             releaseNotes
           })
         } catch (error) {
-          fsModule.rmSync(path.join(updatesRoot, `${patchName}.part`), { force: true })
+          if (!error?.preservePartial && !retryableDownloadError(error)) {
+            fsModule.rmSync(path.join(updatesRoot, `${patchName}.part`), { force: true })
+          }
           logError('update.patch.fallback', error, { currentVersion, latestVersion })
           publishState({
             stage: 'available',
@@ -442,7 +558,7 @@ function createAppUpdater(options = {}) {
         releaseNotes
       })
     } catch (error) {
-      if (fsModule.existsSync(updatesRoot)) {
+      if (!error?.preservePartial && !retryableDownloadError(error) && fsModule.existsSync(updatesRoot)) {
         for (const entry of fsModule.readdirSync(updatesRoot)) {
           if (entry.endsWith('.part')) fsModule.rmSync(path.join(updatesRoot, entry), { force: true })
         }
