@@ -56,6 +56,7 @@ import {
   menuItems,
   modelCapability,
   modelReady,
+  onlineSkillCatalog,
   providerModels,
   uniqueModels,
   wireApiLabel
@@ -997,6 +998,18 @@ const ModelManager = () => {
       setMessage({ type: 'success', text: 'GitHub zip 已导入。' })
     })
 
+  const installOnlineSkill = (skillId: string) =>
+    run(async () => {
+      const skill = onlineSkillCatalog.find(item => item.id === skillId)
+
+      if (!skill) throw new Error('在线 Skill 不存在或已下架。')
+
+      const nextStatus = await requireBridge().importSkillFromGithub(skill.archiveUrl)
+
+      setStatus(nextStatus)
+      setMessage({ type: 'success', text: `${skill.displayName} 已安装到当前 Codex 的 Skill 目录。` })
+    })
+
   const exportPackage = (kind: 'skills' | 'agents', identifier: string) =>
     run(async () => {
       const bridge = requireBridge()
@@ -1423,6 +1436,76 @@ const ModelManager = () => {
           }
         />
         <Divider />
+        {kind === 'skills' && (
+          <Card variant='outlined' sx={{ borderColor: 'primary.main', bgcolor: 'action.hover' }}>
+            <CardContent>
+              <Stack spacing={2.5}>
+                <Stack direction='row' spacing={1.5} alignItems='center'>
+                  <i className='ri-store-2-line text-[22px] text-primary' />
+                  <Box sx={{ flex: 1 }}>
+                    <Typography variant='h6'>在线插件商店</Typography>
+                    <Typography variant='body2' color='text.secondary'>
+                      从 GitHub 下载并校验 Skill，安装后立即出现在下方列表。
+                    </Typography>
+                  </Box>
+                  <Chip size='small' color='primary' variant='outlined' label={`${onlineSkillCatalog.length} 个可用`} />
+                </Stack>
+                {onlineSkillCatalog.map(skill => {
+                  const installed = items.some(item => item.displayName === 'security-pentest' || item.name === skill.id)
+
+                  return (
+                    <Box
+                      key={skill.id}
+                      sx={{
+                        display: 'grid',
+                        gridTemplateColumns: { xs: '1fr', md: '1fr auto' },
+                        gap: 2,
+                        alignItems: 'center',
+                        p: 2,
+                        borderRadius: 1.5,
+                        bgcolor: 'background.paper',
+                        border: 1,
+                        borderColor: 'divider'
+                      }}
+                    >
+                      <Stack spacing={0.75}>
+                        <Stack direction='row' spacing={1} alignItems='center'>
+                          <Typography variant='subtitle1' fontWeight={700}>
+                            {skill.displayName}
+                          </Typography>
+                          <Chip size='small' variant='outlined' label={`v${skill.version}`} />
+                        </Stack>
+                        <Typography variant='body2' color='text.secondary'>
+                          {skill.description}
+                        </Typography>
+                        <Typography
+                          component='a'
+                          href={skill.sourceUrl}
+                          target='_blank'
+                          rel='noreferrer'
+                          variant='caption'
+                          color='primary.main'
+                          sx={{ width: 'fit-content' }}
+                        >
+                          查看 GitHub 来源与更新记录
+                        </Typography>
+                      </Stack>
+                      <Button
+                        variant={installed ? 'outlined' : 'contained'}
+                        color={installed ? 'success' : 'primary'}
+                        disabled={busy}
+                        startIcon={<i className={installed ? 'ri-checkbox-circle-line' : 'ri-download-cloud-2-line'} />}
+                        onClick={() => installOnlineSkill(skill.id)}
+                      >
+                        {installed ? '重新安装' : '安装'}
+                      </Button>
+                    </Box>
+                  )
+                })}
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
         <Box sx={listSurfaceSx}>
           {!items.length ? (
             <EmptyState icon={kind === 'skills' ? 'ri-tools-line' : 'ri-robot-2-line'} text={`没有发现 ${label}`} />

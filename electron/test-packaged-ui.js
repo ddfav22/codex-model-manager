@@ -211,6 +211,7 @@ function inspectPackagedContents(executablePath) {
     /^\/electron\/(?:build-next|test-[^/]+)\.js$/i.test(entry)
   )
   const remixIcons = new Set()
+  let packagedSkillStoreAssets = false
   const expectedRemixIcons = new Set(
     [...fs.readFileSync(sourceIconBundlePath, 'utf8').matchAll(/\bri-([a-z0-9-]+)\b/g)].map(match => match[1])
   )
@@ -223,10 +224,23 @@ function inspectPackagedContents(executablePath) {
       for (const match of cssContent.matchAll(/\bri-([a-z0-9-]+)\b/g)) remixIcons.add(match[1])
     })
 
+  archiveEntries
+    .filter(entry => /[\\/]out[\\/]_next[\\/]static[\\/]chunks[\\/].+\.js$/i.test(entry))
+    .forEach(entry => {
+      if (packagedSkillStoreAssets) return
+      const script = asar.extractFile(archivePath, entry.replace(/^[\\/]/, '')).toString('utf8')
+
+      packagedSkillStoreAssets =
+        script.includes('在线插件商店') &&
+        script.includes('安全渗透测试') &&
+        script.includes('https://github.com/ddfav22/security-pentest-skill/archive/refs/heads/main.zip')
+    })
+
   return {
     archiveBytes: fs.statSync(archivePath).size,
     entryCount: archiveEntries.length,
     forbiddenDevelopmentFiles,
+    packagedSkillStoreAssets,
     remixIconCount: remixIcons.size,
     expectedRemixIconCount: expectedRemixIcons.size
   }
@@ -498,6 +512,7 @@ async function main() {
         ? Array.from(dialog.querySelectorAll('input')).map(element => String(element.value || '').trim())
         : []
       findButton('取消')?.click()
+      await wait(250)
 
       return {
         addOpened: Boolean(addButton),
@@ -802,6 +817,7 @@ async function main() {
       /批量删除必须经过确认/.test(result.rejectedDelete?.message || ''),
       result.rejectedDeleteLogged === true,
       result.packagedContents?.forbiddenDevelopmentFiles?.length === 0,
+      result.packagedContents?.packagedSkillStoreAssets === true,
       result.packagedContents?.expectedRemixIconCount > 0,
       result.packagedContents?.expectedRemixIconCount <= 128,
       result.packagedContents?.remixIconCount === result.packagedContents?.expectedRemixIconCount,
