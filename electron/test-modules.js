@@ -29,6 +29,7 @@ const {
 } = require('./protocol/codexDiagnostics')
 const runtimeLogger = require('./runtimeLogger')
 const { allowedGithubDownloadHost, safePackageName } = require('./features/packageArchive')
+const { createSystemProxyFetch, installSystemProxyFetch } = require('./features/systemProxyFetch')
 const {
   TASK_RECOVERY_PROMPT,
   normalizeTaskId,
@@ -131,6 +132,30 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  const systemFetchCalls = []
+  const systemProxyFetch = createSystemProxyFetch({
+    fetch: async (input, init) => {
+      systemFetchCalls.push({ input, init })
+      return { ok: true, stack: 'electron-net' }
+    }
+  })
+  const originalFetch = async () => ({ ok: false, stack: 'node' })
+  const fetchTarget = { fetch: originalFetch }
+  const restoreFetch = installSystemProxyFetch(systemProxyFetch, fetchTarget)
+  const systemFetchResponse = await fetchTarget.fetch('https://proxy-required.example/v1/models', {
+    method: 'GET'
+  })
+
+  assert.deepStrictEqual(systemFetchResponse, { ok: true, stack: 'electron-net' })
+  assert.deepStrictEqual(systemFetchCalls, [
+    { input: 'https://proxy-required.example/v1/models', init: { method: 'GET' } }
+  ])
+  assert.strictEqual(restoreFetch(), true)
+  assert.strictEqual(fetchTarget.fetch, originalFetch)
+  assert.strictEqual(restoreFetch(), false)
+  assert.throws(() => createSystemProxyFetch({}), /net\.fetch is unavailable/)
+  assert.throws(() => installSystemProxyFetch(null, {}), /must be a function/)
+
   const recoveryTaskId = '019fb755-76b9-7603-bfd6-555e987e9f08'
 
   assert.strictEqual(normalizeTaskId(recoveryTaskId.toUpperCase()), recoveryTaskId)

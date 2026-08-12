@@ -657,6 +657,7 @@ async function main() {
     const newClientProcessIds = clientProcessIdsAfter.filter(id => !clientProcessIdsBefore.includes(id))
     const logEvents = readNewLogEvents(logPath, existingLogLineCount)
     const processStart = logEvents.find(event => event.event === 'process.start')
+    const networkFetchConfigured = logEvents.find(event => event.event === 'network.fetch.configured')
     const startupComplete = logEvents.find(event => event.event === 'app.startup.complete')
     const startupErrors = logEvents.filter(event =>
       ['app.startup.failed', 'process.uncaughtException'].includes(event.event)
@@ -698,6 +699,7 @@ async function main() {
       newClientProcessIds,
       processVersion: processStart?.details?.version || '',
       portableDataRoot: processStart?.details?.dataRoot || '',
+      networkFetchConfigured: networkFetchConfigured?.details || null,
       startupComplete: startupComplete?.details || null,
       startupErrorCount: startupErrors.length
     }
@@ -806,6 +808,8 @@ async function main() {
       result.newClientProcessIds.length === 0,
       result.processVersion === packageMetadata.version,
       path.resolve(result.portableDataRoot) === path.resolve(dataRoot),
+      result.networkFetchConfigured?.stack === 'electron-net',
+      result.networkFetchConfigured?.proxyMode === 'system',
       path.resolve(result.startupComplete?.portableDataRoot || '') === path.resolve(dataRoot),
       result.startupComplete?.storageMigration?.reason === 'disabled',
       result.startupComplete?.automaticCodexLaunch === false,

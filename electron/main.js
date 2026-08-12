@@ -1,6 +1,6 @@
 const path = require('path')
 const fs = require('fs')
-const { app, BrowserWindow, dialog, Menu, Tray } = require('electron')
+const { app, BrowserWindow, dialog, Menu, net, Tray } = require('electron')
 const packageMetadata = require('../package.json')
 const { startupCompatibility } = require('./runtime/startupCompatibility')
 
@@ -30,6 +30,7 @@ process.env.CODEX_MANAGER_STATE_DIR = portableStorage.managerState
 const { configureRuntimeLogger, getRuntimeLogPath, logError, logEvent } = require('./runtimeLogger')
 const { createAppUpdater, repositoryFromPackageMetadata } = require('./features/appUpdater')
 const { completePendingPatch } = require('./features/patchInstaller')
+const { createSystemProxyFetch, installSystemProxyFetch } = require('./features/systemProxyFetch')
 const { toUserFacingErrorMessage } = require('./features/userFacingErrors')
 const manager = require('./codexManager')
 const { createProtocolProxy } = require('./protocolProxy')
@@ -51,6 +52,7 @@ const processStartedAt = Date.now()
 const runtimeLogPath = configureRuntimeLogger({
   roots: [portableStorage.logs]
 })
+const systemProxyFetch = createSystemProxyFetch(net)
 const updateRepository = process.env.CODEX_MM_UPDATE_REPOSITORY || repositoryFromPackageMetadata(packageMetadata)
 const appUpdater = createAppUpdater({
   currentVersion: app.getVersion(),
@@ -61,6 +63,7 @@ const appUpdater = createAppUpdater({
   repository: updateRepository,
   updatesRoot: portableStorage.updates,
   enabled: app.isPackaged && process.env.CODEX_MM_DISABLE_UPDATE_CHECK !== '1',
+  fetchFn: systemProxyFetch,
   logEvent,
   logError,
   onState: state => {
@@ -459,7 +462,9 @@ if (!lock) {
   app
     .whenReady()
     .then(async () => {
+      installSystemProxyFetch(systemProxyFetch)
       logEvent('info', 'app.ready', { durationMs: Date.now() - processStartedAt })
+      logEvent('info', 'network.fetch.configured', { stack: 'electron-net', proxyMode: 'system' })
       app.setAppUserModelId('cn.chatgpt.manager')
       registerIpc()
       runtimeReadyPromise = initializeProtocolRuntime()
