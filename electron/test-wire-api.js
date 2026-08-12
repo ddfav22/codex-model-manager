@@ -1100,27 +1100,22 @@ async function main() {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache'
         })
-        response.write(
-          `data: ${JSON.stringify({
-            id: `chatcmpl-${requestBody.model}`,
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: requestBody.model,
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  role: 'assistant',
-                  content:
-                    requestBody.model === 'grok-interrupted-continue-anchor'
-                      ? '继续执行：\n```json\n{"tool_call":{"tool":"exec","input":"const result = await tools.shell_command({command:\\"python --version\\"}); text(result);"}}\n```'
-                      : '继续执行：\n```json\n{"tool_call":{"tool":"exec","input":"const result = await tools.web__run({search_query:[{q:\\"今日金价\\"}]}); text(result);"}}\n```'
-                },
-                finish_reason: null
-              }
-            ]
-          })}\n\n`
-        )
+        const toolJson =
+          requestBody.model === 'grok-interrupted-continue-anchor'
+            ? '{"tool_call":{"tool":"exec","input":"const result = await tools.shell_command({command:\\"python --version\\"}); text(result);"}}'
+            : '{"tool_call":{"tool":"exec","input":"const result = await tools.web__run({search_query:[{q:\\"今日金价\\"}]}); text(result);"}}'
+
+        for (const content of ['继续执行：\n```', 'json\n', toolJson, '\n```']) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: `chatcmpl-${requestBody.model}`,
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
         response.end('data: [DONE]\n\n')
         return
       }
@@ -2751,6 +2746,8 @@ async function main() {
   assert.strictEqual(upstreamRequests.length, 1)
   assert.ok(shortContinueStream.includes('response.custom_tool_call_input.done'))
   assert.ok(shortContinueStream.includes('tools.web__run'))
+  assert.ok(!shortContinueStream.includes('```'))
+  assert.ok(!shortContinueStream.includes('```json'))
   assert.strictEqual(shortContinueDiagnostic.emulation.toolCallName, 'exec')
   assert.strictEqual(shortContinueDiagnostic.emulation.contextContinuity.shortContinuationAnchored, true)
   assert.ok(shortContinueDiagnostic.emulation.contextContinuity.continuationTaskLength > 0)
@@ -2808,6 +2805,8 @@ async function main() {
   assert.strictEqual(interruptedContinueResponse.status, 200)
   assert.ok(interruptedContinueStream.includes('response.custom_tool_call_input.done'))
   assert.ok(interruptedContinueStream.includes('python --version'))
+  assert.ok(!interruptedContinueStream.includes('```'))
+  assert.ok(!interruptedContinueStream.includes('```json'))
   assert.ok(!interruptedContinueStream.includes('turn_aborted'))
   assert.strictEqual(interruptedContinueDiagnostic.emulation.toolCallName, 'exec')
   assert.strictEqual(interruptedContinueDiagnostic.emulation.contextContinuity.shortContinuationAnchored, true)

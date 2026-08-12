@@ -37,6 +37,16 @@ function partialControlMarkerStart(content) {
     }
   }
 
+  const fencedJsonPrefix = text.match(
+    /(?:^|\r?\n)([ \t]*`{1,3}(?:j(?:s(?:o(?:n)?)?)?)?[ \t]*(?:\r?\n[ \t]*)?)$/i
+  )
+
+  if (fencedJsonPrefix) {
+    const prefixStart = Number(fencedJsonPrefix.index || 0) + fencedJsonPrefix[0].length - fencedJsonPrefix[1].length
+
+    earliest = earliest < 0 ? prefixStart : Math.min(earliest, prefixStart)
+  }
+
   return earliest
 }
 

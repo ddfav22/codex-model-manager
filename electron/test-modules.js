@@ -21,6 +21,7 @@ const {
   upstreamRejectsNativeTools
 } = require('./protocolProxy')
 const { RECOVERY_DECISION, parseAgentRecoveryDecision } = require('./protocol/agentRecoveryDecision')
+const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
 const {
   annotateDiagnostic,
   codexRequestContext,
@@ -132,6 +133,17 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  for (const prefix of ['`', '``', '```', '```j', '```js', '```jso', '```json', '```json\n']) {
+    assert.strictEqual(
+      emulatedToolSyntaxStart(`visible\n${prefix}`, { includePartial: true }),
+      'visible\n'.length,
+      `expected partial emulated-tool fence detection for ${JSON.stringify(prefix)}`
+    )
+  }
+  assert.strictEqual(emulatedToolSyntaxStart('visible\n```\nhello', { includePartial: true }), -1)
+  assert.strictEqual(emulatedToolSyntaxStart('visible\n```javascript\nconst x = 1', { includePartial: true }), -1)
+  assert.strictEqual(emulatedToolSyntaxStart('{"status":"ok"}', { includePartial: true }), -1)
+
   const systemFetchCalls = []
   const systemProxyFetch = createSystemProxyFetch({
     fetch: async (input, init) => {
