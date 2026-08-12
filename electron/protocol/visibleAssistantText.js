@@ -4,8 +4,76 @@ const TOOL_HTML_PATTERN = /(?:globalThis\s*\.\s*tools|\btools\s*\.\s*[a-zA-Z_]|\
 // Keep this allowlist narrow so user-authored XML is not removed accidentally.
 const INTERNAL_EMPTY_TAG_NAME = /^(?:codex|tool|function|grok|newapi)(?:[_:-].*)?$/i
 
+function stripEmptyXmlMarkdownFence(content) {
+  return String(content || '').replace(/(^|\r?\n)```xml[ \t]*\r?\n[\s\uFEFF]*?```(?=$|\r?\n)/gi, '$1')
+}
+
+function createVisibleAssistantStreamSanitizer() {
+  let buffer = ''
+
+  const drain = final => {
+    let output = ''
+
+    while (buffer) {
+      const opening = /(^|\r?\n)```xml[ \t]*\r?\n/i.exec(buffer)
+
+      if (!opening) {
+        if (final) {
+          output += buffer
+          buffer = ''
+          break
+        }
+
+        const lineStart = buffer.lastIndexOf('\n') + 1
+        const candidate = buffer.slice(lineStart)
+        const pendingOpening = /^(?:`|``|```(?:x(?:m(?:l)?)?)?[ \t]*\r?)$/i.test(candidate)
+        const keep = pendingOpening ? candidate.length : 0
+
+        output += buffer.slice(0, buffer.length - keep)
+        buffer = buffer.slice(buffer.length - keep)
+        break
+      }
+
+      const fenceStart = opening.index + opening[1].length
+      const openingLength = opening[0].length - opening[1].length
+
+      output += buffer.slice(0, fenceStart)
+      buffer = buffer.slice(fenceStart)
+      const closingIndex = buffer.indexOf('```', openingLength)
+
+      if (closingIndex < 0) {
+        const pendingContent = buffer.slice(openingLength)
+
+        if (!final && /^[\s\uFEFF]*`{0,2}$/.test(pendingContent)) break
+        output += buffer
+        buffer = ''
+        break
+      }
+
+      const inner = buffer.slice(openingLength, closingIndex)
+      const fenceEnd = closingIndex + 3
+
+      if (inner.replace(/\uFEFF/g, '').trim()) output += buffer.slice(0, fenceEnd)
+      buffer = buffer.slice(fenceEnd)
+    }
+
+    return output
+  }
+
+  return {
+    push(content) {
+      buffer += String(content || '')
+
+      return drain(false)
+    },
+    finish() {
+      return drain(true)
+    }
+  }
+}
+
 function stripEmptyInternalXml(content) {
-  return String(content || '')
+  return stripEmptyXmlMarkdownFence(content)
     .replace(/<([a-z][\w:.-]*)\b[^>]*>\s*<\/\1\s*>/gi, (match, tagName) => {
       return INTERNAL_EMPTY_TAG_NAME.test(tagName) ? '' : match
     })
@@ -82,8 +150,10 @@ function normalizeVisibleAssistantText(content) {
 
 module.exports = {
   decodeRepeatedEscapedLineBreaks,
+  createVisibleAssistantStreamSanitizer,
   normalizeVisibleAssistantText,
   sanitizeVisibleAssistantDelta,
   stripEmptyInternalXml,
+  stripEmptyXmlMarkdownFence,
   stripToolHtmlScaffold
 }

@@ -7,6 +7,7 @@ const { spawn } = require('child_process')
 const { version: APP_VERSION } = require('../package.json')
 const manager = require('./codexManager')
 const { DEFAULT_IMAGE_MODEL } = require('./protocol/newApiImageGeneration')
+const { AGENT_COMPLETION_SIGNAL } = require('./protocol/toolContinuation')
 const {
   createProtocolProxy,
   endpointCompatibilityFailure,
@@ -17,6 +18,7 @@ const {
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   responsesRequestToChat,
+  startResponsesStreamHeartbeat,
   wireApiForModel
 } = require('./protocolProxy')
 
@@ -469,6 +471,11 @@ async function main() {
   const delayedPlainReached = new Promise(resolve => {
     markDelayedPlainReached = resolve
   })
+  let releaseHeartbeatPromptResponse = null
+  let markHeartbeatPromptReached
+  const heartbeatPromptReached = new Promise(resolve => {
+    markHeartbeatPromptReached = resolve
+  })
   let releaseStreamedPlanResponse = null
   let markStreamedPlanReached
   const streamedPlanReached = new Promise(resolve => {
@@ -894,6 +901,89 @@ async function main() {
           response.end('data: [DONE]\n\n')
         }
         markDelayedPlainReached()
+        return
+      }
+
+      if (requestBody.model === 'grok-eof-without-done') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.end(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-eof-without-done',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { role: 'assistant', content: 'PARTIAL_EOF' }, finish_reason: null }]
+          })}\n\n`
+        )
+        return
+      }
+
+      if (requestBody.model === 'grok-partial-transport-error') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-partial-transport-error',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { role: 'assistant', content: 'PARTIAL_TRANSPORT' }, finish_reason: null }]
+          })}\n\n`
+        )
+        setTimeout(() => response.destroy(), 10)
+        return
+      }
+
+      if (requestBody.model === 'grok-heartbeat-prompt-fallback') {
+        assert.ok(!Array.isArray(requestBody.tools) || requestBody.tools.length === 0)
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.flushHeaders()
+        releaseHeartbeatPromptResponse = () => {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-heartbeat-prompt-fallback',
+              object: 'chat.completion.chunk',
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content: 'HEARTBEAT_OK' }, finish_reason: null }]
+            })}\n\n`
+          )
+          response.end('data: [DONE]\n\n')
+        }
+        markHeartbeatPromptReached()
+        return
+      }
+
+      if (requestBody.model === 'grok-streamed-terminal-dedupe') {
+        if (Array.isArray(requestBody.tools) && requestBody.tools.length) {
+          response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ error: { message: 'tool calls are not supported by the selected adapter' } }))
+          return
+        }
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const content of [
+          '我接下来会执行 PowerShell 脚本并保存结果。',
+          '\n\n结论：已完成脚本保存。'
+        ]) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-streamed-terminal-dedupe',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
         return
       }
 
@@ -1436,6 +1526,62 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-empty-xml-final') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const content of [
+          '我接下来会执行验证脚本。\n```x',
+          'ml\n',
+          ' \t\n',
+          `\`\`\`\n\n结论：已完成验证。\n${AGENT_COMPLETION_SIGNAL}`
+        ]) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-empty-xml-final',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
+      if (requestBody.model === 'grok-long-malformed-after-tool-result') {
+        const recovering = requestBody.messages?.some(message =>
+          /bounded recovery attempt|omitted the required completion signal/i.test(String(message?.content || ''))
+        )
+        const content = recovering
+          ? JSON.stringify({
+              decision: 'tool',
+              name: 'exec',
+              arguments: {
+                input: 'const result = await tools.shell_command({ command: "Write-Output LONG_RECOVERED" }); text(result);'
+              }
+            })
+          : ['继续执行剩余步骤。', '```xml', '', '```', '<codex_tool_call>{"name":"exec"', 'x'.repeat(2200)].join('\n')
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-long-malformed-after-tool-result',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'grok-delayed-recovery-over-legacy-timeout') {
         const recovering = requestBody.messages?.some(message =>
           /bounded recovery attempt/i.test(String(message?.content || ''))
@@ -1836,6 +1982,8 @@ async function main() {
     'grok-completion-signal-recovery-failure',
     'grok-delayed-recovery-over-legacy-timeout',
     'grok-completion-signal-user-input',
+    'grok-empty-xml-final',
+    'grok-long-malformed-after-tool-result',
     'grok-stalled-continuation',
     'grok-repeated-stall-fuse',
     'grok-partial-emulated-tool-tag',
@@ -1844,6 +1992,10 @@ async function main() {
     'grok-current-live-data',
     'grok-image-generation',
     'grok-delayed-plain-answer',
+    'grok-eof-without-done',
+    'grok-partial-transport-error',
+    'grok-heartbeat-prompt-fallback',
+    'grok-streamed-terminal-dedupe',
     'grok-streamed-plan-progress',
     'grok-internal-transcript-echo',
     'grok-escaped-whitespace',
@@ -1871,6 +2023,8 @@ async function main() {
           model === 'grok-completion-signal-recovery-failure' ||
           model === 'grok-delayed-recovery-over-legacy-timeout' ||
           model === 'grok-completion-signal-user-input' ||
+          model === 'grok-empty-xml-final' ||
+          model === 'grok-long-malformed-after-tool-result' ||
           model === 'grok-stalled-continuation' ||
           model === 'grok-repeated-stall-fuse' ||
           model === 'grok-partial-emulated-tool-tag' ||
@@ -1879,6 +2033,8 @@ async function main() {
           model === 'grok-current-live-data' ||
           model === 'grok-image-generation' ||
           model === 'grok-delayed-plain-answer' ||
+          model === 'grok-heartbeat-prompt-fallback' ||
+          model === 'grok-streamed-terminal-dedupe' ||
           model === 'grok-streamed-plan-progress' ||
           model === 'grok-internal-transcript-echo' ||
           model === 'grok-escaped-whitespace' ||
@@ -2643,6 +2799,172 @@ async function main() {
   assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.toolIntentRequired, false)
   assert.strictEqual(delayedPlainDiagnostic.emulation.earlyResponseStarted, true)
   upstreamRequests.length = 0
+  const eofWithoutDoneResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-eof-without-done',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Test truncated EOF.' }] }]
+    })
+  })
+  const eofWithoutDoneStream = await eofWithoutDoneResponse.text()
+  const eofWithoutDoneEvents = eofWithoutDoneStream
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('data: {'))
+    .map(line => JSON.parse(line.slice('data: '.length)))
+  const eofWithoutDoneIncomplete = eofWithoutDoneEvents.find(event => event.type === 'response.incomplete')
+
+  assert.strictEqual(eofWithoutDoneResponse.status, 200)
+  assert.ok(eofWithoutDoneStream.includes('PARTIAL_EOF'))
+  assert.ok(eofWithoutDoneStream.includes('event: response.incomplete'))
+  assert.ok(!eofWithoutDoneStream.includes('event: response.completed'))
+  assert.strictEqual(eofWithoutDoneIncomplete?.response?.status, 'incomplete')
+  assert.strictEqual(eofWithoutDoneIncomplete?.response?.incomplete_details?.reason, 'upstream_stream_ended')
+  assert.strictEqual(upstreamRequests.length, 1)
+  upstreamRequests.length = 0
+  const partialTransportResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-partial-transport-error',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Test transport failure.' }] }]
+    })
+  })
+  const partialTransportStream = await withTimeout(
+    partialTransportResponse.text(),
+    3000,
+    'structured incomplete after partial transport error'
+  )
+  const partialTransportEvents = partialTransportStream
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('data: {'))
+    .map(line => JSON.parse(line.slice('data: '.length)))
+  const partialTransportIncomplete = partialTransportEvents.find(event => event.type === 'response.incomplete')
+
+  assert.strictEqual(partialTransportResponse.status, 200)
+  assert.ok(partialTransportStream.includes('PARTIAL_TRANSPORT'))
+  assert.ok(partialTransportStream.includes('event: response.incomplete'))
+  assert.ok(!partialTransportStream.includes('event: response.completed'))
+  assert.strictEqual(partialTransportIncomplete?.response?.status, 'incomplete')
+  assert.strictEqual(partialTransportIncomplete?.response?.incomplete_details?.reason, 'upstream_transport_error')
+  assert.strictEqual(partialTransportIncomplete?.response?.error?.type, 'upstream_transport_error')
+  assert.strictEqual(upstreamRequests.length, 1)
+  upstreamRequests.length = 0
+  const heartbeatWrites = []
+  const heartbeatResponse = {
+    destroyed: false,
+    writableEnded: false,
+    write(chunk) {
+      heartbeatWrites.push(String(chunk))
+      return true
+    }
+  }
+  const stopUnitHeartbeat = startResponsesStreamHeartbeat(heartbeatResponse, 5)
+
+  await new Promise(resolve => setTimeout(resolve, 22))
+  stopUnitHeartbeat()
+  assert.ok(heartbeatWrites.length >= 2)
+  assert.ok(heartbeatWrites.every(chunk => chunk.includes('codex-agent-loop keep-alive')))
+  const heartbeatPromptResponsePromise = fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-heartbeat-prompt-fallback',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Wait for the result.' }] }],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run nested Codex tools.' }]
+    })
+  })
+  let heartbeatPromptResponse
+  let heartbeatPromptReader
+  let heartbeatPromptStream = ''
+
+  try {
+    await withTimeout(heartbeatPromptReached, 3000, 'prompt fallback upstream headers')
+    heartbeatPromptResponse = await withTimeout(
+      heartbeatPromptResponsePromise,
+      3000,
+      'prompt fallback response before upstream body'
+    )
+    heartbeatPromptReader = heartbeatPromptResponse.body.getReader()
+    const decoder = new TextDecoder()
+    const firstChunk = await withTimeout(heartbeatPromptReader.read(), 1000, 'prompt fallback response.created')
+
+    heartbeatPromptStream += decoder.decode(firstChunk.value || new Uint8Array(), { stream: !firstChunk.done })
+    assert.ok(heartbeatPromptStream.includes('response.created'))
+    assert.ok(heartbeatPromptStream.includes('response.in_progress'))
+    const heartbeatChunk = await withTimeout(heartbeatPromptReader.read(), 6500, 'prompt fallback heartbeat')
+
+    heartbeatPromptStream += decoder.decode(heartbeatChunk.value || new Uint8Array(), {
+      stream: !heartbeatChunk.done
+    })
+    assert.ok(heartbeatPromptStream.includes('codex-agent-loop keep-alive'))
+  } finally {
+    const release = releaseHeartbeatPromptResponse
+
+    releaseHeartbeatPromptResponse = null
+    release?.()
+  }
+  if (heartbeatPromptReader) {
+    const decoder = new TextDecoder()
+
+    for (;;) {
+      const { done, value } = await heartbeatPromptReader.read()
+
+      if (done) break
+      heartbeatPromptStream += decoder.decode(value, { stream: true })
+    }
+    heartbeatPromptStream += decoder.decode()
+  } else {
+    heartbeatPromptResponse = await heartbeatPromptResponsePromise
+    heartbeatPromptStream = await heartbeatPromptResponse.text()
+  }
+
+  assert.strictEqual(heartbeatPromptResponse.status, 200)
+  assert.ok(heartbeatPromptStream.includes('HEARTBEAT_OK'))
+  assert.ok(heartbeatPromptStream.includes('event: response.completed'))
+  assert.strictEqual(upstreamRequests.length, 1)
+  upstreamRequests.length = 0
+  const streamedTerminalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-streamed-terminal-dedupe',
+      stream: true,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: '请简单回复你好。' }] }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
+    })
+  })
+  const streamedTerminalBody = await streamedTerminalResponse.text()
+  const streamedTerminalEvents = streamedTerminalBody
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('data: {'))
+    .map(line => JSON.parse(line.slice('data: '.length)))
+  const streamedTerminalDeltas = streamedTerminalEvents
+    .filter(event => event.type === 'response.output_text.delta')
+    .map(event => event.delta)
+    .join('')
+  const streamedTerminalCompleted = streamedTerminalEvents.find(event => event.type === 'response.completed')
+  const streamedTerminalMessages = (streamedTerminalCompleted?.response?.output || []).filter(
+    item =>
+      item.type === 'message' &&
+      item.content?.some(part => part.text?.includes('我接下来会执行 PowerShell 脚本并保存结果。'))
+  )
+  const streamedTerminalDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+
+  assert.strictEqual(streamedTerminalResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 1)
+  assert.strictEqual((streamedTerminalDeltas.match(/我接下来会执行 PowerShell 脚本并保存结果。/g) || []).length, 1)
+  assert.strictEqual((streamedTerminalDeltas.match(/结论：已完成脚本保存。/g) || []).length, 1)
+  assert.strictEqual(streamedTerminalMessages.length, 1)
+  assert.strictEqual(streamedTerminalMessages[0].phase, 'commentary')
+  assert.strictEqual(streamedTerminalDiagnostic.liveProgressCount, 1)
+  assert.strictEqual(streamedTerminalDiagnostic.finalAssistantAlreadyPublished, true)
+  upstreamRequests.length = 0
   const streamedPlanResponsePromise = fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -3184,6 +3506,77 @@ async function main() {
   assert.strictEqual(completionSignalDiagnostic.acceptedCompletionSignal, true)
   assert.deepStrictEqual(completionSignalDiagnostic.recoveryDecisionKinds, ['complete'])
   assert.strictEqual(completionSignalDiagnostic.acceptedRecoveryDecision, 'complete')
+  upstreamRequests.length = 0
+  const emptyXmlFinalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-empty-xml-final',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '验证并报告最终结果。' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_empty_xml_final',
+          input: 'text("verified")'
+        },
+        { type: 'custom_tool_call_output', call_id: 'call_empty_xml_final', output: 'verified' }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run nested Codex tools.' }]
+    })
+  })
+  const emptyXmlFinalStream = await emptyXmlFinalResponse.text()
+  const emptyXmlFinalDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+
+  assert.strictEqual(emptyXmlFinalResponse.status, 200)
+  assert.ok(emptyXmlFinalStream.includes('我接下来会执行验证脚本。'))
+  assert.ok(emptyXmlFinalStream.includes('结论：已完成验证。'))
+  assert.ok(!emptyXmlFinalStream.includes('```xml'))
+  assert.ok(!emptyXmlFinalStream.includes('```x'))
+  assert.ok(!emptyXmlFinalStream.includes(AGENT_COMPLETION_SIGNAL))
+  assert.strictEqual(emptyXmlFinalDiagnostic.toolResultPresent, true)
+  assert.strictEqual(emptyXmlFinalDiagnostic.retryAttempted, false)
+  assert.strictEqual(emptyXmlFinalDiagnostic.acceptedCompletionSignal, true)
+  upstreamRequests.length = 0
+  const longMalformedResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-long-malformed-after-tool-result',
+      stream: true,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '执行剩余脚本并验证结果。' }]
+        },
+        {
+          type: 'custom_tool_call',
+          name: 'exec',
+          call_id: 'call_long_malformed',
+          input: 'const first = await tools.shell_command({command:"Write-Output first"}); text(first);'
+        },
+        { type: 'custom_tool_call_output', call_id: 'call_long_malformed', output: 'first done' }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run nested Codex tools.' }]
+    })
+  })
+  const longMalformedStream = await longMalformedResponse.text()
+  const longMalformedDiagnostic = proxyDiagnostics.at(-1).emulation.continuationRecovery
+
+  assert.strictEqual(longMalformedResponse.status, 200)
+  assert.ok(longMalformedStream.includes('LONG_RECOVERED'))
+  assert.ok(longMalformedStream.includes('response.custom_tool_call_input.done'))
+  assert.ok(!longMalformedStream.includes('```xml'))
+  assert.strictEqual(longMalformedDiagnostic.missingCompletionSignal, true)
+  assert.strictEqual(longMalformedDiagnostic.retryAttempted, true)
+  assert.strictEqual(longMalformedDiagnostic.recoveryAttempts, 1)
+  assert.strictEqual(longMalformedDiagnostic.retryProducedToolCall, true)
   upstreamRequests.length = 0
   const exhaustedCompletionSignalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

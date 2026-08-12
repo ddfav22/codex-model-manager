@@ -41,9 +41,11 @@ const {
 const { emulatedToolSyntaxStart, partialControlMarkerStart } = require('./protocol/emulatedToolSyntax')
 const { encodedToolFrameStart, parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
 const {
+  createVisibleAssistantStreamSanitizer,
   decodeRepeatedEscapedLineBreaks,
   normalizeVisibleAssistantText,
   stripEmptyInternalXml,
+  stripEmptyXmlMarkdownFence,
   stripToolHtmlScaffold
 } = require('./protocol/visibleAssistantText')
 
@@ -194,6 +196,9 @@ assert.strictEqual(hasAgentCompletionSignal(`${signedResult}\n附加文字`), fa
 assert.strictEqual(agentCompletionResult(signedResult), '已保存文件并完成全部任务。')
 assert.strictEqual(agentCompletionResult(`已完成${AGENT_COMPLETION_SIGNAL}`), '')
 assert.strictEqual(requiresAgentCompletionSignal('已保存文件并完成全部任务。', { afterToolResult: true }), true)
+assert.strictEqual(requiresAgentCompletionSignal('', { afterToolResult: true }), true)
+assert.strictEqual(requiresAgentCompletionSignal('<codex_no_tool>', { afterToolResult: true }), true)
+assert.strictEqual(requiresAgentCompletionSignal('x'.repeat(1801), { afterToolResult: true }), true)
 assert.strictEqual(requiresAgentCompletionSignal(signedResult, { afterToolResult: true }), false)
 assert.strictEqual(requiresAgentCompletionSignal(`已完成${AGENT_COMPLETION_SIGNAL}`, { afterToolResult: true }), true)
 assert.strictEqual(requiresAgentCompletionSignal(AGENT_COMPLETION_SIGNAL, { afterToolResult: true }), true)
@@ -331,6 +336,21 @@ assert.strictEqual(normalizeVisibleAssistantText('"\\n\\n\\n\\n"'), '')
 assert.strictEqual(normalizeVisibleAssistantText('first\\n\\n\\nsecond'), 'first\n\nsecond')
 assert.strictEqual(stripEmptyInternalXml('before<codex_tool_call></codex_tool_call>after'), 'beforeafter')
 assert.strictEqual(stripEmptyInternalXml('<tool_result />\n<function_call></function_call>done'), '\ndone')
+assert.strictEqual(stripEmptyXmlMarkdownFence('before\n```xml\n\n```\nafter'), 'before\n\nafter')
+assert.strictEqual(stripEmptyXmlMarkdownFence('```XML \r\n \t\r\n```'), '')
+assert.strictEqual(stripEmptyXmlMarkdownFence('```xml\n<root />\n```'), '```xml\n<root />\n```')
+const emptyXmlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const emptyXmlStreamChunks = [
+  emptyXmlStreamSanitizer.push('继续执行。\n```x'),
+  emptyXmlStreamSanitizer.push('ml\n'),
+  emptyXmlStreamSanitizer.push(' \t\n'),
+  emptyXmlStreamSanitizer.push('```\n完成。'),
+  emptyXmlStreamSanitizer.finish()
+]
+const emptyXmlStreamOutput = emptyXmlStreamChunks.join('')
+
+assert.ok(emptyXmlStreamChunks.every(chunk => !chunk.includes('```')))
+assert.strictEqual(normalizeVisibleAssistantText(emptyXmlStreamOutput), '继续执行。\n\n完成。')
 assert.strictEqual(
   stripEmptyInternalXml('<note></note><xml></xml><note>value</note>'),
   '<note></note><xml></xml><note>value</note>'

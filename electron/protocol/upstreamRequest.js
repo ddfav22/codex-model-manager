@@ -97,7 +97,7 @@ async function readResponseJsonLimited(response, limit = MAX_UPSTREAM_BUFFER_BYT
 }
 
 async function pipeResponseBodyLimited(upstream, response, headers = {}, limit = MAX_UPSTREAM_BUFFER_BYTES) {
-  response.writeHead(upstream.status, headers)
+  if (!response.headersSent) response.writeHead(upstream.status, headers)
 
   if (!upstream.body) {
     response.end()

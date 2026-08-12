@@ -71,7 +71,11 @@ const {
 } = require('./protocol/internalToolTranscript')
 const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
 const { parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
-const { normalizeVisibleAssistantText, sanitizeVisibleAssistantDelta } = require('./protocol/visibleAssistantText')
+const {
+  createVisibleAssistantStreamSanitizer,
+  normalizeVisibleAssistantText,
+  sanitizeVisibleAssistantDelta
+} = require('./protocol/visibleAssistantText')
 const {
   generateNewApiImage,
   handleImageMcpRequest,
@@ -97,6 +101,7 @@ const UPSTREAM_TRANSIENT_MAX_RETRIES = 1
 const UPSTREAM_TRANSIENT_RETRY_BASE_MS = 1000
 const UPSTREAM_FAILURE_CLASSIFICATION_BYTES = 64 * 1024
 const responseEventSequences = new WeakMap()
+const responseStreamStates = new WeakMap()
 
 function jsonByteLength(value) {
   try {
@@ -1123,9 +1128,17 @@ async function synthesizeEmulatedToolResponse(
   }
   const createProgressObserver = () => {
     let buffer = ''
-    let emittedLength = 0
+    let consumedSafeLength = 0
     let streaming = false
     let closed = false
+    const streamSanitizer = createVisibleAssistantStreamSanitizer()
+    const publishSanitizedDelta = content => {
+      const visible = sanitizeVisibleAssistantDelta(
+        stripAgentControlSignals(stripInternalToolTranscript(content))
+      )
+
+      publishProgressDelta(visible)
+    }
 
     const safeText = (includePartial = false) => {
       const syntaxStart = emulatedToolSyntaxStart(buffer, { includePartial })
@@ -1147,9 +1160,11 @@ async function synthesizeEmulatedToolResponse(
         streaming = true
         callProgress(onProgressStart)
       }
-      if (visible.length <= emittedLength) return
-      publishProgressDelta(visible.slice(emittedLength))
-      emittedLength = visible.length
+      const safe = safeText(true)
+
+      if (safe.length <= consumedSafeLength) return
+      publishSanitizedDelta(streamSanitizer.push(safe.slice(consumedSafeLength)))
+      consumedSafeLength = safe.length
     }
     const finish = content => {
       if (closed) return false
@@ -1158,7 +1173,12 @@ async function synthesizeEmulatedToolResponse(
       const visible = visibleAssistantText(safeText())
 
       if (!streaming) return false
-      if (visible.length > emittedLength) publishProgressDelta(visible.slice(emittedLength))
+      const safe = safeText()
+
+      if (safe.length > consumedSafeLength) {
+        publishSanitizedDelta(streamSanitizer.push(safe.slice(consumedSafeLength)))
+      }
+      publishSanitizedDelta(streamSanitizer.finish())
       callProgress(onProgressEnd)
       const remembered = rememberProgress(visible)
 
@@ -1382,11 +1402,16 @@ async function synthesizeEmulatedToolResponse(
   const acceptedCompletionSignal = !toolCall && hasAgentCompletionSignal(assistant.content)
 
   if (!toolCall) assistant = { ...assistant, content: visibleAssistantText(assistant.content) }
+  const finalAssistantText = String(assistant.content || '')
+  const finalAssistantAlreadyPublished =
+    !toolCall && Boolean(finalAssistantText) && publishedProgressMessages.has(finalAssistantText)
   const visibleProgressMessages =
     toolCall || acceptedRetry || publishedProgressMessages.size
-      ? progressMessages.filter(text => toolCall || text !== String(assistant.content || '').trim())
+      ? progressMessages.filter(text => toolCall || text !== finalAssistantText.trim())
       : []
   const pendingProgressMessages = visibleProgressMessages.filter(text => !publishedProgressMessages.has(text))
+
+  if (finalAssistantAlreadyPublished) assistant = { ...assistant, content: '' }
   const id = assistant.id || `chatcmpl-${randomUUID()}`
   const model = assistant.model || request.model
   const created = Math.floor(Date.now() / 1000)
@@ -1449,6 +1474,7 @@ async function synthesizeEmulatedToolResponse(
       firstProgressDeltaMs,
       progressDeltaCount,
       bufferedProgressCount: pendingProgressMessages.length,
+      finalAssistantAlreadyPublished,
       exhausted: exhaustedRecovery,
       safetyStopAppended: false,
       safetyStopTriggered,
@@ -1586,10 +1612,15 @@ function createStreamState(body, toolNames, response) {
     usage: null,
     progressOutput: [],
     liveProgress: null,
+    sawDone: false,
+    terminalType: '',
+    incompleteReason: '',
     reasoningClosed: false,
     outputOffset: 0,
     finished: false
   }
+
+  responseStreamStates.set(response, state)
 
   return state
 }
@@ -1844,9 +1875,13 @@ function consumeChatChunk(state, chunk) {
   }
 }
 
-function finishResponseStream(state) {
+function finishResponseStream(state, options = {}) {
   if (state.finished) return
   state.finished = true
+  const terminalType = String(options.terminalType || state.terminalType || '')
+  const completed = options.completed === true || state.sawDone || terminalType === 'response.completed'
+  const status = completed ? 'completed' : 'incomplete'
+  const incompleteReason = String(options.reason || state.incompleteReason || 'upstream_stream_ended')
   finishLiveProgress(state)
   ensureResponseStarted(state)
   const output = [...state.progressOutput]
@@ -1920,8 +1955,14 @@ function finishResponseStream(state) {
     output.push(item)
   }
 
-  writeEvent(state.response, 'response.completed', {
-    response: baseResponse(state, 'completed', output, responseUsageFromChat(state.usage || {}))
+  const responsePayload = baseResponse(state, status, output, responseUsageFromChat(state.usage || {}))
+
+  if (!completed) {
+    responsePayload.incomplete_details = { reason: incompleteReason }
+    if (options.error) responsePayload.error = options.error
+  }
+  writeEvent(state.response, completed ? 'response.completed' : 'response.incomplete', {
+    response: responsePayload
   })
   state.response.end()
 }
@@ -1951,46 +1992,112 @@ function startResponsesStreamHeartbeat(response, intervalMs = 5000) {
   return () => clearInterval(timer)
 }
 
+function incompleteReasonForTransport(kind, error) {
+  const value = `${String(kind || '')} ${String(error?.message || error || '')}`.toLowerCase()
+
+  if (/timeout|timed.?out/.test(value)) return 'upstream_timeout'
+  if (/client_/.test(value)) return 'client_cancelled'
+
+  return 'upstream_transport_error'
+}
+
+function finishIncompleteResponseAfterError(response, kind, error) {
+  if (response.writableEnded || response.destroyed) return false
+
+  const state = responseStreamStates.get(response)
+  const reason = incompleteReasonForTransport(kind, error)
+  const errorPayload = {
+    type: reason,
+    message: String(error?.message || error || '上游响应未完成').slice(0, 500)
+  }
+
+  if (state) {
+    finishResponseStream(state, { reason, error: errorPayload })
+
+    return true
+  }
+
+  ensureResponsesStreamHeaders(response)
+  response.write(
+    `event: response.incomplete\ndata: ${JSON.stringify({
+      type: 'response.incomplete',
+      response: {
+        object: 'response',
+        status: 'incomplete',
+        error: errorPayload,
+        incomplete_details: { reason },
+        output: []
+      }
+    })}\n\n`
+  )
+  response.end()
+
+  return true
+}
+
 async function pipeChatStreamToResponses(upstream, body, toolNames, response, preparedState = null) {
   ensureResponsesStreamHeaders(response)
   const state = preparedState || createStreamState(body, toolNames, response)
+  const stopHeartbeat = startResponsesStreamHeartbeat(response)
 
-  emitProgressMessages(state, upstream.codexProgressMessages)
-  const parser = createParser({
-    onEvent(event) {
-      if (event.data === '[DONE]') {
-        finishResponseStream(state)
-        return
+  try {
+    emitProgressMessages(state, upstream.codexProgressMessages)
+    const parser = createParser({
+      onEvent(event) {
+        if (event.data === '[DONE]') {
+          state.sawDone = true
+          state.terminalType = 'done'
+          finishResponseStream(state)
+          return
+        }
+
+        try {
+          const chunk = JSON.parse(event.data)
+
+          if (['response.completed', 'response.failed', 'response.incomplete'].includes(String(chunk?.type || ''))) {
+            state.terminalType = String(chunk.type)
+            state.incompleteReason =
+              chunk.type === 'response.incomplete'
+                ? String(chunk.response?.incomplete_details?.reason || 'upstream_incomplete')
+                : ''
+            finishResponseStream(state, {
+              completed: chunk.type === 'response.completed',
+              terminalType: state.terminalType,
+              reason: state.incompleteReason
+            })
+            return
+          }
+
+          consumeChatChunk(state, chunk)
+        } catch {
+          // Ignore malformed provider chunks while keeping the stream alive.
+        }
       }
+    })
+    const reader = upstream.body.getReader()
+    const decoder = new TextDecoder()
+    let byteCount = 0
 
-      try {
-        consumeChatChunk(state, JSON.parse(event.data))
-      } catch {
-        // Ignore malformed provider chunks while keeping the stream alive.
+    while (!state.finished) {
+      const { done, value } = await reader.read()
+
+      if (done) break
+      byteCount += value.byteLength
+      if (byteCount > MAX_UPSTREAM_BUFFER_BYTES) {
+        await reader.cancel('上游响应过大')
+        throw new Error(`上游响应超过 ${MAX_UPSTREAM_BUFFER_BYTES} 字节限制`)
       }
+      parser.feed(decoder.decode(value, { stream: true }))
     }
-  })
-  const reader = upstream.body.getReader()
-  const decoder = new TextDecoder()
-  let byteCount = 0
 
-  while (!state.finished) {
-    const { done, value } = await reader.read()
+    const tail = decoder.decode()
 
-    if (done) break
-    byteCount += value.byteLength
-    if (byteCount > MAX_UPSTREAM_BUFFER_BYTES) {
-      await reader.cancel('上游响应过大')
-      throw new Error(`上游响应超过 ${MAX_UPSTREAM_BUFFER_BYTES} 字节限制`)
-    }
-    parser.feed(decoder.decode(value, { stream: true }))
+    if (tail) parser.feed(tail)
+    parser.reset({ consume: true })
+    finishResponseStream(state)
+  } finally {
+    stopHeartbeat()
   }
-
-  const tail = decoder.decode()
-
-  if (tail) parser.feed(tail)
-  parser.reset({ consume: true })
-  finishResponseStream(state)
 }
 
 async function sendNonStreamingResponse(upstream, body, toolNames, response) {
@@ -2570,7 +2677,15 @@ function responseToolNames(tools) {
 }
 
 async function pipeFetchBody(upstream, response, headers = {}) {
-  return pipeResponseBodyLimited(upstream, response, headers)
+  const contentType = String(headers['content-type'] || upstream.headers.get('content-type') || '').toLowerCase()
+  if (contentType.includes('text/event-stream') && !response.headersSent) response.writeHead(upstream.status, headers)
+  const stopHeartbeat = contentType.includes('text/event-stream') ? startResponsesStreamHeartbeat(response) : () => {}
+
+  try {
+    return await pipeResponseBodyLimited(upstream, response, headers)
+  } finally {
+    stopHeartbeat()
+  }
 }
 
 function upstreamResponseHeaders(upstream, stream) {
@@ -2878,18 +2993,25 @@ async function handleResponsesRequest(
     const imageRecoveryInstruction = emulatedImageTool
       ? `For image generation, call the exact allowed ${emulatedImageTool.name} tool with a prompt argument; reading an image skill is not completion. `
       : 'For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. '
-    const fallbackUpstream = await sendUpstream(emulation.payload)
+    emulatedStreamState = converted.request.stream ? createStreamState(body, converted.toolNames, response) : null
+    let stopHeartbeat = () => {}
+
+    if (emulatedStreamState) {
+      ensureResponsesStreamHeaders(response)
+      ensureResponseStarted(emulatedStreamState)
+      stopHeartbeat = startResponsesStreamHeartbeat(response)
+    }
+
+    let fallbackUpstream
+
+    try {
+      fallbackUpstream = await sendUpstream(emulation.payload)
+    } catch (error) {
+      stopHeartbeat()
+      throw error
+    }
 
     if (fallbackUpstream.ok) {
-      emulatedStreamState = converted.request.stream ? createStreamState(body, converted.toolNames, response) : null
-      let stopHeartbeat = () => {}
-
-      if (emulatedStreamState) {
-        ensureResponsesStreamHeaders(response)
-        ensureResponseStarted(emulatedStreamState)
-        stopHeartbeat = startResponsesStreamHeartbeat(response)
-      }
-
       try {
         let structuredRecoverySupported = true
         let recoveryContextMessageCount = 0
@@ -3070,6 +3192,7 @@ async function handleResponsesRequest(
         }
       }
     } else {
+      stopHeartbeat()
       upstream = fallbackUpstream
       errorBody = await chatUpstreamErrorBody(fallbackUpstream)
     }
@@ -3092,6 +3215,15 @@ async function handleResponsesRequest(
       failureDiagnostic.upstreamFailureKind,
       failureDiagnostic.upstreamRetryCount
     )
+
+    if (response.headersSent) {
+      finishIncompleteResponseAfterError(
+        response,
+        failureDiagnostic.upstreamFailureKind,
+        new Error(errorBody || userMessage || '上游工具兼容请求失败')
+      )
+      return
+    }
 
     if (userMessage) {
       response.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8' })
@@ -3272,7 +3404,7 @@ function createProtocolProxy({
         streamPartialContent: retryDiagnostic.partialContent === true
       })
       if (response.headersSent) {
-        if (!response.writableEnded) response.end()
+        finishIncompleteResponseAfterError(response, failureKind, error)
         return
       }
 
@@ -3352,6 +3484,7 @@ module.exports = {
   recoveryFailureKindForStatus,
   recoveryFailureMessage,
   runWithAbortTimeout,
+  startResponsesStreamHeartbeat,
   upstreamFailureKind,
   upstreamRejectsNativeTools,
   upstreamModelsUrl,

@@ -32,7 +32,10 @@ function requiresAgentCompletionSignal(content, options = {}) {
 
   const text = String(content || '').trim()
 
-  if (!text || isMalformedToolRecovery(text)) return false
+  // A tool-result turn must not be closed as a normal answer when the
+  // adapter emitted an empty, malformed, or oversized envelope. Those
+  // responses used to bypass recovery and made Codex appear disconnected.
+  if (!text) return true
   if (awaitsExplicitUserInput(text)) return hasAgentCompletionSignal(text)
   if (!hasAgentCompletionSignal(text)) return true
 
