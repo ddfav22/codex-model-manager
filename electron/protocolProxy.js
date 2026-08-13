@@ -31,6 +31,7 @@ const {
   awaitsExplicitUserInput,
   followsImmediateToolResult,
   followsImmediateResponsesToolResult,
+  hasAgenticToolHistory,
   hasAgentCompletionSignal,
   isMalformedToolRecovery,
   looksLikeStalledToolContinuation,
@@ -358,19 +359,19 @@ function recoveryFailureMessage(failureKinds) {
   const kinds = Array.isArray(failureKinds) ? failureKinds : []
 
   if (kinds.includes('timeout') || kinds.includes('http_timeout')) {
-    return '模型续接等待 60 秒仍未返回，自动重试已暂停；渠道恢复后回复“继续”即可从当前任务继续。'
+    return '模型续接等待 60 秒仍未返回，任务未完成；请检查渠道恢复状态后手动重新提交。'
   }
   if (kinds.includes('http_rate_limit')) {
-    return '模型渠道当前请求过多，自动重试已暂停；稍后回复“继续”即可从当前任务继续。'
+    return '模型渠道当前请求过多，任务未完成；请稍后检查渠道状态后手动重新提交。'
   }
   if (kinds.includes('http_server_error')) {
-    return '模型渠道服务暂时不可用，自动重试已暂停；服务恢复后回复“继续”即可从当前任务继续。'
+    return '模型渠道服务暂时不可用，任务未完成；请在服务恢复后手动重新提交。'
   }
   if (kinds.includes('http_request_rejected')) {
-    return '模型渠道拒绝了续接请求，请检查渠道与模型配置后回复“继续”。'
+    return '模型渠道拒绝了续接请求，任务未完成；请检查渠道与模型配置后手动重新提交。'
   }
 
-  return '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
+  return '模型渠道连续连接失败，任务未完成；请检查网络或上游服务后手动重新提交。'
 }
 
 async function runWithAbortTimeout(parentSignal, timeoutMs, task) {
@@ -1116,6 +1117,9 @@ async function synthesizeEmulatedToolResponse(
   const sourceFollowsToolResult = followsImmediateResponsesToolResult(sourceInput)
   const followsToolResult = convertedFollowsToolResult || sourceFollowsToolResult
   const likelyRequiresTool = requestLikelyRequiresTool(request?.messages, allowed)
+  const toolHistoryPresent = hasAgenticToolHistory(sourceInput)
+  const agenticTurn = likelyRequiresTool || (toolHistoryPresent && allowed.size > 0)
+  const completionSignalRequired = followsToolResult || agenticTurn
   const visibleAssistantText = content =>
     normalizeVisibleAssistantText(stripInternalToolTranscript(stripAgentControlSignals(content)))
   const rememberProgress = content => {
@@ -1206,8 +1210,16 @@ async function synthesizeEmulatedToolResponse(
   const initialNaturalStall =
     !toolCall && looksLikeStalledToolContinuation(firstContent, { afterToolResult: followsToolResult })
   const initialMissingCompletionSignal =
-    !toolCall && requiresAgentCompletionSignal(firstContent, { afterToolResult: followsToolResult })
-  const initialToolOmission = toolIntentRequired && !toolCall && !awaitsExplicitUserInput(firstContent)
+    !toolCall &&
+    requiresAgentCompletionSignal(firstContent, {
+      afterToolResult: followsToolResult,
+      agenticTurn
+    })
+  const initialToolOmission =
+    toolIntentRequired &&
+    !toolCall &&
+    !hasAgentCompletionSignal(firstContent) &&
+    !awaitsExplicitUserInput(firstContent)
   const initialStalledContinuation = initialNaturalStall || initialMissingCompletionSignal || initialToolOmission
   const stalledAfterToolResult = followsToolResult && initialStalledContinuation
   const inferredTerminalCandidate = false
@@ -1321,9 +1333,16 @@ async function synthesizeEmulatedToolResponse(
     const retryMissingCompletionSignal =
       !retriedToolCall &&
       !explicitUserInputRequired &&
-      requiresAgentCompletionSignal(retryContent, { afterToolResult: followsToolResult })
+      requiresAgentCompletionSignal(retryContent, {
+        afterToolResult: followsToolResult,
+        agenticTurn
+      })
     const retryToolOmission =
-      toolIntentRequired && !retriedToolCall && !explicitUserInputRequired && !awaitsExplicitUserInput(retryContent)
+      toolIntentRequired &&
+      !retriedToolCall &&
+      !explicitUserInputRequired &&
+      !hasAgentCompletionSignal(retryContent) &&
+      !awaitsExplicitUserInput(retryContent)
     const retryStalledContinuation = retryNaturalStall || retryMissingCompletionSignal || retryToolOmission
 
     if (retryStalledContinuation) {
@@ -1349,6 +1368,7 @@ async function synthesizeEmulatedToolResponse(
       !retryToolOmission &&
       shouldAcceptContinuationRecovery({
         afterToolResult: followsToolResult,
+        agenticTurn,
         explicitUserInputRequired,
         stalledAfterToolResult: followsToolResult && currentStalledContinuation,
         stalledContinuation: currentStalledContinuation,
@@ -1381,12 +1401,14 @@ async function synthesizeEmulatedToolResponse(
     (Boolean(recoveryCircuitBreaker) ||
       (!unlimitedRecovery && recoveryAttempts >= maximumRecoveryAttempts) ||
       recoveryTimeBudgetExhausted)
+  const incompleteReason =
+    !toolCall && initialStalledContinuation && !acceptedRetry ? 'agent_loop_recovery_exhausted' : ''
 
   if (!toolCall && exhaustedRecovery) {
     const finalText = recoveryCircuitBreaker
       ? recoveryCircuitBreaker === 'consecutive_transport_failures'
         ? recoveryFailureMessage(recoveryFailureKinds)
-        : '模型连续返回相同的中间计划，自动续接已暂停；回复“继续”即可从当前任务继续。'
+        : '模型连续返回相同的中间计划，任务未完成；请检查上游响应后手动重新提交。'
       : isMalformedToolRecovery(initialAssistant.content)
         ? 'The upstream model did not produce a valid Codex tool call.'
         : hasAgentCompletionSignal(initialAssistant.content)
@@ -1449,8 +1471,10 @@ async function synthesizeEmulatedToolResponse(
       stalledAfterToolResult,
       naturalStall: initialNaturalStall,
       toolIntentRequired,
+      agenticTurn,
+      toolHistoryPresent,
       initialToolOmission,
-      completionSignalRequired: followsToolResult,
+      completionSignalRequired,
       completionSignalPresent: hasAgentCompletionSignal(firstContent),
       missingCompletionSignal: initialMissingCompletionSignal,
       retryAttempted: recoveryAttempts > 0,
@@ -1480,8 +1504,12 @@ async function synthesizeEmulatedToolResponse(
       safetyStopTriggered,
       acceptedCompletionSignal,
       inferredTerminalCandidate,
-      inferredCompletionAccepted
-    }
+      inferredCompletionAccepted,
+      incomplete: Boolean(incompleteReason),
+      incompleteReason
+    },
+    incomplete: Boolean(incompleteReason),
+    incompleteReason
   }
 
   if (request.stream === false) {
@@ -1606,6 +1634,8 @@ function createStreamState(body, toolNames, response) {
     started: false,
     textStarted: false,
     text: '',
+    textStreamSanitizer: createVisibleAssistantStreamSanitizer(),
+    reasoningStreamSanitizer: createVisibleAssistantStreamSanitizer(),
     messageId: `msg_${randomUUID().replace(/-/g, '')}`,
     tools: new Map(),
     announcedToolIds: new Set(),
@@ -1615,6 +1645,8 @@ function createStreamState(body, toolNames, response) {
     sawDone: false,
     terminalType: '',
     incompleteReason: '',
+    emulationIncomplete: false,
+    emulationIncompleteReason: '',
     reasoningClosed: false,
     outputOffset: 0,
     finished: false
@@ -1826,8 +1858,10 @@ function consumeChatChunk(state, chunk) {
 
   for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
     const delta = choice.delta && Object.keys(choice.delta).length ? choice.delta : choice.message || choice.delta || {}
-    const reasoning = sanitizeVisibleAssistantDelta(reasoningFromChatDelta(delta))
-    const text = sanitizeVisibleAssistantDelta(textFromChatDelta(delta.content))
+    const reasoning = sanitizeVisibleAssistantDelta(
+      state.reasoningStreamSanitizer.push(reasoningFromChatDelta(delta))
+    )
+    const text = sanitizeVisibleAssistantDelta(state.textStreamSanitizer.push(textFromChatDelta(delta.content)))
 
     if (reasoning && !state.reasoningClosed) appendLiveProgress(state, reasoning)
 
@@ -1875,11 +1909,33 @@ function consumeChatChunk(state, chunk) {
   }
 }
 
+function flushVisibleAssistantStreams(state) {
+  const reasoning = sanitizeVisibleAssistantDelta(state.reasoningStreamSanitizer.finish())
+  const text = sanitizeVisibleAssistantDelta(state.textStreamSanitizer.finish())
+
+  if (reasoning && !state.reasoningClosed) appendLiveProgress(state, reasoning)
+  if (!text) return
+
+  state.reasoningClosed = true
+  finishLiveProgress(state)
+  ensureTextStarted(state)
+  state.text += text
+  writeEvent(state.response, 'response.output_text.delta', {
+    item_id: state.messageId,
+    output_index: state.outputOffset,
+    content_index: 0,
+    delta: text,
+    logprobs: []
+  })
+}
+
 function finishResponseStream(state, options = {}) {
   if (state.finished) return
+  flushVisibleAssistantStreams(state)
   state.finished = true
   const terminalType = String(options.terminalType || state.terminalType || '')
-  const completed = options.completed === true || state.sawDone || terminalType === 'response.completed'
+  const completed =
+    options.completed !== false && (options.completed === true || state.sawDone || terminalType === 'response.completed')
   const status = completed ? 'completed' : 'incomplete'
   const incompleteReason = String(options.reason || state.incompleteReason || 'upstream_stream_ended')
   finishLiveProgress(state)
@@ -2045,9 +2101,19 @@ async function pipeChatStreamToResponses(upstream, body, toolNames, response, pr
     const parser = createParser({
       onEvent(event) {
         if (event.data === '[DONE]') {
-          state.sawDone = true
-          state.terminalType = 'done'
-          finishResponseStream(state)
+          if (state.emulationIncomplete) {
+            state.terminalType = 'response.incomplete'
+            state.incompleteReason = state.emulationIncompleteReason || 'agent_loop_recovery_exhausted'
+            finishResponseStream(state, {
+              completed: false,
+              terminalType: state.terminalType,
+              reason: state.incompleteReason
+            })
+          } else {
+            state.sawDone = true
+            state.terminalType = 'done'
+            finishResponseStream(state)
+          }
           return
         }
 
@@ -2177,8 +2243,17 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
     )
   }
 
+  const incompleteReason = String(upstream.codexToolEmulation?.incompleteReason || '')
+  const responsePayload = baseResponse(
+    state,
+    incompleteReason ? 'incomplete' : 'completed',
+    output,
+    responseUsageFromChat(state.usage || {})
+  )
+
+  if (incompleteReason) responsePayload.incomplete_details = { reason: incompleteReason }
   response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-  response.end(JSON.stringify(baseResponse(state, 'completed', output, responseUsageFromChat(state.usage || {}))))
+  response.end(JSON.stringify(responsePayload))
 }
 
 function readJsonBody(request, limit = 25 * 1024 * 1024) {
@@ -3165,6 +3240,12 @@ async function handleResponsesRequest(
           }
         )
         if (upstream.codexToolEmulation) {
+          if (emulatedStreamState) {
+            emulatedStreamState.emulationIncomplete = upstream.codexToolEmulation.incomplete === true
+            emulatedStreamState.emulationIncompleteReason = String(
+              upstream.codexToolEmulation.incompleteReason || 'agent_loop_recovery_exhausted'
+            )
+          }
           upstream.codexToolEmulation.contextContinuity = {
             ...emulation.contextContinuity,
             recoveryContextMessageCount

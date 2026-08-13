@@ -5,6 +5,7 @@ const {
   AGENT_SAFETY_STOP_SIGNAL,
   agentCompletionResult,
   awaitsExplicitUserInput,
+  hasAgenticToolHistory,
   hasAgentCompletionSignal,
   looksLikeStalledToolContinuation,
   requiresAgentCompletionSignal,
@@ -315,6 +316,13 @@ assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
 assert.strictEqual(isInterruptedContinuationText('继续安装并验证 Python'), true)
 assert.strictEqual(isInterruptedContinuationText('检查另一个新任务'), false)
+const agenticHistoryFixture = [
+  { type: 'custom_tool_call', name: 'exec', call_id: 'call_history' },
+  { type: 'custom_tool_call_output', call_id: 'call_history', output: 'done' },
+  { type: 'message', role: 'user', content: [{ type: 'input_text', text: '报告当前状态。' }] }
+]
+assert.strictEqual(hasAgenticToolHistory(agenticHistoryFixture), true)
+assert.strictEqual(hasAgenticToolHistory([{ type: 'message', role: 'user', content: '普通问候' }]), false)
 assert.strictEqual(partialControlMarkerStart('Ping 已通。\n<codex_tool_cal'), 'Ping 已通。\n'.length)
 assert.strictEqual(partialControlMarkerStart('仍在处理。\n[CODEX_AGENT_LOOP_COM'), '仍在处理。\n'.length)
 assert.strictEqual(
@@ -351,6 +359,52 @@ const emptyXmlStreamOutput = emptyXmlStreamChunks.join('')
 
 assert.ok(emptyXmlStreamChunks.every(chunk => !chunk.includes('```')))
 assert.strictEqual(normalizeVisibleAssistantText(emptyXmlStreamOutput), '继续执行。\n\n完成。')
+
+const splitFenceRegressionCases = [
+  {
+    name: 'empty-closed-fence',
+    chunks: ['```xml\n', '\n', '```'],
+    expected: ''
+  },
+  {
+    name: 'half-opening-fence',
+    chunks: ['```x', 'ml\n', '\n'],
+    expected: ''
+  },
+  {
+    name: 'nonempty-cross-chunk-closed-fence',
+    chunks: ['```x', 'ml\n', '<root>', 'ok</root>\n', '```'],
+    expected: '```xml\n<root>ok</root>\n```'
+  }
+]
+
+for (const regressionCase of splitFenceRegressionCases) {
+  const sanitizer = createVisibleAssistantStreamSanitizer()
+  const emissions = regressionCase.chunks.map(chunk => sanitizer.push(chunk))
+  emissions.push(sanitizer.finish())
+  const output = emissions.join('')
+
+  assert.strictEqual(output, regressionCase.expected, regressionCase.name)
+  if (regressionCase.name === 'nonempty-cross-chunk-closed-fence') {
+    assert.deepStrictEqual(emissions.slice(0, -1), ['', '', '', '', regressionCase.expected], regressionCase.name)
+  } else {
+    assert.ok(emissions.every(chunk => !chunk.includes('```')), regressionCase.name)
+  }
+}
+
+const plainStreamSanitizer = createVisibleAssistantStreamSanitizer()
+assert.strictEqual(plainStreamSanitizer.push('普通正文'), '普通正文')
+assert.strictEqual(plainStreamSanitizer.push('\n```js\nconst value = 1\n```'), '\n```js\nconst value = 1\n```')
+assert.strictEqual(plainStreamSanitizer.finish(), '')
+
+const mixedStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const mixedStreamOutput = [
+  mixedStreamSanitizer.push('前文\n```xml\n'),
+  mixedStreamSanitizer.push(' \t\n'),
+  mixedStreamSanitizer.push('```\n后文'),
+  mixedStreamSanitizer.finish()
+].join('')
+assert.strictEqual(mixedStreamOutput, '前文\n\n后文')
 assert.strictEqual(
   stripEmptyInternalXml('<note></note><xml></xml><note>value</note>'),
   '<note></note><xml></xml><note>value</note>'

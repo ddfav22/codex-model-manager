@@ -18,15 +18,16 @@ function createVisibleAssistantStreamSanitizer() {
       const opening = /(^|\r?\n)```xml[ \t]*\r?\n/i.exec(buffer)
 
       if (!opening) {
+        const lineStart = buffer.lastIndexOf('\n') + 1
+        const candidate = buffer.slice(lineStart)
+        const pendingOpening = /^```x(?:m(?:l)?)?[ \t]*\r?$/i.test(candidate)
+
         if (final) {
-          output += buffer
+          output += pendingOpening ? buffer.slice(0, lineStart) : buffer
           buffer = ''
           break
         }
 
-        const lineStart = buffer.lastIndexOf('\n') + 1
-        const candidate = buffer.slice(lineStart)
-        const pendingOpening = /^(?:`|``|```(?:x(?:m(?:l)?)?)?[ \t]*\r?)$/i.test(candidate)
         const keep = pendingOpening ? candidate.length : 0
 
         output += buffer.slice(0, buffer.length - keep)
@@ -42,10 +43,7 @@ function createVisibleAssistantStreamSanitizer() {
       const closingIndex = buffer.indexOf('```', openingLength)
 
       if (closingIndex < 0) {
-        const pendingContent = buffer.slice(openingLength)
-
-        if (!final && /^[\s\uFEFF]*`{0,2}$/.test(pendingContent)) break
-        output += buffer
+        if (!final) break
         buffer = ''
         break
       }

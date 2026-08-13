@@ -779,13 +779,15 @@ async function main() {
 
       if (requestBody.model === 'grok-current-live-data') {
         const recovering = requestBody.messages?.some(message =>
-          /requires a verified tool result/i.test(String(message?.content || ''))
+          /requires a verified tool result|omitted the required completion signal/i.test(
+            String(message?.content || '')
+          )
         )
         const requestText = JSON.stringify(requestBody)
         if (recovering) currentLiveRecoveryRequests += 1
 
         if (recovering) {
-          assert.ok(requestText.includes('nested web__run tool'))
+          assert.ok(requestText.includes('nested web__run tool') || requestText.includes('response_format'))
           assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
           assert.strictEqual(requestBody.max_tokens, PROMPT_TOOL_RECOVERY_MAX_TOKENS)
         } else {
@@ -1551,6 +1553,51 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-half-xml-direct-stream') {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const content of ['```x', 'ml\n', '\n']) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-half-xml-direct-stream',
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: requestBody.model,
+              choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
+      if (requestBody.model === 'grok-agentic-short-no-signal') {
+        const recovering = requestBody.messages?.some(message =>
+          /omitted the required completion signal/i.test(String(message?.content || ''))
+        )
+        // Mirrors the 1.2.100 production failure: a short, natural answer that
+        // contains neither a tool call nor the agent completion signal.
+        const content = 'The upstream task is still in progress; details pending.'
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-agentic-short-no-signal',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (requestBody.model === 'grok-long-malformed-after-tool-result') {
         const recovering = requestBody.messages?.some(message =>
           /bounded recovery attempt|omitted the required completion signal/i.test(String(message?.content || ''))
@@ -1983,6 +2030,8 @@ async function main() {
     'grok-delayed-recovery-over-legacy-timeout',
     'grok-completion-signal-user-input',
     'grok-empty-xml-final',
+    'grok-half-xml-direct-stream',
+    'grok-agentic-short-no-signal',
     'grok-long-malformed-after-tool-result',
     'grok-stalled-continuation',
     'grok-repeated-stall-fuse',
@@ -2023,7 +2072,8 @@ async function main() {
           model === 'grok-completion-signal-recovery-failure' ||
           model === 'grok-delayed-recovery-over-legacy-timeout' ||
           model === 'grok-completion-signal-user-input' ||
-          model === 'grok-empty-xml-final' ||
+           model === 'grok-empty-xml-final' ||
+           model === 'grok-agentic-short-no-signal' ||
           model === 'grok-long-malformed-after-tool-result' ||
           model === 'grok-stalled-continuation' ||
           model === 'grok-repeated-stall-fuse' ||
@@ -3544,6 +3594,71 @@ async function main() {
   assert.strictEqual(emptyXmlFinalDiagnostic.retryAttempted, false)
   assert.strictEqual(emptyXmlFinalDiagnostic.acceptedCompletionSignal, true)
   upstreamRequests.length = 0
+  const halfXmlDirectResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-half-xml-direct-stream',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '输出结果。' }] }]
+    })
+  })
+  const halfXmlDirectStream = await halfXmlDirectResponse.text()
+  const halfXmlDirectEvents = halfXmlDirectStream
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('data: {'))
+    .map(line => JSON.parse(line.slice('data: '.length)))
+  const halfXmlDirectDeltas = halfXmlDirectEvents.filter(event => event.type === 'response.output_text.delta')
+
+  assert.strictEqual(halfXmlDirectResponse.status, 200)
+  assert.strictEqual(halfXmlDirectDeltas.length, 0)
+  assert.ok(halfXmlDirectStream.includes('event: response.completed'))
+  assert.ok(!halfXmlDirectStream.includes('```xml'))
+  assert.ok(!halfXmlDirectStream.includes('```x'))
+  upstreamRequests.length = 0
+  const agenticShortResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-agentic-short-no-signal',
+      stream: true,
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: '检查日志并完成修复。' }] },
+        { type: 'custom_tool_call', name: 'exec', call_id: 'call_agentic_history', input: 'text("done")' },
+        { type: 'custom_tool_call_output', call_id: 'call_agentic_history', output: 'done' },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'The previous tool step returned.' }]
+        },
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'This is only a status update.' }]
+        }
+      ],
+      tools: [{ type: 'custom', name: 'exec', description: 'Run nested Codex tools.' }]
+    })
+  })
+  const agenticShortStream = await agenticShortResponse.text()
+  const agenticShortDiagnostic = proxyDiagnostics.at(-1).emulation
+  const agenticShortRecovery = agenticShortDiagnostic.continuationRecovery
+
+  assert.strictEqual(agenticShortResponse.status, 200)
+  assert.ok(agenticShortStream.includes('event: response.incomplete'))
+  assert.ok(!agenticShortStream.includes('event: response.completed'))
+  assert.strictEqual(agenticShortDiagnostic.firstContentLength, 56)
+  assert.strictEqual(proxyDiagnostics.at(-1).sourceFollowsToolResult, false)
+  assert.strictEqual(agenticShortRecovery.agenticTurn, true)
+  assert.strictEqual(agenticShortRecovery.toolHistoryPresent, true)
+  assert.strictEqual(agenticShortRecovery.toolIntentRequired, false)
+  assert.strictEqual(agenticShortRecovery.completionSignalRequired, true)
+  assert.strictEqual(agenticShortRecovery.missingCompletionSignal, true)
+  assert.ok(agenticShortRecovery.retryAttempted)
+  assert.ok(agenticShortRecovery.exhausted)
+  assert.strictEqual(agenticShortRecovery.incomplete, true)
+  assert.ok(!agenticShortStream.includes('role":"user"'))
+  upstreamRequests.length = 0
   const longMalformedResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -3622,6 +3737,8 @@ async function main() {
   assert.ok(!exhaustedCompletionSignalStream.includes('[CODEX_AGENT_LOOP_SAFETY_STOP]'))
   assert.ok(!exhaustedCompletionSignalStream.includes('上游模型未能完成剩余步骤，请重试本轮任务。'))
   assert.ok(exhaustedCompletionSignalStream.includes('模型连续返回相同的中间计划'))
+  assert.ok(exhaustedCompletionSignalStream.includes('event: response.incomplete'))
+  assert.ok(!exhaustedCompletionSignalStream.includes('event: response.completed'))
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.retryAttempted, true)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, 0)
@@ -3635,6 +3752,8 @@ async function main() {
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedCompletionSignal, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredTerminalCandidate, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.inferredCompletionAccepted, false)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.incomplete, true)
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.incompleteReason, 'agent_loop_recovery_exhausted')
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'agent_loop_repeated_stall')
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
   upstreamRequests.length = 0
@@ -3690,6 +3809,8 @@ async function main() {
   assert.strictEqual((recoveryFailureDeltas.match(/上游模型未能完成剩余步骤，请重试本轮任务。/g) || []).length, 0)
   assert.ok(!recoveryFailureDeltas.includes('[CODEX_AGENT_LOOP_COMPLETE]'))
   assert.ok(recoveryFailureDeltas.includes('模型渠道服务暂时不可用'))
+  assert.ok(recoveryFailureStream.includes('event: response.incomplete'))
+  assert.ok(!recoveryFailureStream.includes('event: response.completed'))
   assert.strictEqual(recoveryFailureEmulation.recoveryAttemptTimeoutMs, 60000)
   assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
   assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
@@ -3706,6 +3827,8 @@ async function main() {
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopAppended, false)
   assert.strictEqual(recoveryFailureDiagnostic.safetyStopTriggered, true)
   assert.strictEqual(recoveryFailureDiagnostic.acceptedCompletionSignal, false)
+  assert.strictEqual(recoveryFailureEmulation.incomplete, true)
+  assert.strictEqual(recoveryFailureEmulation.incompleteReason, 'agent_loop_recovery_exhausted')
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'agent_loop_transport_stalled')
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
   upstreamRequests.length = 0
