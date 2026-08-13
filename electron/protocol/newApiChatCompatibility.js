@@ -64,7 +64,29 @@ function mergeStreamedToolArguments(currentValue, incomingValue) {
     ((currentTrimmed.startsWith('{') && incomingTrimmed.startsWith('{')) ||
       (currentTrimmed.startsWith('[') && incomingTrimmed.startsWith('[')))
 
-  return looksLikeJsonSnapshot ? incoming : `${current}${incoming}`
+  if (looksLikeJsonSnapshot) return incoming
+
+  // Some NewAPI/Grok relays resend an overlapping suffix instead of a true
+  // delta (for example `{"input":"echo fo` followed by `fo"}`).  Appending
+  // that frame literally corrupts the arguments and makes the host execute a
+  // different tool call.  Only apply overlap coalescing to structured-looking
+  // arguments; ordinary text fragments must retain their exact incremental
+  // semantics.
+  const structuredArguments = /[{}[\]":,]/.test(current) || /[{}[\]":,]/.test(incoming)
+
+  if (structuredArguments) {
+    if (current.endsWith(incoming) || current.startsWith(incoming)) return current
+
+    const maxOverlap = Math.min(current.length, incoming.length, 4096)
+
+    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      if (current.slice(-overlap) === incoming.slice(0, overlap)) {
+        return `${current}${incoming.slice(overlap)}`
+      }
+    }
+  }
+
+  return `${current}${incoming}`
 }
 
 function isIgnorableChatStreamFrame(frame) {

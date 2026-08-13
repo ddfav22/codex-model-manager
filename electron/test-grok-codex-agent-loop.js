@@ -22,10 +22,12 @@ const {
   recoveryFailureKindForError,
   recoveryFailureKindForStatus,
   recoveryFailureMessage,
+  recoveryFailureStopsLoop,
   responsesRequestToChat
 } = require('./protocolProxy')
 const {
   anchorShortContinuation,
+  isExplicitSessionContinuationText,
   isInterruptedContinuationText,
   isShortContinuationText,
   recoveryConversationContext,
@@ -39,7 +41,11 @@ const {
   isInternalToolCallsOnly,
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
-const { emulatedToolSyntaxStart, partialControlMarkerStart } = require('./protocol/emulatedToolSyntax')
+const {
+  emulatedToolSyntaxStart,
+  markdownToolFenceStart,
+  partialControlMarkerStart
+} = require('./protocol/emulatedToolSyntax')
 const { encodedToolFrameStart, parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
 const {
   createVisibleAssistantStreamSanitizer,
@@ -63,6 +69,10 @@ assert.strictEqual(recoveryFailureKindForStatus(503), 'http_server_error')
 assert.strictEqual(recoveryFailureKindForStatus(429), 'http_rate_limit')
 assert.strictEqual(recoveryFailureKindForStatus(400), 'http_request_rejected')
 assert.strictEqual(recoveryFailureKindForError(new Error('prompt tool recovery timed out')), 'timeout')
+assert.strictEqual(recoveryFailureStopsLoop('http_rate_limit'), true)
+assert.strictEqual(recoveryFailureStopsLoop('http_server_error'), true)
+assert.strictEqual(recoveryFailureStopsLoop('transport_error'), true)
+assert.strictEqual(recoveryFailureStopsLoop('client_response_closed'), true)
 assert.match(recoveryFailureMessage(['timeout']), /等待 60 秒仍未返回/)
 assert.match(recoveryFailureMessage(['http_server_error']), /服务暂时不可用/)
 
@@ -316,6 +326,9 @@ assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
 assert.strictEqual(isInterruptedContinuationText('继续安装并验证 Python'), true)
 assert.strictEqual(isInterruptedContinuationText('检查另一个新任务'), false)
+assert.strictEqual(isExplicitSessionContinuationText('019ff536-a62b-7502-9263-d1bfb6c15241\n继续这个会话任务'), true)
+assert.strictEqual(isExplicitSessionContinuationText('继续这个会话任务'), true)
+assert.strictEqual(isExplicitSessionContinuationText('继续修复 Projects 显示问题'), false)
 const agenticHistoryFixture = [
   { type: 'custom_tool_call', name: 'exec', call_id: 'call_history' },
   { type: 'custom_tool_call_output', call_id: 'call_history', output: 'done' },
@@ -339,6 +352,15 @@ assert.strictEqual(
 )
 
 assert.strictEqual(emulatedToolSyntaxStart('<!DOCTYPE html>\n<html>', { includePartial: true }), 0)
+assert.strictEqual(markdownToolFenceStart('prefix html````html repeated tool scaffold'), 'prefix '.length)
+assert.strictEqual(
+  emulatedToolSyntaxStart('Plan\n```html\n<html>noise</html>', { includeMarkdownFence: true }),
+  'Plan\n'.length
+)
+assert.strictEqual(
+  emulatedToolSyntaxStart('Plan\n```js\nconst value = 1\n```', { includeMarkdownFence: true }),
+  -1
+)
 assert.strictEqual(normalizeVisibleAssistantText('\\n\\n\\n\\n'), '')
 assert.strictEqual(normalizeVisibleAssistantText('"\\n\\n\\n\\n"'), '')
 assert.strictEqual(normalizeVisibleAssistantText('first\\n\\n\\nsecond'), 'first\n\nsecond')
@@ -493,5 +515,24 @@ assert.match(interruptedContinuation.messages.at(-1).content, /prior turn was ma
 assert.match(interruptedContinuation.messages.at(-1).content, /Original task: 安装 Python/)
 assert.match(interruptedContinuation.messages.at(-1).content, /Completed tool results already preserved.*1/)
 assert.ok(interruptedContinuation.messages.every(message => !String(message.content || '').includes('turn_aborted')))
+
+const explicitSessionContinuation = anchorShortContinuation([
+  { role: 'user', content: '完成远端脚本验证并汇总结果。' },
+  { role: 'assistant', content: 'I will inspect the session and continue the unfinished task.' },
+  { role: 'user', content: '019ff536-a62b-7502-9263-d1bfb6c15241\n继续这个会话任务' }
+])
+
+assert.strictEqual(explicitSessionContinuation.anchored, true)
+assert.strictEqual(explicitSessionContinuation.interrupted, false)
+assert.strictEqual(explicitSessionContinuation.explicitSessionContinuation, true)
+assert.match(explicitSessionContinuation.messages.at(-1).content, /Original task: 完成远端脚本验证/)
+
+const nonContinuation = anchorShortContinuation([
+  { role: 'user', content: '先完成一次检查。' },
+  { role: 'assistant', content: '检查完成。' },
+  { role: 'user', content: '继续修复 Projects 显示问题' }
+])
+
+assert.strictEqual(nonContinuation.anchored, false)
 
 console.log('Grok Codex Agent Loop adapter tests passed')

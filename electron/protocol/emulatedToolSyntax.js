@@ -50,12 +50,28 @@ function partialControlMarkerStart(content) {
   return earliest
 }
 
+function markdownToolFenceStart(content, { includeSingleFence = false } = {}) {
+  const text = String(content || '')
+  const singleFence = includeSingleFence ? text.search(/```(?:html?|xml)\b/i) : -1
+
+  if (singleFence >= 0) return singleFence
+
+  const repeatedFence = text.match(/```(?:html?|xml|json)\b[\s\S]{0,160}?```(?:html?|xml|json)\b/i)
+  const compactRepeatedLabel = text.match(/\b(?:html?|xml|json)\b\s*`{2,}\s*(?:html?|xml|json)\b/i)
+  const match = repeatedFence || compactRepeatedLabel
+
+  if (!match) return -1
+
+  return Number(match.index || 0)
+}
+
 function emulatedToolSyntaxStart(content, options = {}) {
   const text = String(content || '')
   const lowerText = text.toLowerCase()
   const candidates = [
     encodedToolFrameStart(text),
     internalToolTranscriptStart(text),
+    options.includeMarkdownFence ? markdownToolFenceStart(text, { includeSingleFence: true }) : -1,
     ...STREAM_CONTROL_MARKERS.map(marker => lowerText.indexOf(marker.toLowerCase())),
     text.search(/<codex_(?:tool_call|no_tool)\b/i),
     text.search(/```(?:json)?\s*\{/i),
@@ -74,5 +90,6 @@ function emulatedToolSyntaxStart(content, options = {}) {
 module.exports = {
   STREAM_CONTROL_MARKERS,
   emulatedToolSyntaxStart,
+  markdownToolFenceStart,
   partialControlMarkerStart
 }

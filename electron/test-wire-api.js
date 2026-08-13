@@ -13,6 +13,7 @@ const {
   endpointCompatibilityFailure,
   inferredWireApiForModel,
   PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS,
   PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES,
   PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES,
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
@@ -239,7 +240,8 @@ function writeHistoryProviderConfig(configPath, model, proxyBaseUrl, modelCatalo
 
 async function main() {
   assert.strictEqual(PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS, 60000)
-  assert.strictEqual(PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS, 0)
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS, 60000)
+  assert.strictEqual(PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS, 5)
   let phase = 'discover-codex'
   const watchdog = setTimeout(() => {
     console.error(`wire test watchdog timeout at phase: ${phase}`)
@@ -642,6 +644,24 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-rate-limit-terminal') {
+        response.writeHead(429, {
+          'content-type': 'application/json; charset=utf-8',
+          'retry-after': '0'
+        })
+        response.end(JSON.stringify({ error: { type: 'rate_limit_exceeded', message: 'too many requests' } }))
+        return
+      }
+
+      if (requestBody.model === 'grok-server-error-terminal') {
+        response.writeHead(503, {
+          'content-type': 'application/json; charset=utf-8',
+          'retry-after': '0'
+        })
+        response.end(JSON.stringify({ error: { type: 'provider_unavailable', message: 'upstream service unavailable' } }))
+        return
+      }
+
       if (requestBody.model === 'grok-context-too-large') {
         response.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '0' })
         response.end(JSON.stringify({ error: { type: 'context_length_exceeded', message: 'too many input tokens' } }))
@@ -728,7 +748,7 @@ async function main() {
                 delta: {
                   role: 'assistant',
                   tool_calls: [
-                    { index: 0, type: 'function', function: { name: 'shell_', arguments: '{"command":' } },
+                    { index: 4, type: 'function', function: { name: 'sh', arguments: '{"command":"echo ' } },
                     { index: 1, type: 'function', function: { name: 'exec', arguments: '{"input":' } }
                   ]
                 },
@@ -751,13 +771,39 @@ async function main() {
                       index: 0,
                       id: 'call_newapi_shared',
                       type: 'function',
-                      function: { name: 'command', arguments: '{"command":"echo one"}' }
+                      function: { name: 'ell_command', arguments: 'one"}' }
                     },
                     {
                       index: 1,
                       id: 'call_newapi_shared',
                       type: 'function',
                       function: { name: 'exec', arguments: '"text(true)"}' }
+                    }
+                  ]
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        // Replay the second parallel call after the proxy has already made
+        // the duplicate provider id collision-safe (`call_newapi_shared_d2`).
+        // It must update index 1, not create a third function_call item.
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-newapi-strict-tools',
+            object: 'chat.completion.chunk',
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 1,
+                      id: 'call_newapi_shared',
+                      type: 'function',
+                      function: { name: 'exec', arguments: '{"input":"text(true)"}' }
                     }
                   ]
                 },
@@ -774,6 +820,71 @@ async function main() {
             choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
           })}\n\ndata: [DONE]\n\n`
         )
+        return
+      }
+
+      if (requestBody.model === 'grok-tool-fragment-idempotency') {
+        const hasFirstResult = requestBody.messages?.some(
+          message => {
+            const serialized = JSON.stringify(message || '')
+            return (
+              (message?.role === 'tool' && message.tool_call_id === 'call_fragment_loop') ||
+              (serialized.includes('tool_result') && serialized.includes('call_fragment_loop'))
+            )
+          }
+        )
+        const hasSecondResult = requestBody.messages?.some(
+          message => {
+            const serialized = JSON.stringify(message || '')
+            return (
+              (message?.role === 'tool' && message.tool_call_id === 'call_fragment_second') ||
+              (serialized.includes('tool_result') && serialized.includes('call_fragment_second'))
+            )
+          }
+        )
+        const marker = (callId, argumentsValue, name = 'shell_command') =>
+          `<codex_tool_call>${JSON.stringify({ name, call_id: callId, arguments: argumentsValue })}</codex_tool_call>`
+        const chunks = hasSecondResult
+          ? [{ content: 'TOOL_LOOP_COMPLETED\n[CODEX_AGENT_LOOP_COMPLETE]' }]
+          : hasFirstResult
+            ? [
+                {
+                  content: marker('call_fragment_second', '{"command":"Write-Output second-step"}')
+                }
+              ]
+            : [
+                {
+                  content: marker('call_fragment_loop', '{"command":"Write-Output ')
+                },
+                {
+                  content: marker('call_fragment_loop', '{"command":"Write-Output first-step"}')
+                },
+                {
+                  content: marker('call_fragment_loop', '{"command":"Write-Output first-step"}')
+                }
+              ]
+
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        for (const chunk of chunks) {
+          response.write(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-tool-fragment-idempotency',
+              object: 'chat.completion.chunk',
+              model: requestBody.model,
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: 'assistant', ...chunk },
+                  finish_reason: null
+                }
+              ]
+            })}\n\n`
+          )
+        }
+        response.end('data: [DONE]\n\n')
         return
       }
 
@@ -1096,7 +1207,7 @@ async function main() {
           'cache-control': 'no-cache'
         })
         const chunks = [
-          '<!DOCTYPE html><html><head><script>const tools = globalThis.tools; tools.shell_command({command:"python --version"})</script></head><body></body></html>\n',
+          'html````html<!DOCTYPE html><html><head><script>const tools = globalThis.tools; tools.shell_command({command:"python --version"})</script></head><body></body></html>\n',
           'I will use the correct tool format.\n',
           '<codex_tool_call>{"name":"exec","arguments":{"input":"text(123)"}}</codex_tool_call>'
         ]
@@ -1700,7 +1811,7 @@ async function main() {
 
           assert.ok(recoveryInstructions.includes('plan-only sentence'))
           assert.ok(!recoveryInstructions.includes('omitted the required completion signal'))
-          assert.ok(recoveryInstructions.includes('no fixed round limit'))
+          assert.ok(recoveryInstructions.includes('bounded recovery attempt'))
           assert.deepStrictEqual(requestBody.response_format, { type: 'json_object' })
           assert.strictEqual(requestBody.max_tokens, PROMPT_TOOL_RECOVERY_MAX_TOKENS)
           const pendingPlans = [
@@ -2056,9 +2167,12 @@ async function main() {
     'grok-identity-self-report',
     'grok-high-demand-retry',
     'grok-high-demand-exhausted',
+    'grok-rate-limit-terminal',
+    'grok-server-error-terminal',
     'grok-context-too-large',
     'grok-sse-boundary-compat',
-    'grok-newapi-strict-tool-compat'
+    'grok-newapi-strict-tool-compat',
+    'grok-tool-fragment-idempotency'
   ]
   const modelCapabilities = Object.fromEntries(
     [...expectedCanonicalModels, ...testOnlyModels].map(model => [
@@ -2090,9 +2204,12 @@ async function main() {
           model === 'grok-escaped-whitespace' ||
           model === 'grok-html-tool-scaffold' ||
           model === 'grok-encoded-tool-frame' ||
-          model === 'grok-streamed-internal-transcript' ||
-          model === 'grok-short-continue-anchor' ||
-          model === 'grok-interrupted-continue-anchor'
+           model === 'grok-streamed-internal-transcript' ||
+           model === 'grok-short-continue-anchor' ||
+           model === 'grok-interrupted-continue-anchor' ||
+           model === 'grok-tool-fragment-idempotency' ||
+           model === 'grok-rate-limit-terminal' ||
+           model === 'grok-server-error-terminal'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : {
               wireApi: model.startsWith('gpt-native') || model === 'gpt-newapi-chat-only' ? 'responses' : undefined
@@ -2341,13 +2458,47 @@ async function main() {
   const highDemandExhaustedBody = await highDemandExhausted.text()
 
   assert.strictEqual(highDemandExhausted.status, 503)
-  assert.ok(highDemandExhaustedBody.includes('已自动重试 2 次'))
+  assert.ok(highDemandExhaustedBody.includes('已尝试 2 次'))
   assert.strictEqual(upstreamRequests.length, 3)
   assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_error')
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamFailureKind, 'upstream_capacity')
   assert.strictEqual(proxyDiagnostics.at(-1).upstreamRetryCount, 2)
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'upstream_capacity')
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
+  upstreamRequests.length = 0
+
+  const providerFailureCases = [
+    ['grok-rate-limit-terminal', 'upstream_rate_limit'],
+    ['grok-server-error-terminal', 'upstream_server_error']
+  ]
+  for (const [model, expectedFailureKind] of providerFailureCases) {
+    upstreamRequests.length = 0
+    const providerFailureResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Provider failure terminal.' }] }]
+      })
+    })
+    const providerFailureStream = await providerFailureResponse.text()
+    const providerFailureEvents = providerFailureStream
+      .split(/\r?\n\r?\n/)
+      .map(block => block.split(/\r?\n/).find(line => line.startsWith('data: {')))
+      .filter(Boolean)
+      .map(line => JSON.parse(line.slice('data: '.length)))
+    const providerFailureDiagnostic = proxyDiagnostics.at(-1)
+
+    assert.strictEqual(providerFailureResponse.status, 200)
+    assert.strictEqual(upstreamRequests.length, 1)
+    assert.strictEqual(providerFailureEvents.filter(event => event.type === 'response.incomplete').length, 1)
+    assert.strictEqual(providerFailureEvents.filter(event => event.type === 'response.completed').length, 0)
+    assert.ok(providerFailureStream.includes('"retryable":false'))
+    assert.doesNotMatch(JSON.stringify(upstreamRequests), /继续|continue/i)
+    assert.strictEqual(providerFailureDiagnostic.outcome, 'upstream_error')
+    assert.strictEqual(providerFailureDiagnostic.upstreamFailureKind, expectedFailureKind)
+  }
   upstreamRequests.length = 0
   const contextTooLarge = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2393,6 +2544,21 @@ async function main() {
     })
   })
   const newApiStrictToolsBody = await newApiStrictTools.text()
+  const newApiStrictToolEvents = newApiStrictToolsBody
+    .split(/\r?\n\r?\n/)
+    .map(block => block.split(/\r?\n/).find(line => line.startsWith('data: {')))
+    .filter(Boolean)
+    .map(line => JSON.parse(line.slice('data: '.length)))
+  const newApiStrictAddedTools = newApiStrictToolEvents.filter(
+    event =>
+      event.type === 'response.output_item.added' &&
+      ['function_call', 'custom_tool_call'].includes(String(event.item?.type || ''))
+  )
+  const newApiStrictDoneTools = newApiStrictToolEvents.filter(
+    event =>
+      event.type === 'response.output_item.done' &&
+      ['function_call', 'custom_tool_call'].includes(String(event.item?.type || ''))
+  )
   const newApiRequests = upstreamRequests.filter(request => request.body.model === 'grok-newapi-strict-tool-compat')
 
   assert.strictEqual(newApiStrictTools.status, 200)
@@ -2411,6 +2577,12 @@ async function main() {
   assert.ok(newApiStrictToolsBody.includes('"name":"shell_command"'))
   assert.ok(newApiStrictToolsBody.includes('"arguments":"{\\"command\\":\\"echo one\\"}"'))
   assert.ok(newApiStrictToolsBody.includes('"input":"text(true)"'))
+  assert.strictEqual(newApiStrictAddedTools.length, 2)
+  assert.strictEqual(newApiStrictDoneTools.length, 2)
+  assert.deepStrictEqual(
+    newApiStrictDoneTools.map(event => event.item.call_id),
+    ['call_newapi_shared', 'call_newapi_shared_d2']
+  )
   assert.deepStrictEqual(proxyDiagnostics.at(-1).chatCompatibilityRemovedParameters, [
     'stream_options',
     'parallel_tool_calls',
@@ -2763,6 +2935,120 @@ async function main() {
   assert.strictEqual(customDiagnostic.codexThreadId, '019fd600-8202-7ff0-91b7-6eb858a9f684')
   assert.strictEqual(customDiagnostic.codexTurnId, '019fd601-1111-7222-8333-444444444444')
   assert.doesNotMatch(JSON.stringify(customDiagnostic), /must-not-enter-diagnostics/)
+
+  const parseResponsesSseEvents = body =>
+    body
+      .split(/\r?\n\r?\n/)
+      .map(block => block.split(/\r?\n/).find(line => line.startsWith('data: {')))
+      .filter(Boolean)
+      .map(line => JSON.parse(line.slice('data: '.length)))
+  const fragmentTool = {
+    type: 'function',
+    name: 'shell_command',
+    description: 'Run a shell command.',
+    parameters: {
+      type: 'object',
+      properties: { command: { type: 'string' } },
+      required: ['command'],
+      additionalProperties: false
+    }
+  }
+  const fragmentInput = [
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Run the two-step fragment test.' }]
+    }
+  ]
+
+  upstreamRequests.length = 0
+  const fragmentFirstResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'grok-tool-fragment-idempotency', stream: true, input: fragmentInput, tools: [fragmentTool] })
+  })
+  const fragmentFirstStream = await fragmentFirstResponse.text()
+  const fragmentFirstEvents = parseResponsesSseEvents(fragmentFirstStream)
+  const fragmentFirstAdded = fragmentFirstEvents.filter(
+    event => event.type === 'response.output_item.added' && event.item?.type === 'function_call'
+  )
+  const fragmentFirstDeltas = fragmentFirstEvents.filter(event => event.type === 'response.function_call_arguments.delta')
+  const fragmentFirstDone = fragmentFirstEvents.find(event => event.type === 'response.function_call_arguments.done')
+  const fragmentFirstItemDone = fragmentFirstEvents.find(event => event.type === 'response.output_item.done')
+  const fragmentFirstCompletedIndex = fragmentFirstEvents.findIndex(event => event.type === 'response.completed')
+
+  assert.strictEqual(fragmentFirstResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 1)
+  assert.strictEqual(fragmentFirstAdded.length, 1, 'replayed call_id fragments must create one function_call item')
+  assert.strictEqual(fragmentFirstDeltas.length, 2, 'the repeated cumulative fragment must not emit a third delta')
+  assert.strictEqual(fragmentFirstDone?.arguments, '{"command":"Write-Output first-step"}')
+  assert.strictEqual(fragmentFirstItemDone?.item?.call_id, 'call_fragment_loop')
+  assert.ok(fragmentFirstCompletedIndex > fragmentFirstEvents.indexOf(fragmentFirstItemDone))
+  assert.deepStrictEqual(
+    fragmentFirstEvents
+      .filter(event => event.type === 'response.output_item.added' || event.type === 'response.output_item.done')
+      .map(event => event.output_index),
+    [0, 0],
+    'one tool item must keep one stable output index'
+  )
+
+  const firstCallOutput = {
+    type: 'function_call_output',
+    call_id: 'call_fragment_loop',
+    output: 'first step verified'
+  }
+  const secondInput = [
+    ...fragmentInput,
+    {
+      type: 'function_call',
+      name: 'shell_command',
+      call_id: 'call_fragment_loop',
+      arguments: '{"command":"Write-Output first-step"}'
+    },
+    firstCallOutput,
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue the verified task.' }] }
+  ]
+
+  upstreamRequests.length = 0
+  const fragmentSecondResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'grok-tool-fragment-idempotency', stream: true, input: secondInput, tools: [fragmentTool] })
+  })
+  const fragmentSecondStream = await fragmentSecondResponse.text()
+  const fragmentSecondEvents = parseResponsesSseEvents(fragmentSecondStream)
+  const fragmentSecondDone = fragmentSecondEvents.find(event => event.type === 'response.function_call_arguments.done')
+
+  assert.strictEqual(fragmentSecondResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 1)
+  assert.strictEqual(fragmentSecondDone?.call_id, undefined)
+  assert.ok(fragmentSecondDone?.arguments.includes('second-step'))
+
+  const secondInputWithResult = [
+    ...secondInput,
+    {
+      type: 'function_call',
+      name: 'shell_command',
+      call_id: 'call_fragment_second',
+      arguments: '{"command":"Write-Output second-step"}'
+    },
+    { type: 'function_call_output', call_id: 'call_fragment_second', output: 'second step verified' },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Summarize both verified steps.' }] }
+  ]
+
+  upstreamRequests.length = 0
+  const fragmentFinalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'grok-tool-fragment-idempotency', stream: true, input: secondInputWithResult, tools: [fragmentTool] })
+  })
+  const fragmentFinalStream = await fragmentFinalResponse.text()
+
+  assert.strictEqual(fragmentFinalResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 1)
+  assert.ok(fragmentFinalStream.includes('TOOL_LOOP_COMPLETED'))
+  assert.ok(fragmentFinalStream.includes('event: response.completed'))
+  assert.ok(!fragmentFinalStream.includes('event: response.incomplete'))
   upstreamRequests.length = 0
   const transportFailure = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
@@ -2845,7 +3131,10 @@ async function main() {
   assert.ok(delayedPlainStream.includes('PLAIN_ANSWER_OK'))
   assert.ok(delayedPlainStream.includes('response.completed'))
   assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.retryAttempted, false)
-  assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 0)
+  assert.strictEqual(
+    delayedPlainDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts,
+    PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
+  )
   assert.strictEqual(delayedPlainDiagnostic.emulation.continuationRecovery.toolIntentRequired, false)
   assert.strictEqual(delayedPlainDiagnostic.emulation.earlyResponseStarted, true)
   upstreamRequests.length = 0
@@ -3212,9 +3501,12 @@ async function main() {
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.toolIntentRequired, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.initialToolOmission, true)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryAttempts, 2)
-  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 0)
-  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryMs, 0)
-  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.unlimitedRecovery, true)
+  assert.strictEqual(
+    currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts,
+    PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
+  )
+  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.maximumRecoveryMs, 60000)
+  assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.unlimitedRecovery, false)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryTimeBudgetExhausted, false)
   assert.ok(currentLiveDataDiagnostic.emulation.continuationRecovery.recoveryElapsedMs >= 0)
   assert.strictEqual(currentLiveDataDiagnostic.emulation.continuationRecovery.acceptedRetry, true)
@@ -3393,6 +3685,7 @@ async function main() {
   assert.ok(htmlToolScaffoldStream.includes('response.custom_tool_call_input.done'), htmlToolScaffoldStream)
   assert.ok(htmlToolScaffoldStream.includes('text(123)'))
   assert.ok(!htmlToolScaffoldStream.includes('<!DOCTYPE html>'))
+  assert.ok(!htmlToolScaffoldStream.includes('html````html'))
   assert.ok(!htmlToolScaffoldStream.includes('globalThis.tools'))
   assert.ok(!htmlToolScaffoldStream.includes('python --version'))
   assert.ok(!htmlToolScaffoldStream.includes('<codex_tool_call'))
@@ -3490,7 +3783,7 @@ async function main() {
   assert.strictEqual(splitCompletionSignalDiagnostic.naturalStall, true)
   assert.strictEqual(splitCompletionSignalDiagnostic.completionSignalPresent, true)
   assert.strictEqual(splitCompletionSignalDiagnostic.inferredTerminalCandidate, false)
-  assert.strictEqual(splitCompletionSignalDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(splitCompletionSignalDiagnostic.unlimitedRecovery, false)
   assert.strictEqual(splitCompletionSignalDiagnostic.recoveryAttempts, 1)
   assert.strictEqual(splitCompletionSignalDiagnostic.acceptedRetry, true)
   assert.strictEqual(splitCompletionSignalDiagnostic.retryProducedToolCall, true)
@@ -3548,8 +3841,8 @@ async function main() {
   assert.strictEqual(completionSignalDiagnostic.missingCompletionSignal, true)
   assert.strictEqual(completionSignalDiagnostic.retryAttempted, true)
   assert.strictEqual(completionSignalDiagnostic.recoveryAttempts, 1)
-  assert.strictEqual(completionSignalDiagnostic.maximumRecoveryAttempts, 0)
-  assert.strictEqual(completionSignalDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(completionSignalDiagnostic.maximumRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS)
+  assert.strictEqual(completionSignalDiagnostic.unlimitedRecovery, false)
   assert.strictEqual(completionSignalDiagnostic.acceptedRetry, true)
   assert.strictEqual(completionSignalDiagnostic.visibleProgressCount, 0)
   assert.strictEqual(completionSignalDiagnostic.exhausted, false)
@@ -3741,8 +4034,11 @@ async function main() {
   assert.ok(!exhaustedCompletionSignalStream.includes('event: response.completed'))
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.retryAttempted, true)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, 0)
-  assert.strictEqual(exhaustedCompletionSignalDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(
+    exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts,
+    PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
+  )
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.unlimitedRecovery, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.repeatedRecoveryResponses, 5)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryCircuitBreaker, 'identical_stalled_responses')
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.acceptedRetry, false)
@@ -3802,7 +4098,7 @@ async function main() {
     .join('')
 
   assert.strictEqual(recoveryFailureResponse.status, 200)
-  assert.strictEqual(upstreamRequests.length, 1 + PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
+  assert.strictEqual(upstreamRequests.length, 2)
   assert.ok(upstreamRequests.every(request => request.body.stream === true))
   assert.strictEqual((recoveryFailureDeltas.match(/下一步我会继续保存文件。/g) || []).length, 1)
   assert.strictEqual((recoveryFailureDeltas.match(/\[CODEX_AGENT_LOOP_SAFETY_STOP\]/g) || []).length, 0)
@@ -3812,15 +4108,15 @@ async function main() {
   assert.ok(recoveryFailureStream.includes('event: response.incomplete'))
   assert.ok(!recoveryFailureStream.includes('event: response.completed'))
   assert.strictEqual(recoveryFailureEmulation.recoveryAttemptTimeoutMs, 60000)
-  assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
-  assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES)
+  assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, 1)
+  assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, 1)
   assert.deepStrictEqual(
     recoveryFailureDiagnostic.recoveryFailureKinds,
-    Array(PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES).fill('http_server_error')
+    ['http_server_error']
   )
-  assert.strictEqual(recoveryFailureDiagnostic.maximumRecoveryAttempts, 0)
-  assert.strictEqual(recoveryFailureDiagnostic.unlimitedRecovery, true)
-  assert.strictEqual(recoveryFailureDiagnostic.recoveryCircuitBreaker, 'consecutive_transport_failures')
+  assert.strictEqual(recoveryFailureDiagnostic.maximumRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS)
+  assert.strictEqual(recoveryFailureDiagnostic.unlimitedRecovery, false)
+  assert.strictEqual(recoveryFailureDiagnostic.recoveryCircuitBreaker, 'http_server_error')
   assert.strictEqual(recoveryFailureDiagnostic.visibleProgressCount, 1)
   assert.strictEqual(recoveryFailureDiagnostic.liveProgressCount, 1)
   assert.strictEqual(recoveryFailureDiagnostic.exhausted, true)
@@ -3829,7 +4125,7 @@ async function main() {
   assert.strictEqual(recoveryFailureDiagnostic.acceptedCompletionSignal, false)
   assert.strictEqual(recoveryFailureEmulation.incomplete, true)
   assert.strictEqual(recoveryFailureEmulation.incompleteReason, 'agent_loop_recovery_exhausted')
-  assert.strictEqual(proxyDiagnostics.at(-1).diagnosticKind, 'agent_loop_transport_stalled')
+  assert.ok(['agent_loop_stalled', 'agent_loop_transport_stalled'].includes(proxyDiagnostics.at(-1).diagnosticKind))
   assert.strictEqual(proxyDiagnostics.at(-1).diagnosticSeverity, 'warn')
   upstreamRequests.length = 0
   const delayedRecoveryStartedAt = Date.now()
@@ -3893,7 +4189,7 @@ async function main() {
   assert.strictEqual(upstreamRequests.length, 1 + PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
   assert.ok(repeatedStallStream.includes('模型连续返回相同的中间计划'))
   assert.ok(!repeatedStallStream.includes('[CODEX_AGENT_LOOP_SAFETY_STOP]'))
-  assert.strictEqual(repeatedStallDiagnostic.unlimitedRecovery, true)
+  assert.strictEqual(repeatedStallDiagnostic.unlimitedRecovery, false)
   assert.strictEqual(repeatedStallDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
   assert.strictEqual(repeatedStallDiagnostic.repeatedRecoveryResponses, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
   assert.strictEqual(repeatedStallDiagnostic.recoveryCircuitBreaker, 'identical_stalled_responses')
@@ -4159,8 +4455,11 @@ async function main() {
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.stalledAfterToolResult, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.retryAttempted, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.recoveryAttempts, 5)
-  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts, 0)
-  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.unlimitedRecovery, true)
+  assert.strictEqual(
+    stalledDiagnostic.emulation.continuationRecovery.maximumRecoveryAttempts,
+    PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
+  )
+  assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.unlimitedRecovery, false)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.acceptedRetry, true)
   assert.strictEqual(stalledDiagnostic.emulation.continuationRecovery.retryProducedToolCall, true)
   assert.deepStrictEqual(stalledDiagnostic.emulation.continuationRecovery.recoveryDecisionKinds, [

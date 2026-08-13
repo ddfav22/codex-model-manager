@@ -13,6 +13,7 @@ const {
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   UPSTREAM_CAPACITY_MAX_RETRIES,
   adaptResponsesRequest,
+  coalesceAssistantMessages,
   fetchWithCapacityRetry,
   normalizeResponsesToolItemIds,
   readChatAssistantWithTransientRetry,
@@ -59,7 +60,7 @@ const {
   transportFailureKind,
   upstreamAbortKind
 } = require('./protocol/upstreamRequest')
-const { readChatAssistant } = require('./protocol/chatAssistantStream')
+const { createChatDeltaNormalizer, readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
   deterministicToolCallId,
   isIgnorableChatStreamFrame,
@@ -668,6 +669,21 @@ async function main() {
     mergeStreamedToolArguments('{"command":"echo ok"}', '{"command":"echo ok"}'),
     '{"command":"echo ok"}'
   )
+  assert.strictEqual(
+    mergeStreamedToolArguments('{"input":"echo fo', 'fo"}'),
+    '{"input":"echo fo"}',
+    'overlapping argument fragments must be coalesced instead of duplicated'
+  )
+  assert.strictEqual(
+    mergeStreamedToolArguments('{"input":"echo fo"}', 'fo"}'),
+    '{"input":"echo fo"}',
+    'replayed argument suffixes must be idempotent'
+  )
+  assert.strictEqual(
+    mergeStreamedToolArguments('{"input":"long value"}', '{"input":"long'),
+    '{"input":"long value"}',
+    'a shorter cumulative JSON snapshot must not be appended as a second object'
+  )
   assert.strictEqual(textFromChatDelta([{ type: 'text', text: '中文' }, '回答']), '中文回答')
   assert.strictEqual(reasoningFromChatDelta({ reasoning_content: [{ text: '先检查' }] }), '先检查')
   assert.strictEqual(reasoningFromChatDelta({ thinking: '再执行' }), '再执行')
@@ -730,6 +746,34 @@ async function main() {
   assert.strictEqual(strictHistory.diagnostics.droppedOrphanToolResults, 1)
   assert.strictEqual(strictHistory.diagnostics.droppedIncompleteToolCalls, 1)
   assert.strictEqual(strictHistory.diagnostics.deduplicatedToolCallIds, 1)
+
+  const coalescedFragments = coalesceAssistantMessages([
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_fragment_loop',
+          type: 'function',
+          function: { name: 'exec', arguments: '{"input":"text(' }
+        }
+      ]
+    },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_fragment_loop',
+          type: 'function',
+          function: { name: 'exec', arguments: '{"input":"text(1)"}' }
+        }
+      ]
+    },
+    { role: 'tool', tool_call_id: 'call_fragment_loop', content: 'step one ok' }
+  ])
+  assert.strictEqual(coalescedFragments[0].tool_calls.length, 1)
+  assert.strictEqual(coalescedFragments[0].tool_calls[0].function.arguments, '{"input":"text(1)"}')
 
   const missingIdPair = [
     {
@@ -1801,6 +1845,91 @@ async function main() {
     content: '第一段第二段',
     usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 }
   })
+
+  const cumulativeChatDeltas = []
+  const cumulativeChatAssistant = await readChatAssistant(
+    new Response(
+      [
+        'h',
+        'ht',
+        'html',
+        'html```html',
+        'html```html',
+        'html```html\n<div>tool noise</div>\n```'
+      ]
+        .map(content =>
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-cumulative-snapshot',
+            model: 'grok-cumulative-snapshot',
+            choices: [{ index: 0, delta: { content } }]
+          })}\n\n`
+        )
+        .join('') + 'data: [DONE]\n\n',
+      { headers: { 'content-type': 'text/event-stream; charset=utf-8' } }
+    ),
+    {
+      allowCumulativeSnapshots: true,
+      onContentDelta(delta, snapshot) {
+        cumulativeChatDeltas.push([delta, snapshot])
+      }
+    }
+  )
+
+  const multiStepToolLoop = responsesRequestToChat({
+    model: 'grok-4.5',
+    stream: true,
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Run the two-step check.' }] },
+      {
+        type: 'function_call',
+        name: 'exec',
+        call_id: 'call_step_one',
+        arguments: '{"input":"text(1)"}'
+      },
+      { type: 'function_call_output', call_id: 'call_step_one', output: 'step one ok' },
+      {
+        type: 'function_call',
+        name: 'exec',
+        call_id: 'call_step_two',
+        arguments: '{"input":"text(2)"}'
+      },
+      { type: 'function_call_output', call_id: 'call_step_two', output: 'step two ok' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Now summarize the verified result.' }] }
+    ],
+    tools: [{ type: 'custom', name: 'exec', description: 'Run a local Codex tool.' }]
+  })
+  const loopMessages = multiStepToolLoop.request.messages
+  const loopCalls = loopMessages.filter(message => message.role === 'assistant' && message.tool_calls?.length)
+  const loopResults = loopMessages.filter(message => message.role === 'tool')
+
+  assert.strictEqual(loopCalls.length, 2, 'each tool step must remain a distinct assistant call')
+  assert.deepStrictEqual(
+    loopCalls.flatMap(message => message.tool_calls.map(call => call.id)),
+    ['call_step_one', 'call_step_two']
+  )
+  assert.deepStrictEqual(
+    loopResults.map(message => message.tool_call_id),
+    ['call_step_one', 'call_step_two'],
+    'tool results must remain paired and ordered for the next model turn'
+  )
+  assert.strictEqual(loopMessages.at(-1).role, 'user')
+
+  assert.deepStrictEqual(cumulativeChatAssistant.content, 'html```html\n<div>tool noise</div>\n```')
+  assert.deepStrictEqual(cumulativeChatDeltas, [
+    ['h', 'h'],
+    ['t', 'ht'],
+    ['ml', 'html'],
+    ['```html', 'html```html'],
+    ['\n<div>tool noise</div>\n```', 'html```html\n<div>tool noise</div>\n```']
+  ])
+
+  const directNormalizer = createChatDeltaNormalizer({ allowCumulativeSnapshots: true })
+  assert.deepStrictEqual(directNormalizer.push('same'), { delta: 'same', snapshot: 'same' })
+  assert.deepStrictEqual(directNormalizer.push('same'), { delta: '', snapshot: 'same' })
+  assert.deepStrictEqual(directNormalizer.push('samesames'), { delta: 'sames', snapshot: 'samesames' })
+  const ordinaryNormalizer = createChatDeltaNormalizer()
+  assert.deepStrictEqual(ordinaryNormalizer.push('abc'), { delta: 'abc', snapshot: 'abc' })
+  assert.deepStrictEqual(ordinaryNormalizer.push('abcdef'), { delta: 'abcdef', snapshot: 'abcabcdef' })
   assert.strictEqual(
     (
       await readChatAssistant(new Response(JSON.stringify({ choices: [{ message: { content: 'JSON_OK' } }] })), {
