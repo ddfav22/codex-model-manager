@@ -2,6 +2,20 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.97 - 2026-08-13
+
+### Grok/NewAPI 流生命周期与可见内容修复
+
+- 修复 Grok prompt-emulated 流中空 XML/JSON 围栏在分片 SSE 到达时泄漏到 Codex 对话框的问题；空的 `xml` Markdown 围栏不再显示，有内容的 XML 保留。
+- 修复 live progress 与最终 assistant 消息重复发布的问题，确保同一段计划/结果只显示一次。
+- 修复上游没有 `[DONE]`、响应头已经发送后传输异常以及长时间等待造成的“断开会话”假象：截断流返回结构化 `response.incomplete`，并为 Chat→Responses、Responses 转发和 prompt fallback 保持心跳。
+- 保留既有在线更新器、Skill 删除、Grok/NewAPI 长上下文与历史连续性改动。
+
+### 测试
+
+- 新增分片空 XML、live/final 去重、无 `[DONE]` EOF、部分传输失败和 prompt fallback 心跳回归测试。
+- 通过 lint、生产构建、核心/模块/Agent Loop/wire 测试。
+
 ## 1.2.91 - 2026-08-10
 
 ### 删除任务终止后的自动“继续”
