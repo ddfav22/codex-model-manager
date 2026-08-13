@@ -233,7 +233,9 @@ function inspectPackagedContents(executablePath) {
       packagedSkillStoreAssets =
         script.includes('在线插件商店') &&
         script.includes('安全渗透测试') &&
-        script.includes('https://github.com/ddfav22/security-pentest-skill/archive/refs/heads/main.zip')
+        script.includes('https://github.com/ddfav22/security-pentest-skill/archive/refs/heads/main.zip') &&
+        script.includes('Web 信息收集') &&
+        script.includes('https://github.com/ddfav22/web-recon-skill/archive/refs/heads/main.zip')
     })
 
   return {

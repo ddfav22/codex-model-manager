@@ -95,6 +95,14 @@ export const onlineSkillCatalog: OnlineSkill[] = [
     version: '1.1.0',
     sourceUrl: 'https://github.com/ddfav22/security-pentest-skill',
     archiveUrl: 'https://github.com/ddfav22/security-pentest-skill/archive/refs/heads/main.zip'
+  },
+  {
+    id: 'web-recon',
+    displayName: 'Web 信息收集',
+    description: '在明确授权范围内进行资产发现、主站关系归类和证据化 recon；自动规范表达但不扩大授权。',
+    version: '1.0.0',
+    sourceUrl: 'https://github.com/ddfav22/web-recon-skill',
+    archiveUrl: 'https://github.com/ddfav22/web-recon-skill/archive/refs/heads/main.zip'
   }
 ]
 
