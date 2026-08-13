@@ -2863,7 +2863,7 @@ async function main() {
   }
   const stopUnitHeartbeat = startResponsesStreamHeartbeat(heartbeatResponse, 5)
 
-  await new Promise(resolve => setTimeout(resolve, 22))
+  await new Promise(resolve => setTimeout(resolve, 100))
   stopUnitHeartbeat()
   assert.ok(heartbeatWrites.length >= 2)
   assert.ok(heartbeatWrites.every(chunk => chunk.includes('codex-agent-loop keep-alive')))
@@ -3227,6 +3227,13 @@ async function main() {
   })
 
   assert.strictEqual(rejectedResponse.status, 200)
+  await withTimeout(
+    (async () => {
+      while (upstreamRequests.length < 2) await new Promise(resolve => setTimeout(resolve, 10))
+    })(),
+    3000,
+    'emulated fallback upstream request capture'
+  )
   assert.strictEqual(upstreamRequests.length, 2)
   const emulatedStream = await rejectedResponse.text()
 
