@@ -4149,6 +4149,13 @@ async function main() {
   })
 
   assert.strictEqual(rejectedExecResponse.status, 200)
+  await withTimeout(
+    (async () => {
+      while (upstreamRequests.length < 2) await new Promise(resolve => setTimeout(resolve, 10))
+    })(),
+    3000,
+    'emulated exec upstream request capture'
+  )
   assert.strictEqual(upstreamRequests.length, 2)
   const emulatedExecStream = await rejectedExecResponse.text()
   const execDiagnostic = proxyDiagnostics.at(-1)
