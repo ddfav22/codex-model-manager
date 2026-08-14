@@ -59,6 +59,8 @@ Grok 可能返回计划句但不发工具调用。只有紧邻当前工具结果
 
 托管 NewAPI 渠道会在 Codex 配置中注册 `chatgpt_model_manager_image` Streamable HTTP MCP 服务，其 `generate_image` 工具通过当前渠道的 `POST /v1/images/generations` 执行并返回标准 MCP 图片内容。MCP 默认请求 `b64_json`；上游仍返回 URL 时，管理器必须无凭据下载、验证图片魔数和 20 MiB 上限，再保存到 `data/generated-images` 并返回 `image` 内容块与可直接嵌入最终回答的本地绝对路径 Markdown。下载失败只能降级为原 URL Markdown，不得再次生成导致重复计费。若原生 Responses 上游直接返回 `image_generation_call.result` Base64，代理也必须保留原调用、校验并物化图片，再于终态事件前追加标准 assistant `output_text` Markdown；不得依赖模型在下一轮复述路径。无效图片只做脱敏计数并原样交付响应。同步账号后，管理器会从全部可用 Token 中独立选择 `/v1/models` 实际返回图片模型的 Key；该选择不改变当前聊天 Token。MCP URL 必须复用协议代理的随机能力路径，API Key 只能由管理器内部解析；不得写入 Codex 配置、工具参数或日志。若该 MCP 工具未出现在当前 Codex 请求中，兼容层才退回运行时已有的 `exec`/`image_gen__imagegen` 提示，绝不能伪造未注册工具。
 
+图片模型的请求字段必须按模型族隔离：ainiubi/NewAPI 的 `grok-imagine-image-quality` 只发送 `n=1`、`aspect_ratio`、`resolution=1k` 和 `response_format=b64_json`；Grok Imagine 2.0 可使用其支持的分辨率/质量字段；GPT Image 使用 `size`、`quality`、`output_format`、`output_compression`，不发送 Grok 字段。`tools/list` 会依据当前渠道选出的图片模型动态描述这组能力；带 `xai/`、`azure:` 等前缀的模型按最后一段识别。Chat 首选接口失败而回退 Responses 时，必须复用原生图片物化转换器，不能直接 pipe 原始响应，否则 Base64 图片会在 Codex 对话中消失。上游 403/错误响应要用实际请求 Key 做二次脱敏，即使 Key 不是 `sk-` 前缀也不能泄漏。
+
 Grok 返回工具 JSON 时不一定严格使用 `name` + `arguments`。兼容层允许常见的 `tool_call`/`function` 信封、`tool`/`tool_name` 名称、`args` 和 `exec.input`，但最终工具名仍必须存在于本轮 Codex 允许列表中。
 
 用户只说“继续/接着”时，需要把最近一条真实用户任务和最近助手状态作为只发给上游的续接锚点；旧版内部失败提示必须先清理，不能让它成为新的任务上下文。

@@ -3509,18 +3509,29 @@ async function handleResponsesRequest(
 
     if (fallbackUpstream.ok) {
       reportWireApi('responses')
+      const imageDelivery = nativeResponseImageDelivery(fallbackUpstream, {
+        generatedImagesRoot: requestOptions.generatedImagesRoot
+      })
+      const [, nativeImageDelivery] = await Promise.all([
+        pipeFetchBody(
+          imageDelivery.delivery,
+          response,
+          upstreamResponseHeaders(imageDelivery.delivery, body.stream)
+        ),
+        imageDelivery.completion
+      ])
       if (typeof onDiagnostic === 'function') {
         try {
-          onDiagnostic({ ...commonDiagnostic, wireApi: 'responses', protocolFallback: chatFailure })
+          onDiagnostic({
+            ...commonDiagnostic,
+            wireApi: 'responses',
+            protocolFallback: chatFailure,
+            nativeImageDelivery
+          })
         } catch {
           // Diagnostics must never interrupt the model request.
         }
       }
-      await pipeFetchBody(fallbackUpstream, response, {
-        'content-type':
-          fallbackUpstream.headers.get('content-type') ||
-          (body.stream === false ? 'application/json; charset=utf-8' : 'text/event-stream; charset=utf-8')
-      })
       return
     }
     await readResponseBufferLimited(fallbackUpstream)

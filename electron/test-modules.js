@@ -79,6 +79,7 @@ const {
   downloadImageUrl,
   generateNewApiImage,
   imageGenerationPayload,
+  imageToolDefinition,
   imageToolResult,
   isImageGenerationModel,
   isAllowedMcpOrigin,
@@ -415,12 +416,15 @@ async function main() {
   assert.deepStrictEqual(imageGenerationPayload({ prompt: 'sunrise' }), {
     model: DEFAULT_IMAGE_MODEL,
     prompt: 'sunrise',
-    n: 1
+    n: 1,
+    resolution: '1k',
+    response_format: 'b64_json'
   })
   assert.deepStrictEqual(imageGenerationPayload({ prompt: 'sunrise' }, { defaultResponseFormat: 'b64_json' }), {
     model: DEFAULT_IMAGE_MODEL,
     prompt: 'sunrise',
     n: 1,
+    resolution: '1k',
     response_format: 'b64_json'
   })
   assert.strictEqual(DEFAULT_IMAGE_MODEL, 'grok-imagine-image-quality')
@@ -430,6 +434,10 @@ async function main() {
     preferredImageGenerationModel(['grok-4.5', 'gpt-image-1', 'grok-imagine-image-quality']),
     'grok-imagine-image-quality'
   )
+  assert.strictEqual(
+    preferredImageGenerationModel(['gpt-image-2', 'grok-imagine-image-2.0']),
+    'grok-imagine-image-2.0'
+  )
   assert.deepStrictEqual(
     imageGenerationPayload({
       prompt: 'poster',
@@ -437,7 +445,8 @@ async function main() {
       n: 2,
       size: '1024x1024',
       quality: 'high',
-      output_format: 'JPEG'
+      output_format: 'JPEG',
+      output_compression: 85
     }),
     {
       model: 'gpt-image-1',
@@ -445,20 +454,141 @@ async function main() {
       n: 2,
       size: '1024x1024',
       quality: 'high',
-      output_format: 'jpeg'
+      output_format: 'jpeg',
+      output_compression: 85
+    }
+  )
+  assert.deepStrictEqual(
+    imageGenerationPayload({
+      prompt: 'cinematic tram',
+      aspect_ratio: '16:9',
+      resolution: '1K',
+      response_format: 'b64_json'
+    }),
+    {
+      model: DEFAULT_IMAGE_MODEL,
+      prompt: 'cinematic tram',
+      n: 1,
+      aspect_ratio: '16:9',
+      resolution: '1k',
+      response_format: 'b64_json'
+    }
+  )
+  assert.deepStrictEqual(
+    imageGenerationPayload({
+      model: 'grok-imagine-image-2.0',
+      prompt: 'future city',
+      n: 2,
+      aspect_ratio: '2:1',
+      resolution: '2k',
+      quality: 'medium',
+      response_format: 'b64_json'
+    }),
+    {
+      model: 'grok-imagine-image-2.0',
+      prompt: 'future city',
+      n: 2,
+      quality: 'medium',
+      aspect_ratio: '2:1',
+      resolution: '2k',
+      response_format: 'b64_json'
+    }
+  )
+  assert.deepStrictEqual(
+    imageGenerationPayload({
+      model: 'xai/grok-imagine-image-quality',
+      prompt: 'namespaced Grok',
+      aspect_ratio: '1:1'
+    }),
+    {
+      model: 'xai/grok-imagine-image-quality',
+      prompt: 'namespaced Grok',
+      n: 1,
+      aspect_ratio: '1:1',
+      resolution: '1k',
+      response_format: 'b64_json'
     }
   )
   assert.throws(() => imageGenerationPayload({ prompt: '' }), /prompt/)
-  assert.throws(() => imageGenerationPayload({ prompt: 'x', n: 5 }), /n/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', n: 2 }), /当前只支持 n=1/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', resolution: '2k' }), /resolution=1k/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', response_format: 'url' }), /response_format=b64_json/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', size: '1024x1024' }), /不使用 size/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', quality: 'medium' }), /不使用 quality/)
+  assert.throws(
+    () => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', response_format: 'b64_json' }),
+    /不使用 response_format/
+  )
+  assert.deepStrictEqual(
+    imageGenerationPayload({
+      model: 'gpt-image-2',
+      prompt: 'compressed',
+      output_format: 'webp',
+      output_compression: 0
+    }),
+    {
+      model: 'gpt-image-2',
+      prompt: 'compressed',
+      n: 1,
+      output_format: 'webp',
+      output_compression: 0
+    }
+  )
+  assert.throws(
+    () => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', output_compression: 80 }),
+    /output_format=jpeg 或 webp/
+  )
+  assert.throws(
+    () => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', output_compression: 101 }),
+    /output_compression/
+  )
+  assert.throws(() => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', n: 5 }), /n/)
+  const imageTool = imageToolDefinition()
+
+  assert.deepStrictEqual(imageTool.inputSchema.properties.aspect_ratio.enum, [
+    '1:1',
+    '16:9',
+    '9:16',
+    '4:3',
+    '3:4',
+    '3:2',
+    '2:3',
+    '2:1',
+    '1:2',
+    'auto'
+  ])
+  assert.deepStrictEqual(imageTool.inputSchema.properties.resolution.enum, ['1k'])
+  assert.strictEqual(imageTool.inputSchema.properties.n.maximum, 1)
+  assert.strictEqual(imageTool.inputSchema.properties.output_compression.maximum, 100)
+  const gptImageTool = imageToolDefinition({ defaultModel: 'azure:gpt-image-2' })
+
+  assert.strictEqual(gptImageTool.inputSchema.properties.n.maximum, 4)
+  assert.strictEqual(gptImageTool.inputSchema.properties.aspect_ratio, undefined)
+  assert.strictEqual(gptImageTool.inputSchema.properties.resolution, undefined)
+  assert.match(gptImageTool.inputSchema.properties.model.description, /azure:gpt-image-2/)
   assert.strictEqual(isAllowedMcpOrigin(''), true)
   assert.strictEqual(isAllowedMcpOrigin('http://127.0.0.1:1234'), true)
   assert.strictEqual(isAllowedMcpOrigin('https://evil.example.com'), false)
   const inlinePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII='
+  const inlineJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64')
   const inlineResult = imageToolResult({ created: 123, data: [{ b64_json: inlinePng }] })
 
   assert.strictEqual(inlineResult.content[0].type, 'image')
   assert.strictEqual(inlineResult.content[0].mimeType, 'image/png')
   assert.strictEqual(inlineResult.structuredContent.images[0].kind, 'inline')
+  assert.strictEqual(imageToolResult({ data: [{ b64_json: inlineJpeg }] }).content[0].mimeType, 'image/jpeg')
+  assert.strictEqual(
+    imageToolResult({ data: [{ b64_json: `data:image/jpeg;base64,${inlineJpeg}` }] }).content[0].mimeType,
+    'image/jpeg'
+  )
+  assert.strictEqual(
+    imageToolResult({ data: [{ b64_json: `data:image/jpeg;base64,${inlineJpeg}` }] }).content[0].data,
+    inlineJpeg
+  )
+  assert.throws(
+    () => imageToolResult({ data: [{ b64_json: `data:image/png;base64,${inlineJpeg}` }] }),
+    /MIME 类型与实际内容不一致/
+  )
   const urlResult = imageToolResult({ data: [{ url: 'https://cdn.example.com/generated.png' }] })
 
   assert.strictEqual(urlResult.content[0].type, 'resource_link')
@@ -547,6 +677,39 @@ async function main() {
       failedCount: 1,
       injected: false
     })
+    const recoveredNativeItem = {
+      id: 'ig_placeholder_then_valid',
+      type: 'image_generation_call',
+      status: 'completed',
+      result: inlinePng
+    }
+    const recoveredNativeSse = [
+      {
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: { ...recoveredNativeItem, status: 'in_progress', result: 'not-base64-image' }
+      },
+      {
+        type: 'response.completed',
+        response: { id: 'resp_placeholder_then_valid', status: 'completed', output: [recoveredNativeItem] }
+      }
+    ]
+      .map(payload => `data: ${JSON.stringify(payload)}\n\n`)
+      .join('')
+    const recoveredNativeDelivery = nativeResponseImageDelivery(
+      new Response(recoveredNativeSse, { headers: { 'content-type': 'text/event-stream' } }),
+      { generatedImagesRoot }
+    )
+    const recoveredNativeText = await recoveredNativeDelivery.delivery.text()
+
+    assert.deepStrictEqual(await recoveredNativeDelivery.completion, {
+      observed: true,
+      imageCount: 1,
+      materializedCount: 1,
+      failedCount: 1,
+      injected: true
+    })
+    assert.match(recoveredNativeText, /!\[Generated image 1\]/)
     const materialized = await materializedImageToolResult(
       { created: 124, data: [{ url: 'https://cdn.example.com/generated.png' }] },
       {
@@ -584,12 +747,12 @@ async function main() {
   let observedImageRequest = null
   const generatedImage = await generateNewApiImage(
     { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
-    { prompt: 'module prompt', size: '1024x1024' },
+    { prompt: 'module prompt', aspect_ratio: '16:9' },
     {
       fetchImpl: async (url, request) => {
         observedImageRequest = { url, request, body: JSON.parse(request.body) }
 
-        return new Response(JSON.stringify({ created: 456, data: [{ b64_json: inlinePng }] }), {
+        return new Response(JSON.stringify({ created: 456, data: [{ b64_json: inlineJpeg }] }), {
           status: 200,
           headers: { 'content-type': 'application/json' }
         })
@@ -601,7 +764,11 @@ async function main() {
   assert.strictEqual(observedImageRequest.url, 'https://ainiubi.org/v1/images/generations')
   assert.strictEqual(observedImageRequest.request.headers.authorization, 'Bearer sk-module-secret')
   assert.strictEqual(observedImageRequest.body.prompt, 'module prompt')
+  assert.strictEqual(observedImageRequest.body.aspect_ratio, '16:9')
+  assert.strictEqual(observedImageRequest.body.resolution, '1k')
+  assert.strictEqual(observedImageRequest.body.response_format, 'b64_json')
   assert.strictEqual(generatedImage.result.content[0].type, 'image')
+  assert.strictEqual(generatedImage.result.content[0].mimeType, 'image/jpeg')
   assert.strictEqual(imageDiagnostics[0].promptLength, 'module prompt'.length)
   assert.doesNotMatch(JSON.stringify(imageDiagnostics), /module prompt|sk-module-secret/)
   let observedDedicatedImageRequest = null
@@ -627,6 +794,24 @@ async function main() {
   )
   assert.strictEqual(observedDedicatedImageRequest.request.headers.authorization, 'Bearer sk-image-secret')
   assert.strictEqual(observedDedicatedImageRequest.body.model, 'grok-imagine-image-quality')
+  await generateNewApiImage(
+    { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-gpt-secret' },
+    { model: 'azure:gpt-image-2', prompt: 'gpt image', size: '1024x1024' },
+    {
+      defaultResponseFormat: 'b64_json',
+      fetchImpl: async (url, request) => {
+        const body = JSON.parse(request.body)
+
+        assert.deepStrictEqual(body, {
+          model: 'azure:gpt-image-2',
+          prompt: 'gpt image',
+          n: 1,
+          size: '1024x1024'
+        })
+        return new Response(JSON.stringify({ data: [{ b64_json: inlinePng }] }), { status: 200 })
+      }
+    }
+  )
   await assert.rejects(
     generateNewApiImage(
       { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
@@ -657,6 +842,19 @@ async function main() {
     error =>
       /没有图片模型 grok-imagine-image-quality 的访问权限/.test(error.message) &&
       !/private-request-id/.test(error.message)
+  )
+  await assert.rejects(
+    generateNewApiImage(
+      { baseUrl: 'https://ainiubi.org/v1', apiKey: 'test-image-key' },
+      { prompt: 'arbitrary key redaction' },
+      {
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ error: { message: 'provider echoed test-image-key in failure' } }), {
+            status: 403
+          })
+      }
+    ),
+    error => !/test-image-key/.test(error.message) && /provider echoed \[redacted\]/.test(error.message)
   )
 
   assert.strictEqual(normalizeToolArguments({ command: 'echo ok' }), '{"command":"echo ok"}')

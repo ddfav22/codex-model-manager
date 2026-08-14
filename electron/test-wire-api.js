@@ -514,11 +514,23 @@ async function main() {
           response.end(JSON.stringify({ error: { message: 'temporary image capacity failure' } }))
           return
         }
+        if (requestBody.prompt === 'wire-grok-forbidden') {
+          response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(
+            JSON.stringify({
+              error: {
+                message:
+                  'This token test-key has no access to model grok-imagine-image-quality (request id: private-image-request-id)'
+              }
+            })
+          )
+          return
+        }
 
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         response.end(
           JSON.stringify(
-            requestBody.prompt === 'wire-inline-image'
+            ['wire-inline-image', 'wire-grok-inline-image'].includes(requestBody.prompt)
               ? {
                   created: 123,
                   data: [
@@ -640,6 +652,17 @@ async function main() {
         })
         response.end(
           JSON.stringify({ error: { type: 'server_is_overloaded', message: 'currently experiencing high demand' } })
+        )
+        return
+      }
+
+      if (
+        ['grok-image-responses-fallback', 'grok-image-responses-fallback-nonstream'].includes(requestBody.model) &&
+        request.url === '/v1/chat/completions'
+      ) {
+        response.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
+        response.end(
+          JSON.stringify({ error: { message: 'Chat Completions endpoint is not supported for image generation' } })
         )
         return
       }
@@ -1426,15 +1449,35 @@ async function main() {
         return
       }
 
-      if (requestBody.model === 'gpt-native-image-base64') {
+      if (
+        ['gpt-native-image-base64', 'grok-image-responses-fallback', 'grok-image-responses-fallback-nonstream'].includes(
+          requestBody.model
+        )
+      ) {
         const imageItem = {
-          id: 'ig_wire_native_base64',
+          id:
+            requestBody.model.startsWith('grok-image-responses-fallback')
+              ? 'ig_wire_grok_fallback_base64'
+              : 'ig_wire_native_base64',
           type: 'image_generation_call',
           status: 'completed',
           result: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII='
         }
 
         assert.strictEqual(request.url, '/v1/responses')
+        if (requestBody.model === 'grok-image-responses-fallback-nonstream' && requestBody.stream === false) {
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(
+            JSON.stringify({
+              id: 'resp-native-image-base64-nonstream',
+              object: 'response',
+              status: 'completed',
+              model: requestBody.model,
+              output: [imageItem]
+            })
+          )
+          return
+        }
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache'
@@ -2129,6 +2172,8 @@ async function main() {
     'gpt-native-terminal-incomplete',
     'gpt-native-terminal-json',
     'gpt-native-image-base64',
+    'grok-image-responses-fallback',
+    'grok-image-responses-fallback-nonstream',
     'grok-custom-proxy-test',
     'grok-transport-error',
     'grok-reject-tools-test',
@@ -2211,6 +2256,8 @@ async function main() {
            model === 'grok-rate-limit-terminal' ||
            model === 'grok-server-error-terminal'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
+          : ['grok-image-responses-fallback', 'grok-image-responses-fallback-nonstream'].includes(model)
+            ? { wireApi: 'chat', toolTransport: 'native' }
           : {
               wireApi: model.startsWith('gpt-native') || model === 'gpt-newapi-chat-only' ? 'responses' : undefined
             }
@@ -2299,10 +2346,12 @@ async function main() {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: 'grok-imagine-image',
+      model: 'gpt-image-2',
       prompt: 'wire-url-image',
       n: 1,
-      size: '1024x1024'
+      size: '1024x1024',
+      output_format: 'jpeg',
+      output_compression: 85
     })
   })
   const directImagePayload = await directImageResponse.json()
@@ -2312,15 +2361,47 @@ async function main() {
   assert.strictEqual(upstreamRequests[0].url, '/v1/images/generations')
   assert.strictEqual(upstreamRequests[0].authorization, 'Bearer test-key')
   assert.deepStrictEqual(upstreamRequests[0].body, {
-    model: 'grok-imagine-image',
+    model: 'gpt-image-2',
     prompt: 'wire-url-image',
     n: 1,
-    size: '1024x1024'
+    size: '1024x1024',
+    output_format: 'jpeg',
+    output_compression: 85
   })
   assert.strictEqual(proxyDiagnostics.at(-1).operation, 'newapi_image_generation')
   assert.strictEqual(proxyDiagnostics.at(-1).promptLength, 'wire-url-image'.length)
   assert.doesNotMatch(JSON.stringify(proxyDiagnostics.at(-1)), /wire-url-image|test-key/)
   upstreamRequests.length = 0
+  const directGrokImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: DEFAULT_IMAGE_MODEL,
+      prompt: 'wire-grok-inline-image',
+      aspect_ratio: '16:9'
+    })
+  })
+  const directGrokImagePayload = await directGrokImageResponse.json()
+
+  assert.strictEqual(directGrokImageResponse.status, 200)
+  assert.ok(directGrokImagePayload.data[0].b64_json)
+  assert.deepStrictEqual(upstreamRequests[0].body, {
+    model: DEFAULT_IMAGE_MODEL,
+    prompt: 'wire-grok-inline-image',
+    n: 1,
+    aspect_ratio: '16:9',
+    resolution: '1k',
+    response_format: 'b64_json'
+  })
+  upstreamRequests.length = 0
+  const invalidGrokCountResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: DEFAULT_IMAGE_MODEL, prompt: 'invalid Grok count', n: 2 })
+  })
+
+  assert.strictEqual(invalidGrokCountResponse.status, 400)
+  assert.strictEqual(upstreamRequests.length, 0)
   const invalidImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -2339,6 +2420,17 @@ async function main() {
   assert.strictEqual(upstreamImageFailure.status, 502)
   assert.strictEqual(upstreamImageFailurePayload.error.type, 'image_generation_error')
   assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_error')
+  upstreamRequests.length = 0
+  const forbiddenGrokImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: DEFAULT_IMAGE_MODEL, prompt: 'wire-grok-forbidden' })
+  })
+  const forbiddenGrokImagePayload = await forbiddenGrokImageResponse.json()
+
+  assert.strictEqual(forbiddenGrokImageResponse.status, 502)
+  assert.match(forbiddenGrokImagePayload.error.message, /没有图片模型 grok-imagine-image-quality 的访问权限/)
+  assert.doesNotMatch(JSON.stringify(forbiddenGrokImagePayload), /private-image-request-id|test-key/)
   upstreamRequests.length = 0
   mark('newapi-image-mcp')
   const imageMcpUrl = `${proxy.baseUrl}/v1/test-channel/mcp/image`
@@ -2374,6 +2466,19 @@ async function main() {
   assert.strictEqual(mcpToolsResponse.status, 200)
   assert.strictEqual(mcpTools.result.tools[0].name, 'generate_image')
   assert.deepStrictEqual(mcpTools.result.tools[0].inputSchema.required, ['prompt'])
+  assert.deepStrictEqual(mcpTools.result.tools[0].inputSchema.properties.aspect_ratio.enum, [
+    '1:1',
+    '16:9',
+    '9:16',
+    '4:3',
+    '3:4',
+    '3:2',
+    '2:3',
+    '2:1',
+    '1:2',
+    'auto'
+  ])
+  assert.deepStrictEqual(mcpTools.result.tools[0].inputSchema.properties.resolution.enum, ['1k'])
   const mcpImageResponse = await fetch(imageMcpUrl, {
     method: 'POST',
     headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -2394,6 +2499,7 @@ async function main() {
   assert.strictEqual(upstreamRequests[0].url, '/v1/images/generations')
   assert.strictEqual(upstreamRequests[0].body.model, DEFAULT_IMAGE_MODEL)
   assert.strictEqual(upstreamRequests[0].body.prompt, 'wire-inline-image')
+  assert.strictEqual(upstreamRequests[0].body.resolution, '1k')
   assert.strictEqual(upstreamRequests[0].body.response_format, 'b64_json')
   assert.doesNotMatch(JSON.stringify(proxyDiagnostics.at(-1)), /wire-inline-image|test-key/)
   const mcpUrlImageResponse = await fetch(imageMcpUrl, {
@@ -4637,6 +4743,64 @@ async function main() {
   assert.strictEqual(nativeImageDiagnostic.nativeImageDelivery.injected, true)
   assert.strictEqual('taskTermination' in nativeImageDiagnostic, false)
   assert.doesNotMatch(JSON.stringify(nativeImageDiagnostic), /iVBORw0KGgo/)
+  upstreamRequests.length = 0
+
+  const fallbackImagesBefore = fs.readdirSync(nativeImageRoot)
+  const fallbackImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-image-responses-fallback',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Generate a sun.' }] }]
+    })
+  })
+  const fallbackImageText = await fallbackImageResponse.text()
+  const fallbackImageDiagnostic = proxyDiagnostics.at(-1)
+  const fallbackImagesAfter = fs.readdirSync(nativeImageRoot)
+
+  assert.strictEqual(fallbackImageResponse.status, 200)
+  assert.deepStrictEqual(
+    upstreamRequests.map(request => request.url),
+    ['/v1/chat/completions', '/v1/responses']
+  )
+  assert.strictEqual(fallbackImagesAfter.length, fallbackImagesBefore.length + 1)
+  assert.ok(fallbackImageText.includes('response.output_text.delta'))
+  assert.ok(fallbackImageText.includes('![Generated image 1](<'))
+  assert.ok(fallbackImageText.includes(fallbackImagesAfter.find(name => !fallbackImagesBefore.includes(name))))
+  assert.strictEqual(fallbackImageDiagnostic.protocolFallback.from, 'chat')
+  assert.strictEqual(fallbackImageDiagnostic.protocolFallback.to, 'responses')
+  assert.strictEqual(fallbackImageDiagnostic.nativeImageDelivery.imageCount, 1)
+  assert.strictEqual(fallbackImageDiagnostic.nativeImageDelivery.materializedCount, 1)
+  assert.strictEqual(fallbackImageDiagnostic.nativeImageDelivery.injected, true)
+  assert.doesNotMatch(JSON.stringify(fallbackImageDiagnostic), /iVBORw0KGgo/)
+  upstreamRequests.length = 0
+
+  const fallbackNonStreamBefore = fs.readdirSync(nativeImageRoot)
+  const fallbackNonStreamResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-image-responses-fallback-nonstream',
+      stream: false,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Generate a moon.' }] }]
+    })
+  })
+  const fallbackNonStreamPayload = await fallbackNonStreamResponse.json()
+  const fallbackNonStreamDiagnostic = proxyDiagnostics.at(-1)
+  const fallbackNonStreamAfter = fs.readdirSync(nativeImageRoot)
+
+  assert.strictEqual(fallbackNonStreamResponse.status, 200)
+  assert.deepStrictEqual(
+    upstreamRequests.map(request => request.url),
+    ['/v1/chat/completions', '/v1/responses']
+  )
+  assert.strictEqual(fallbackNonStreamAfter.length, fallbackNonStreamBefore.length + 1)
+  assert.match(String(fallbackNonStreamPayload.output_text || ''), /!\[Generated image 1\]/)
+  assert.strictEqual(fallbackNonStreamPayload.output.at(-1).type, 'message')
+  assert.strictEqual(fallbackNonStreamDiagnostic.nativeImageDelivery.materializedCount, 1)
+  assert.strictEqual(fallbackNonStreamDiagnostic.nativeImageDelivery.injected, true)
+  assert.doesNotMatch(JSON.stringify(fallbackNonStreamDiagnostic), /iVBORw0KGgo/)
   upstreamRequests.length = 0
 
   const nativeEmptyResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {

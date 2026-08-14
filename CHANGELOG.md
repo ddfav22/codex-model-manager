@@ -2,6 +2,15 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## Unreleased
+
+### Grok/NewAPI 图片生成适配
+
+- 按 ainiubi/NewAPI 的 Grok Imagine 质量接口发送 `aspect_ratio`、`resolution=1k`、`response_format=b64_json` 和 `n=1`；Grok Imagine 2.0、GPT Image 与 DALL-E 使用各自允许的字段集合，避免把 `size`、`quality`、`output_format` 等参数混到 Grok 请求中。
+- 支持严格校验 `data:image/*;base64,...` 响应、PNG/JPEG/WebP 魔数与 MIME 一致性；任意格式的上游 Key、Bearer、请求 ID 和完整 Base64 都不会进入错误或诊断日志。
+- Chat→Responses 协议回退现在也会物化 `image_generation_call.result`，保存到 `data/generated-images` 并注入 Codex 可显示的 assistant Markdown；非流式与流式回退均覆盖回归测试。
+- MCP `tools/list` 按当前渠道图片模型动态描述 Grok/GPT 参数；带 `xai/`、`azure:` 等命名空间的模型 ID 仍按末段识别模型族。
+
 ## 1.2.102 - 2026-08-13
 
 ### Grok/NewAPI 工具流与会话中断修复
