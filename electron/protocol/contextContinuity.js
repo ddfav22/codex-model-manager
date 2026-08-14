@@ -5,6 +5,8 @@ const { hasInternalToolResult, isInternalToolCallsOnly } = require('./internalTo
 const RECOVERY_TAIL_MESSAGES = 8
 const RECOVERY_CONVERSATION_ANCHORS = 4
 const RECOVERY_MESSAGE_CHARS = 3500
+const RECOVERY_SKILL_MESSAGE_CHARS = 12000
+const RECOVERY_SYSTEM_MESSAGE_CHARS = 32000
 const LEGACY_AGENT_FAILURE_TEXT = '上游模型未能完成剩余步骤，请重试本轮任务。'
 const TURN_ABORTED_PATTERN = /<turn_aborted>[\s\S]*?<\/turn_aborted>/gi
 const CODEX_TASK_ID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i
@@ -251,6 +253,33 @@ function truncateContextText(content, maximumChars = RECOVERY_MESSAGE_CHARS) {
   return `${text.slice(0, headLength)}\n[...context shortened...]\n${text.slice(-tailLength)}`
 }
 
+function isSkillContextMessage(message) {
+  const content = typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content || '')
+
+  return /(?:\bSKILL\.md\b|<skills_instructions\b|skill instructions|技能(?:说明|指令))/i.test(content)
+}
+
+function recoverySystemInstructions(messages, options = {}) {
+  const maximumChars = Math.max(
+    1000,
+    Number(options.maximumChars || RECOVERY_SYSTEM_MESSAGE_CHARS)
+  )
+  const seen = new Set()
+
+  const result = []
+
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (String(message?.role || '').toLowerCase() !== 'system') continue
+    const content = String(sanitizeChatMessage(message)?.content || '').trim()
+
+    if (!content || seen.has(content)) continue
+    seen.add(content)
+    result.push(truncateContextText(content, maximumChars))
+  }
+
+  return result
+}
+
 function recoveryConversationContext(messages, options = {}) {
   const tailMessages = Math.max(1, Number(options.tailMessages || RECOVERY_TAIL_MESSAGES))
   const conversationAnchors = Math.max(1, Number(options.conversationAnchors || RECOVERY_CONVERSATION_ANCHORS))
@@ -278,24 +307,41 @@ function recoveryConversationContext(messages, options = {}) {
     break
   }
 
+  // A Skill result is often an otherwise ordinary tool/user message that is
+  // older than the generic tail. Keep the latest two Skill-bearing records so
+  // a bounded Grok recovery still has the procedure it was asked to follow.
+  let skillMessages = 0
+  for (let index = source.length - 1; index >= 0 && skillMessages < 2; index -= 1) {
+    if (!isSkillContextMessage(source[index])) continue
+    selected.add(index)
+    skillMessages += 1
+  }
+
   return [...selected]
     .sort((left, right) => left - right)
     .map(index => ({
       role: source[index].role,
-      content: truncateContextText(source[index].content, maximumChars)
+      content: truncateContextText(
+        source[index].content,
+        isSkillContextMessage(source[index]) ? Math.max(maximumChars, RECOVERY_SKILL_MESSAGE_CHARS) : maximumChars
+      )
     }))
 }
 
 module.exports = {
   RECOVERY_CONVERSATION_ANCHORS,
   RECOVERY_MESSAGE_CHARS,
+  RECOVERY_SKILL_MESSAGE_CHARS,
+  RECOVERY_SYSTEM_MESSAGE_CHARS,
   RECOVERY_TAIL_MESSAGES,
   anchorShortContinuation,
   hasTurnAbortedSignal,
   internalAgentSignalCount,
   isExplicitSessionContinuationText,
   isInterruptedContinuationText,
+  isSkillContextMessage,
   isShortContinuationText,
+  recoverySystemInstructions,
   isSyntheticChatUserMessage,
   recoveryConversationContext,
   sanitizeChatMessage,

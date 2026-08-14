@@ -20,8 +20,10 @@ const { annotateDiagnostic, codexRequestContext } = require('./protocol/codexDia
 const {
   anchorShortContinuation,
   internalAgentSignalCount,
+  isSkillContextMessage,
   isSyntheticChatUserMessage,
   recoveryConversationContext,
+  recoverySystemInstructions,
   sanitizeChatMessage,
   stripAgentControlSignals
 } = require('./protocol/contextContinuity')
@@ -653,7 +655,13 @@ function chatMessagesFromInput(instructions, input, toolNames) {
     }
   }
 
-  if (!messages.length && typeof input === 'string') messages.push({ role: 'user', content: input })
+  if (typeof input === 'string' && input.trim()) {
+    const alreadyForwarded = messages.some(
+      message => message?.role === 'user' && String(message?.content || '').trim() === input.trim()
+    )
+
+    if (!alreadyForwarded) messages.push({ role: 'user', content: input })
+  }
 
   return coalesceAssistantMessages(messages)
 }
@@ -844,12 +852,59 @@ async function chatUpstreamErrorBody(upstream) {
   return readResponseTextLimited(upstream)
 }
 
-function promptToolCatalog(tools, messages = []) {
-  const conversationText = (Array.isArray(messages) ? messages : [])
+function boundedRelevanceText(value, maximumChars = 96_000) {
+  const text = String(value || '')
+
+  if (text.length <= maximumChars) return text
+
+  const headLength = Math.floor(maximumChars * 0.7)
+  const tailLength = maximumChars - headLength
+
+  return `${text.slice(0, headLength)}\n[...skill relevance context shortened...]\n${text.slice(-tailLength)}`
+}
+
+function responseToolChoiceNames(toolChoice) {
+  const names = []
+  const add = value => {
+    const name = String(value || '').trim()
+
+    if (name) names.push(name)
+  }
+
+  if (typeof toolChoice === 'string') return names
+  add(toolChoice?.name)
+  add(toolChoice?.function?.name)
+
+  for (const tool of Array.isArray(toolChoice?.tools) ? toolChoice.tools : []) {
+    add(tool?.name)
+    add(tool?.function?.name)
+  }
+
+  return [...new Set(names)]
+}
+
+function promptToolCatalog(tools, messages = [], options = {}) {
+  const source = Array.isArray(messages) ? messages : []
+  const systemText = source
+    .filter(message => String(message?.role || '').toLowerCase() === 'system')
+    .map(message => String(message?.content || ''))
+  const recentConversationText = source
+    .filter(message => String(message?.role || '').toLowerCase() !== 'system')
     .slice(-8)
     .map(message => String(message?.content || ''))
-    .join('\n')
-    .toLowerCase()
+  const skillContextText = source
+    .filter(
+      message =>
+        String(message?.role || '').toLowerCase() !== 'system' && isSkillContextMessage(message)
+    )
+    .slice(-2)
+    .map(message => String(message?.content || ''))
+  const conversationText = boundedRelevanceText(
+    [...systemText, ...skillContextText, ...recentConversationText].join('\n')
+  ).toLowerCase()
+  const requiredNames = new Set(
+    (Array.isArray(options.requiredToolNames) ? options.requiredToolNames : []).map(name => String(name).toLowerCase())
+  )
   const coreTools = new Set([
     'exec',
     'shell_command',
@@ -865,14 +920,17 @@ function promptToolCatalog(tools, messages = []) {
     .filter(tool => tool?.type === 'function' && tool.function?.name)
     .map((tool, index) => {
       const name = String(tool.function.name)
+      const normalizedName = name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()
       const nameTerms = name
         .toLowerCase()
         .split(/[^a-z0-9]+/)
         .filter(term => term.length >= 3)
       const relevance = nameTerms.reduce(
         (score, term) => score + (conversationText.includes(term) ? 20 : 0),
-        coreTools.has(name) ? 1000 : 0
-      )
+        coreTools.has(name.toLowerCase()) ? 1000 : 0
+      ) +
+        (requiredNames.has(name.toLowerCase()) || requiredNames.has(normalizedName) ? 10000 : 0) +
+        (conversationText.includes(name.toLowerCase()) || conversationText.includes(normalizedName) ? 500 : 0)
 
       return { tool, index, relevance }
     })
@@ -929,7 +987,9 @@ function toolEmulationRequest(request) {
   const sourceMessages = Array.isArray(request.messages) ? request.messages : []
   const continuation = anchorShortContinuation(sourceMessages)
   const originalMessages = continuation.messages
-  const catalog = promptToolCatalog(request.tools, originalMessages)
+  const catalog = promptToolCatalog(request.tools, originalMessages, {
+    requiredToolNames: responseToolChoiceNames(request.tool_choice)
+  })
   const allowed = new Set(catalog.map(tool => tool.name))
   const messages = []
   const removedControlSignalCount = sourceMessages.reduce(
@@ -3211,6 +3271,190 @@ function responseToolNames(tools) {
   return names.filter(Boolean)
 }
 
+function containsSkillContext(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '')
+
+  return /(?:<skills_instructions\b|\bSKILL\.md\b|\bskill\b|skill instructions|技能(?:说明|指令))/i.test(text)
+}
+
+function requestHasSkillContext(body) {
+  if (containsSkillContext(body?.instructions)) return true
+  if (typeof body?.input === 'string' && containsSkillContext(body.input)) return true
+
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    if (containsSkillContext(item?.content) || containsSkillContext(item?.output) || containsSkillContext(item?.input)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+const ACTIVE_SKILL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
+const RESERVED_SLASH_COMMANDS = new Set([
+  'clear',
+  'compact',
+  'fork',
+  'goal',
+  'help',
+  'mcp',
+  'model',
+  'new',
+  'permissions',
+  'plan',
+  'resume',
+  'status'
+])
+
+function activeSkillMetadataIsValid(value) {
+  if (typeof value === 'string') return ACTIVE_SKILL_NAME_PATTERN.test(value.trim())
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+
+  const name = String(value.name || value.id || '').trim()
+
+  return ACTIVE_SKILL_NAME_PATTERN.test(name)
+}
+
+function textFromSkillSelectionValue(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value
+      .map(item => textFromSkillSelectionValue(item))
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (!value || typeof value !== 'object') return ''
+
+  if (typeof value.text === 'string') return value.text
+
+  return [value.content, value.input, value.output, value.arguments]
+    .map(item => textFromSkillSelectionValue(item))
+    .filter(Boolean)
+    .join('\n')
+}
+
+function skillCatalogText(body) {
+  const values = [body?.instructions]
+
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    const role = String(item?.role || '').toLowerCase()
+    if (role === 'developer' || role === 'system') values.push(textFromSkillSelectionValue(item))
+  }
+
+  return values.filter(Boolean).join('\n')
+}
+
+function hasSkillCatalogForName(body, name) {
+  const catalog = skillCatalogText(body)
+
+  if (!/<skills_instructions\b|\bSKILL\.md\b/i.test(catalog)) return false
+
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+  return new RegExp(`(?:^|[^A-Za-z0-9_.:-])${escaped}(?:$|[^A-Za-z0-9_.:-])`, 'im').test(catalog)
+}
+
+function hasExplicitSkillSelection(body) {
+  const values = []
+
+  if (typeof body?.input === 'string') values.push(body.input)
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    if (String(item?.role || '').toLowerCase() === 'user') values.push(textFromSkillSelectionValue(item))
+  }
+
+  for (const value of values) {
+    if (/\[\[skill:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\]\]/i.test(value)) return true
+
+    const firstLine = String(value).trim().split(/\r?\n/, 1)[0]
+    const slashMatch = firstLine.match(/^(?:\/|\$)([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})(?:\s|$)/)
+
+    if (!slashMatch) continue
+
+    const name = slashMatch[1]
+    if (RESERVED_SLASH_COMMANDS.has(name.toLowerCase())) continue
+    if (hasSkillCatalogForName(body, name)) return true
+  }
+
+  return false
+}
+
+function requestHasActiveSkillContext(body) {
+  const activeSkillMetadata = body?.metadata?.codex_internal?.active_skill
+
+  if (activeSkillMetadataIsValid(activeSkillMetadata)) return true
+
+  if (hasExplicitSkillSelection(body)) return true
+
+  if (typeof body?.input === 'string' && explicitSkillRequest(body.input)) return true
+
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    const role = String(item?.role || '').toLowerCase()
+    const isUserMessage = item?.type === 'message' && role === 'user'
+    const isToolOutput = item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output'
+    const isToolCall = item?.type === 'function_call' || item?.type === 'custom_tool_call'
+    const toolText = JSON.stringify({
+      name: item?.name,
+      arguments: item?.arguments,
+      input: item?.input,
+      output: item?.output
+    })
+
+    // The global developer `<skills_instructions>` catalog is present on many
+    // ordinary turns and is deliberately not enough to activate the bridge.
+    // A concrete Skill read/call or its result is an active-turn signal.
+    if (
+      (isToolCall || isToolOutput) &&
+      /(?:\bSKILL\.md\b|\.agents[\\/]skills|read.{0,30}skill|读取.{0,30}技能)/i.test(toolText)
+    ) {
+      return true
+    }
+    if (
+      isUserMessage &&
+      explicitSkillRequest(item?.content)
+    ) {
+      return true
+    }
+    if (
+      isToolOutput &&
+      /(?:<skills_instructions\b|\bSKILL\.md\b|\.agents[\\/]skills|\.codex[\\/]skills)/i.test(
+        textFromSkillSelectionValue({ content: item?.content, output: item?.output })
+      )
+    ) {
+      return true
+    }
+  }
+
+  // Some integrations provide an explicit selected-skill envelope. Restrict
+  // this check to request-level instructions and developer/system blocks so a
+  // user can’t activate the bridge by quoting the internal tag in ordinary
+  // content.
+  const envelopeText = [String(body?.instructions || '')]
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    const role = String(item?.role || '').toLowerCase()
+    if (role === 'developer' || role === 'system') envelopeText.push(textFromSkillSelectionValue(item))
+  }
+
+  return /<(?:selected|active)_skill\b/i.test(envelopeText.join('\n'))
+}
+
+function explicitSkillRequest(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '')
+
+  return /(?:使用|按照|遵循|调用|执行|读取|加载|应用|use|follow|read|load|run|apply).{0,100}(?:技能|skill)|(?:技能|skill).{0,100}(?:使用|按照|遵循|调用|执行|读取|加载|应用|use|follow|read|load|run|apply)/i.test(
+    text
+  )
+}
+
+function shouldForceGrokAgentLoopEmulation(capability, body, converted) {
+  if (capability?.adapter !== 'grok-chat') return false
+  if (!Array.isArray(converted?.request?.tools) || !converted.request.tools.length) return false
+
+  // Keep ordinary native Grok tool probing/backward compatibility unchanged;
+  // the extra emulation boundary is required when Codex has injected a Skill
+  // contract, where a one-call native probe cannot prove a multi-step loop.
+  return requestHasActiveSkillContext(body)
+}
+
 async function pipeFetchBody(upstream, response, headers = {}) {
   const contentType = String(headers['content-type'] || upstream.headers.get('content-type') || '').toLowerCase()
   if (contentType.includes('text/event-stream') && !response.headersSent) response.writeHead(upstream.status, headers)
@@ -3321,6 +3565,7 @@ async function handleResponsesRequest(
       item => item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output'
     ).length,
     sourceFollowsToolResult: followsImmediateResponsesToolResult(inputItems),
+    skillContextPresent: requestHasSkillContext(body),
     ...requestCodexContext,
     sourceInputTailKinds: inputItems.slice(-6).map(item => ({
       type: String(item?.type || (item?.role ? 'message' : '')),
@@ -3488,7 +3733,9 @@ async function handleResponsesRequest(
         ),
       payload
     )
-  const forcePromptToolEmulation = capability.toolTransport === 'prompt-emulated' && forwardedNames.length > 0
+  const forceGrokAgentLoopEmulation = shouldForceGrokAgentLoopEmulation(capability, body, converted)
+  const forcePromptToolEmulation =
+    (capability.toolTransport === 'prompt-emulated' || forceGrokAgentLoopEmulation) && forwardedNames.length > 0
   let emulatedStreamState = null
   let upstream = forcePromptToolEmulation
     ? new Response(JSON.stringify({ error: { message: 'tool calls are not supported by the selected adapter' } }), {
@@ -3570,6 +3817,7 @@ async function handleResponsesRequest(
       try {
         let structuredRecoverySupported = true
         let recoveryContextMessageCount = 0
+        let recoverySystemMessageCount = 0
 
         upstream = await synthesizeEmulatedToolResponse(
           fallbackUpstream,
@@ -3611,8 +3859,12 @@ async function handleResponsesRequest(
                       'Continue the original user task now. Reading or loading a skill is not a final answer. ' +
                       decisionContract
             const conversation = recoveryConversationContext(emulation.payload.messages)
+            const preservedSystemInstructions = recoverySystemInstructions(emulation.payload.messages, {
+              maximumChars: 24000
+            })
 
             recoveryContextMessageCount = conversation.length
+            recoverySystemMessageCount = preservedSystemInstructions.length
             const retryPayload = {
               ...emulation.payload,
               messages: [
@@ -3620,6 +3872,7 @@ async function handleResponsesRequest(
                   role: 'system',
                   content: recoveryPrompt
                 },
+                ...preservedSystemInstructions.map(content => ({ role: 'system', content })),
                 {
                   role: 'user',
                   content: JSON.stringify({
@@ -3736,7 +3989,8 @@ async function handleResponsesRequest(
           }
           upstream.codexToolEmulation.contextContinuity = {
             ...emulation.contextContinuity,
-            recoveryContextMessageCount
+            recoveryContextMessageCount,
+            recoverySystemMessageCount
           }
         }
       } finally {
@@ -3752,6 +4006,7 @@ async function handleResponsesRequest(
             ...diagnostic,
             toolTransport: 'prompt-emulated',
             forcedByCompatibilityTest: forcePromptToolEmulation,
+            forcedBySkillCompatibility: forceGrokAgentLoopEmulation,
             nativeToolFailureKind,
             outcome: 'upstream_accepted',
             emulation: upstream.codexToolEmulation || null
@@ -4065,11 +4320,15 @@ module.exports = {
   modelIdentityInstruction,
   normalizeCompactionInput,
   normalizeResponsesToolItemIds,
+  promptToolCatalog,
+  requestHasActiveSkillContext,
+  requestHasSkillContext,
   recoveryFailureKindForError,
   recoveryFailureKindForStatus,
   recoveryFailureStopsLoop,
   recoveryFailureMessage,
   runWithAbortTimeout,
+  shouldForceGrokAgentLoopEmulation,
   startResponsesStreamHeartbeat,
   upstreamFailureKind,
   upstreamRejectsNativeTools,

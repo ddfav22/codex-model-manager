@@ -23,7 +23,11 @@ const {
   recoveryFailureKindForStatus,
   recoveryFailureMessage,
   recoveryFailureStopsLoop,
-  responsesRequestToChat
+  promptToolCatalog,
+  requestHasActiveSkillContext,
+  requestHasSkillContext,
+  responsesRequestToChat,
+  shouldForceGrokAgentLoopEmulation
 } = require('./protocolProxy')
 const {
   anchorShortContinuation,
@@ -31,6 +35,7 @@ const {
   isInterruptedContinuationText,
   isShortContinuationText,
   recoveryConversationContext,
+  recoverySystemInstructions,
   stripAgentControlSignals
 } = require('./protocol/contextContinuity')
 const {
@@ -300,6 +305,141 @@ assert.strictEqual(
   '最终结果'
 )
 assert.strictEqual(stripAgentControlSignals('正在处理。\n上游模型未能完成剩余步骤，请重试本轮任务。'), '正在处理。')
+const skillBody = `---\nname: security-skill\n---\n${'SKILL_BODY_SENTINEL '.repeat(500)}`
+const skillRecoveryContext = recoveryConversationContext([
+  { role: 'user', content: `Read SKILL.md and follow it.\n${skillBody}` },
+  ...Array.from({ length: 12 }, (_, index) => ({ role: 'user', content: `later message ${index}` }))
+])
+
+assert.ok(skillRecoveryContext.some(message => message.content.includes('SKILL_BODY_SENTINEL')))
+assert.ok(skillRecoveryContext.find(message => message.content.includes('SKILL_BODY_SENTINEL')).content.length > 3500)
+assert.deepStrictEqual(
+  recoverySystemInstructions([
+    { role: 'system', content: '<skills_instructions>SKILL_SYSTEM_SENTINEL</skills_instructions>' },
+    { role: 'system', content: '<skills_instructions>SKILL_SYSTEM_SENTINEL</skills_instructions>' }
+  ]),
+  ['<skills_instructions>SKILL_SYSTEM_SENTINEL</skills_instructions>']
+)
+const skillTools = Array.from({ length: 30 }, (_, index) => ({
+  type: 'function',
+  function: {
+    name: index === 29 ? 'mcp__security__scan_target' : `noise_tool_${index}`,
+    description: '',
+    parameters: { type: 'object', properties: {} }
+  }
+}))
+const skillCatalog = promptToolCatalog(
+  skillTools,
+  [{ role: 'system', content: '<skills_instructions>Use mcp__security__scan_target.</skills_instructions>' }]
+)
+
+assert.ok(skillCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
+const skillResultCatalog = promptToolCatalog(
+  skillTools,
+  [
+    { role: 'system', content: 'generic managed instructions' },
+    { role: 'user', content: `Read SKILL.md and call mcp__security__scan_target. ${'skill step '.repeat(20)}` },
+    ...Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `later non-skill message ${index}` }))
+  ]
+)
+assert.ok(skillResultCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
+assert.strictEqual(requestHasSkillContext({ instructions: '<skills_instructions>Use the skill.</skills_instructions>' }), true)
+assert.strictEqual(requestHasSkillContext({ instructions: 'ordinary request', input: 'Read SKILL.md now.' }), true)
+assert.strictEqual(requestHasSkillContext({ instructions: 'ordinary request', input: 'ordinary input' }), false)
+assert.strictEqual(requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: { name: 'security' } } }, input: [] }), true)
+assert.strictEqual(requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: {} } }, input: [] }), false)
+assert.strictEqual(requestHasActiveSkillContext({ input: 'What is a skill?' }), false)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>security-pentest\nSKILL.md</skills_instructions>',
+    input: '/security-pentest\n先读取并执行该技能。'
+  }),
+  true
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>security-pentest\nSKILL.md</skills_instructions>',
+    input: '/plan\n普通计划文本'
+  }),
+  false
+)
+assert.strictEqual(requestHasActiveSkillContext({ input: '[[skill:security-pentest]]\n执行检查。' }), true)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>security-pentest\nSKILL.md</skills_instructions>',
+    input: '$security-pentest\n执行检查。'
+  }),
+  true
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>generic catalog</skills_instructions>',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '普通回答即可。' }] }]
+  }),
+  false
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    input: [
+      {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: '<skills_instructions>136 entries include SKILL.md.</skills_instructions>' }]
+      },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '普通回答即可。' }] }
+    ]
+  }),
+  false
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: 'ordinary managed instructions',
+    input: [
+      {
+        type: 'function_call',
+        name: 'exec',
+        arguments: JSON.stringify({ input: 'Read C:/Users/test/.agents/skills/security/SKILL.md' })
+      },
+      { type: 'function_call_output', call_id: 'call_skill', output: 'SKILL.md loaded' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '检查目标。' }] }
+    ]
+  }),
+  true
+)
+assert.strictEqual(
+  shouldForceGrokAgentLoopEmulation(
+    { adapter: 'grok-chat' },
+    {
+      instructions: '<skills_instructions>Use the selected skill.</skills_instructions>',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '按 Skill 执行任务。' }] }]
+    },
+    { request: { tools: [{ function: { name: 'exec' } }] } }
+  ),
+  true
+)
+assert.strictEqual(
+  shouldForceGrokAgentLoopEmulation(
+    { adapter: 'grok-chat' },
+    { instructions: 'ordinary request', input: [] },
+    { request: { tools: [{ function: { name: 'exec' } }] } }
+  ),
+  false
+)
+assert.strictEqual(
+  shouldForceGrokAgentLoopEmulation(
+    { adapter: 'grok-chat' },
+    { instructions: 'ordinary request', input: [{ type: 'function_call_output', call_id: 'call_1', output: 'done' }] },
+    { request: { tools: [{ function: { name: 'exec' } }] } }
+  ),
+  false
+)
+const stringInputConversion = responsesRequestToChat({
+  model: 'grok-4.5',
+  input: 'STRING_INPUT_SENTINEL',
+  tools: [{ type: 'function', name: 'exec', parameters: { type: 'object', properties: {} } }]
+})
+
+assert.ok(stringInputConversion.request.messages.some(message => message.role === 'user' && message.content === 'STRING_INPUT_SENTINEL'))
 const internalCalls = internalToolCallsTranscript([{ name: 'exec', arguments: '{}', call_id: 'call_internal' }])
 const internalResult = internalToolResultTranscript('call_internal', 'ok')
 const internalAdapter = internalAdapterInstruction('continue')

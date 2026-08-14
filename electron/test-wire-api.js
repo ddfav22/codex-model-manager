@@ -1572,6 +1572,44 @@ async function main() {
         return
       }
 
+      if (requestBody.model === 'grok-skill-native-guard') {
+        const requestText = JSON.stringify(requestBody)
+        const recovering = requestBody.messages?.some(message =>
+          /bounded recovery attempt|previous answer stopped at a plan-only sentence/i.test(
+            String(message?.content || '')
+          )
+        )
+
+        assert.strictEqual(Array.isArray(requestBody.tools), false)
+        assert.ok(requestText.includes('SKILL_SYSTEM_SENTINEL'))
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-skill-native-guard',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: requestBody.model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  content: recovering
+                    ? '<codex_tool_call>{"name":"shell_command","arguments":{"command":"Write-Output skill-ok"}}</codex_tool_call>'
+                    : "I'll read the selected skill and execute the next check."
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
+
       if (
         requestBody.model === 'grok-completion-signal' ||
         requestBody.model === 'grok-completion-signal-exhausted' ||
@@ -2179,6 +2217,7 @@ async function main() {
     'grok-reject-tools-test',
     'grok-reject-exec-test',
     'grok-forced-emulation',
+    'grok-skill-native-guard',
     'grok-completion-signal',
     'grok-split-completion-signal',
     'grok-completion-signal-exhausted',
@@ -4659,6 +4698,46 @@ async function main() {
   assert.strictEqual(upstreamRequests.length, 1)
   assert.strictEqual(Array.isArray(upstreamRequests[0].body.tools), false)
   assert.strictEqual(proxyDiagnostics.at(-1).forcedByCompatibilityTest, true)
+  upstreamRequests.length = 0
+  const skillNativeGuardResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-skill-native-guard',
+      instructions: '<skills_instructions>SKILL_SYSTEM_SENTINEL: call shell_command and verify its result.</skills_instructions>',
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '按 Skill 执行检查并保存结果。' }]
+        }
+      ],
+      tools: [
+        {
+          type: 'function',
+          name: 'shell_command',
+          parameters: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command']
+          }
+        }
+      ]
+    })
+  })
+  const skillNativeGuardStream = await skillNativeGuardResponse.text()
+  const skillNativeGuardDiagnostic = proxyDiagnostics.at(-1)
+
+  assert.strictEqual(skillNativeGuardResponse.status, 200)
+  assert.strictEqual(upstreamRequests.length, 2, 'Skill-aware Grok guard should perform one bounded recovery')
+  assert.ok(skillNativeGuardStream.includes('response.function_call_arguments.done'))
+  assert.ok(skillNativeGuardStream.includes('skill-ok'))
+  assert.strictEqual(upstreamRequests[0].body.tools, undefined)
+  assert.strictEqual(upstreamRequests[1].body.tools, undefined)
+  assert.ok(JSON.stringify(upstreamRequests[1].body.messages).includes('SKILL_SYSTEM_SENTINEL'))
+  assert.strictEqual(skillNativeGuardDiagnostic.forcedBySkillCompatibility, true)
+  assert.strictEqual(skillNativeGuardDiagnostic.toolTransport, 'prompt-emulated')
+  assert.strictEqual(skillNativeGuardDiagnostic.emulation.contextContinuity.recoverySystemMessageCount, 1)
   upstreamRequests.length = 0
   const rejectedExecResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',

@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+### Grok/Codex Skill 工具适配
+
+- 当用户明确提及/执行 Skill，或请求中已有 Skill 读取/结果时，Grok Chat 请求进入有界的 Codex 工具兼容桥；Skill 读取结果不会被当成任务完成，工具调用仍由 Codex 权限与执行层决定。
+- 恢复请求保留 Skill 系统指令，并从较早的 Skill 结果中补回必要上下文；长工具目录会优先保留 Skill 明确引用的工具，避免 24 项兼容目录裁掉 MCP 工具。
+- 修复 Chat fallback 丢失 Responses 字符串 `input` 的问题；普通 Grok 请求仍保留原生探测路径，不因通用 Skill 目录而强制额外请求。
+- 不把 Codex 常驻的 `developer` Skill 目录误判为当前激活 Skill；只有明确 Skill 请求、Skill 读取/结果或显式内部标记才触发兼容桥。
+- 兼容 Codex/grok-app 风格的 `[[skill:name]]`、`$name` 与已在 Skill 目录中登记的首行 `/name` 选择提示；保留命令型 `/plan`、`/resume` 等，不让它们误触发 Skill 桥。
+
 ### Grok/NewAPI 图片生成适配
 
 - 按 ainiubi/NewAPI 的 Grok Imagine 质量接口发送 `aspect_ratio`、`resolution=1k`、`response_format=b64_json` 和 `n=1`；Grok Imagine 2.0、GPT Image 与 DALL-E 使用各自允许的字段集合，避免把 `size`、`quality`、`output_format` 等参数混到 Grok 请求中。
