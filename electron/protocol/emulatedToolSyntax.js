@@ -9,6 +9,15 @@ const STREAM_CONTROL_MARKERS = Object.freeze([
   '<script',
   '<codex_tool_call>',
   '<codex_no_tool>',
+  // Some Grok/NewAPI routes fall back to the provider's generic XML names.
+  // Treat them as control syntax for visible-progress truncation; the actual
+  // tool parser still validates the name against the active allowlist.
+  '<tool_call',
+  '<function_call',
+  '<custom_tool_call',
+  '<tool_result',
+  '<function_call_output',
+  '<custom_tool_call_output',
   '<codex_internal_tool_history>',
   '<codex_internal_adapter>',
   '[Codex local tool calls]',

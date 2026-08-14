@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+### Grok tool-control text boundary
+
+- Hide leaked `<tool_call>`, `<function_call>`, `<custom_tool_call>` and result envelopes from visible assistant text, including split SSE chunks and escaped markup, while preserving ordinary HTML/code fences.
+- Accept common generic call envelopes in the bounded Grok tool parser so filtering does not turn a valid call into visible protocol noise or a stalled turn.
+
 ### Grok/Codex Skill 工具适配
 
 - 当用户明确提及/执行 Skill，或请求中已有 Skill 读取/结果时，Grok Chat 请求进入有界的 Codex 工具兼容桥；Skill 读取结果不会被当成任务完成，工具调用仍由 Codex 权限与执行层决定。

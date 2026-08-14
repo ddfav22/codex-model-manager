@@ -1183,11 +1183,12 @@ function emulatedArgumentFragment(name, value) {
 
 function emulatedToolCallMarkers(text) {
   const markers = []
-  const pattern = /<codex_tool_call>\s*([\s\S]{1,1048576}?)\s*<\/codex_tool_call>/gi
+  const pattern =
+    /<(codex_tool_call|tool_call|function_call|custom_tool_call)\b[^>]*>\s*([\s\S]{1,1048576}?)\s*<\/\1\s*>/gi
 
   for (const match of String(text || '').matchAll(pattern)) {
     try {
-      markers.push(JSON.parse(match[1]))
+      markers.push(JSON.parse(match[2]))
     } catch {
       // A malformed marker is handled by the normal recovery path.
     }
@@ -4320,6 +4321,7 @@ module.exports = {
   modelIdentityInstruction,
   normalizeCompactionInput,
   normalizeResponsesToolItemIds,
+  parseEmulatedToolCall,
   promptToolCatalog,
   requestHasActiveSkillContext,
   requestHasSkillContext,

@@ -23,6 +23,7 @@ const {
   recoveryFailureKindForStatus,
   recoveryFailureMessage,
   recoveryFailureStopsLoop,
+  parseEmulatedToolCall,
   promptToolCatalog,
   requestHasActiveSkillContext,
   requestHasSkillContext,
@@ -58,6 +59,7 @@ const {
   normalizeVisibleAssistantText,
   stripEmptyInternalXml,
   stripEmptyXmlMarkdownFence,
+  stripToolControlTags,
   stripToolHtmlScaffold
 } = require('./protocol/visibleAssistantText')
 
@@ -328,26 +330,31 @@ const skillTools = Array.from({ length: 30 }, (_, index) => ({
     parameters: { type: 'object', properties: {} }
   }
 }))
-const skillCatalog = promptToolCatalog(
-  skillTools,
-  [{ role: 'system', content: '<skills_instructions>Use mcp__security__scan_target.</skills_instructions>' }]
-)
+const skillCatalog = promptToolCatalog(skillTools, [
+  { role: 'system', content: '<skills_instructions>Use mcp__security__scan_target.</skills_instructions>' }
+])
 
 assert.ok(skillCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
-const skillResultCatalog = promptToolCatalog(
-  skillTools,
-  [
-    { role: 'system', content: 'generic managed instructions' },
-    { role: 'user', content: `Read SKILL.md and call mcp__security__scan_target. ${'skill step '.repeat(20)}` },
-    ...Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `later non-skill message ${index}` }))
-  ]
-)
+const skillResultCatalog = promptToolCatalog(skillTools, [
+  { role: 'system', content: 'generic managed instructions' },
+  { role: 'user', content: `Read SKILL.md and call mcp__security__scan_target. ${'skill step '.repeat(20)}` },
+  ...Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `later non-skill message ${index}` }))
+])
 assert.ok(skillResultCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
-assert.strictEqual(requestHasSkillContext({ instructions: '<skills_instructions>Use the skill.</skills_instructions>' }), true)
+assert.strictEqual(
+  requestHasSkillContext({ instructions: '<skills_instructions>Use the skill.</skills_instructions>' }),
+  true
+)
 assert.strictEqual(requestHasSkillContext({ instructions: 'ordinary request', input: 'Read SKILL.md now.' }), true)
 assert.strictEqual(requestHasSkillContext({ instructions: 'ordinary request', input: 'ordinary input' }), false)
-assert.strictEqual(requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: { name: 'security' } } }, input: [] }), true)
-assert.strictEqual(requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: {} } }, input: [] }), false)
+assert.strictEqual(
+  requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: { name: 'security' } } }, input: [] }),
+  true
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: {} } }, input: [] }),
+  false
+)
 assert.strictEqual(requestHasActiveSkillContext({ input: 'What is a skill?' }), false)
 assert.strictEqual(
   requestHasActiveSkillContext({
@@ -384,7 +391,9 @@ assert.strictEqual(
       {
         type: 'message',
         role: 'developer',
-        content: [{ type: 'input_text', text: '<skills_instructions>136 entries include SKILL.md.</skills_instructions>' }]
+        content: [
+          { type: 'input_text', text: '<skills_instructions>136 entries include SKILL.md.</skills_instructions>' }
+        ]
       },
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: '普通回答即可。' }] }
     ]
@@ -439,7 +448,11 @@ const stringInputConversion = responsesRequestToChat({
   tools: [{ type: 'function', name: 'exec', parameters: { type: 'object', properties: {} } }]
 })
 
-assert.ok(stringInputConversion.request.messages.some(message => message.role === 'user' && message.content === 'STRING_INPUT_SENTINEL'))
+assert.ok(
+  stringInputConversion.request.messages.some(
+    message => message.role === 'user' && message.content === 'STRING_INPUT_SENTINEL'
+  )
+)
 const internalCalls = internalToolCallsTranscript([{ name: 'exec', arguments: '{}', call_id: 'call_internal' }])
 const internalResult = internalToolResultTranscript('call_internal', 'ok')
 const internalAdapter = internalAdapterInstruction('continue')
@@ -492,15 +505,23 @@ assert.strictEqual(
 )
 
 assert.strictEqual(emulatedToolSyntaxStart('<!DOCTYPE html>\n<html>', { includePartial: true }), 0)
+assert.strictEqual(partialControlMarkerStart('prefix\n<tool_cal'), 'prefix\n'.length)
+assert.strictEqual(
+  emulatedToolSyntaxStart('prefix\n<function_call>{"name":"exec"}', { includePartial: false }),
+  'prefix\n'.length
+)
+const genericToolCall = parseEmulatedToolCall(
+  '<tool_call>{"name":"shell_command","arguments":{"command":"ok"}}</tool_call>',
+  new Set(['shell_command'])
+)
+assert.strictEqual(genericToolCall?.function?.name, 'shell_command')
+assert.deepStrictEqual(JSON.parse(genericToolCall.function.arguments), { command: 'ok' })
 assert.strictEqual(markdownToolFenceStart('prefix html````html repeated tool scaffold'), 'prefix '.length)
 assert.strictEqual(
   emulatedToolSyntaxStart('Plan\n```html\n<html>noise</html>', { includeMarkdownFence: true }),
   'Plan\n'.length
 )
-assert.strictEqual(
-  emulatedToolSyntaxStart('Plan\n```js\nconst value = 1\n```', { includeMarkdownFence: true }),
-  -1
-)
+assert.strictEqual(emulatedToolSyntaxStart('Plan\n```js\nconst value = 1\n```', { includeMarkdownFence: true }), -1)
 assert.strictEqual(normalizeVisibleAssistantText('\\n\\n\\n\\n'), '')
 assert.strictEqual(normalizeVisibleAssistantText('"\\n\\n\\n\\n"'), '')
 assert.strictEqual(normalizeVisibleAssistantText('first\\n\\n\\nsecond'), 'first\n\nsecond')
@@ -509,6 +530,37 @@ assert.strictEqual(stripEmptyInternalXml('<tool_result />\n<function_call></func
 assert.strictEqual(stripEmptyXmlMarkdownFence('before\n```xml\n\n```\nafter'), 'before\n\nafter')
 assert.strictEqual(stripEmptyXmlMarkdownFence('```XML \r\n \t\r\n```'), '')
 assert.strictEqual(stripEmptyXmlMarkdownFence('```xml\n<root />\n```'), '```xml\n<root />\n```')
+assert.strictEqual(
+  stripToolControlTags('before <tool_call>{"name":"exec","arguments":{"input":"text(1)"}}</tool_call> after'),
+  'before  after'
+)
+assert.strictEqual(
+  stripToolControlTags(
+    '<function_call>{"name":"exec"}</function_call>\n<custom_tool_call_output>{"call_id":"call_1","output":"ok"}</custom_tool_call_output>done'
+  ),
+  '\ndone'
+)
+assert.strictEqual(stripToolControlTags('&lt;function_call&gt;{"name":"exec"}&lt;/function_call&gt;visible'), 'visible')
+assert.strictEqual(
+  stripToolControlTags('\\u003ccustom_tool_call\\u003e{"name":"exec"}\\u003c/custom_tool_call\\u003evisible'),
+  'visible'
+)
+assert.strictEqual(
+  stripToolControlTags('\\u003ctool_call\\u003e{\\u0022name\\u0022:\\u0022exec\\u0022}\\u003c/tool_call\\u003evisible'),
+  'visible'
+)
+assert.strictEqual(
+  stripToolControlTags('<div><function_call>normal HTML content</function_call></div>'),
+  '<div><function_call>normal HTML content</function_call></div>'
+)
+assert.strictEqual(stripToolControlTags('prefix <tool_call /> suffix'), 'prefix  suffix')
+assert.strictEqual(stripToolControlTags('prefix <tool_call></tool_call> suffix'), 'prefix  suffix')
+assert.strictEqual(stripToolControlTags('prefix <tool_call'), 'prefix ')
+assert.strictEqual(stripToolControlTags('prefix <function_call_output>done</function_call_output> suffix'), 'prefix  suffix')
+assert.strictEqual(
+  stripToolControlTags('```html\n<function_call>{"name":"exec"}</function_call>\n```'),
+  '```html\n<function_call>{"name":"exec"}</function_call>\n```'
+)
 const emptyXmlStreamSanitizer = createVisibleAssistantStreamSanitizer()
 const emptyXmlStreamChunks = [
   emptyXmlStreamSanitizer.push('继续执行。\n```x'),
@@ -550,7 +602,10 @@ for (const regressionCase of splitFenceRegressionCases) {
   if (regressionCase.name === 'nonempty-cross-chunk-closed-fence') {
     assert.deepStrictEqual(emissions.slice(0, -1), ['', '', '', '', regressionCase.expected], regressionCase.name)
   } else {
-    assert.ok(emissions.every(chunk => !chunk.includes('```')), regressionCase.name)
+    assert.ok(
+      emissions.every(chunk => !chunk.includes('```')),
+      regressionCase.name
+    )
   }
 }
 
@@ -558,6 +613,30 @@ const plainStreamSanitizer = createVisibleAssistantStreamSanitizer()
 assert.strictEqual(plainStreamSanitizer.push('普通正文'), '普通正文')
 assert.strictEqual(plainStreamSanitizer.push('\n```js\nconst value = 1\n```'), '\n```js\nconst value = 1\n```')
 assert.strictEqual(plainStreamSanitizer.finish(), '')
+
+const toolControlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const toolControlStreamOutput = [
+  toolControlStreamSanitizer.push('before\n<custom_tool_'),
+  toolControlStreamSanitizer.push('call>{"name":"exec"}'),
+  toolControlStreamSanitizer.push('</custom_tool_call>\n'),
+  toolControlStreamSanitizer.push('&lt;function_call_output&gt;done'),
+  toolControlStreamSanitizer.push('&lt;/function_call_output&gt;after'),
+  toolControlStreamSanitizer.finish()
+].join('')
+assert.strictEqual(toolControlStreamOutput, 'before\n\nafter')
+
+const escapedToolControlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const escapedToolControlStreamOutput = [
+  escapedToolControlStreamSanitizer.push('\\u003ctool_'),
+  escapedToolControlStreamSanitizer.push('call\\u003e{"name":"exec"}'),
+  escapedToolControlStreamSanitizer.push('\\u003c/tool_call\\u003evisible'),
+  escapedToolControlStreamSanitizer.finish()
+].join('')
+assert.strictEqual(escapedToolControlStreamOutput, 'visible')
+
+const partialToolControlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+assert.strictEqual(partialToolControlStreamSanitizer.push('before\n<tool_'), 'before\n')
+assert.strictEqual(partialToolControlStreamSanitizer.finish(), '')
 
 const mixedStreamSanitizer = createVisibleAssistantStreamSanitizer()
 const mixedStreamOutput = [
