@@ -1,13 +1,13 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.100**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.103**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
 ## 主要能力
 
 - 从 NewAPI 账号或手动渠道读取当前 Key 实际可见的模型，不使用固定“三模型”列表。
-- 图片生成会从同一 NewAPI 账号的已同步 Token 中独立选择真正具备图片模型权限的 Key，不要求把聊天模型切换到图片 Token；默认使用当前 Grok Imagine 质量模型，也可由工具调用显式覆盖。MCP 图片和 Responses 原生 `image_generation_call` Base64 都会校验并保存到 `data/generated-images`；客户端直接补充标准 assistant 图片 Markdown，使图片显示不再依赖模型复述工具提示。
+- 图片生成会从同一 NewAPI 账号的已同步 Token 中独立选择真正具备图片模型权限的 Key，不要求把聊天模型切换到图片 Token；ainiubi/NewAPI 的 Grok Imagine 质量模型使用 `aspect_ratio`、`resolution=1k`、`response_format=b64_json` 和 `n=1`，Grok Imagine 2.0 与 GPT Image 则按各自字段契约发送，禁止混发 GPT/Grok 参数。MCP 图片和 Responses 原生 `image_generation_call` Base64 都会校验并保存到 `data/generated-images`；客户端直接补充标准 assistant 图片 Markdown，使图片显示不再依赖模型复述工具提示。Chat→Responses 回退也经过同一图片物化链路。
 - NewAPI 登录页默认使用 `https://ainiubi.org`，也可以改为其他兼容平台地址。
 - 对每个模型执行聊天、流式、工具调用和工具结果续答检测；未知接口明确标记为暂不支持。
 - 在 Codex 内通过原生可见槽位切换已验证模型，并保持真实上游模型路由。

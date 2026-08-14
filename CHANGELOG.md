@@ -2,6 +2,42 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.103 - 2026-08-14
+
+### Grok tool-control text boundary
+
+- Hide leaked `<tool_call>`, `<function_call>`, `<custom_tool_call>` and result envelopes from visible assistant text, including split SSE chunks and escaped markup, while preserving ordinary HTML/code fences.
+- Accept common generic call envelopes in the bounded Grok tool parser so filtering does not turn a valid call into visible protocol noise or a stalled turn.
+
+### Grok/Codex Skill 工具适配
+
+- 当用户明确提及/执行 Skill，或请求中已有 Skill 读取/结果时，Grok Chat 请求进入有界的 Codex 工具兼容桥；Skill 读取结果不会被当成任务完成，工具调用仍由 Codex 权限与执行层决定。
+- 恢复请求保留 Skill 系统指令，并从较早的 Skill 结果中补回必要上下文；长工具目录会优先保留 Skill 明确引用的工具，避免 24 项兼容目录裁掉 MCP 工具。
+- 修复 Chat fallback 丢失 Responses 字符串 `input` 的问题；普通 Grok 请求仍保留原生探测路径，不因通用 Skill 目录而强制额外请求。
+- 不把 Codex 常驻的 `developer` Skill 目录误判为当前激活 Skill；只有明确 Skill 请求、Skill 读取/结果或显式内部标记才触发兼容桥。
+- 兼容 Codex/grok-app 风格的 `[[skill:name]]`、`$name` 与已在 Skill 目录中登记的首行 `/name` 选择提示；保留命令型 `/plan`、`/resume` 等，不让它们误触发 Skill 桥。
+
+### Grok/NewAPI 图片生成适配
+
+- 按 ainiubi/NewAPI 的 Grok Imagine 质量接口发送 `aspect_ratio`、`resolution=1k`、`response_format=b64_json` 和 `n=1`；Grok Imagine 2.0、GPT Image 与 DALL-E 使用各自允许的字段集合，避免把 `size`、`quality`、`output_format` 等参数混到 Grok 请求中。
+- 支持严格校验 `data:image/*;base64,...` 响应、PNG/JPEG/WebP 魔数与 MIME 一致性；任意格式的上游 Key、Bearer、请求 ID 和完整 Base64 都不会进入错误或诊断日志。
+- Chat→Responses 协议回退现在也会物化 `image_generation_call.result`，保存到 `data/generated-images` 并注入 Codex 可显示的 assistant Markdown；非流式与流式回退均覆盖回归测试。
+- MCP `tools/list` 按当前渠道图片模型动态描述 Grok/GPT 参数；带 `xai/`、`azure:` 等命名空间的模型 ID 仍按末段识别模型族。
+
+## 1.2.102 - 2026-08-13
+
+### Grok/NewAPI 工具流与会话中断修复
+
+- 将 Grok/NewAPI 的 429、503、超时和提前断流转换为明确的 `response.incomplete` 终态；内部协议修复严格有界，不再让一次失败请求演变为长时间隐藏重试或 Codex 的“重新连接 5/5”。
+- 归一化兼容渠道返回的累计 SSE 快照，清理 prompt-emulated 工具前缀中的重复 HTML 与空 XML/JSON 围栏，并对 live commentary 与最终正文去重。
+- 按 provider call ID、数组 index 和固定 output index 维护工具生命周期；支持无 ID 首片随后跨 index 补 ID、重复 ID、工具名分片和参数累计/重放，同一调用只生成一个合法、稳定的 Codex 工具项。
+- 非法或半截函数参数不再错误发送完成事件，而是以 incomplete 安全收口。用户手动输入的会话继续指令仍可锚定原任务，但客户端不会自动向对话写入“继续”或创建额外回合。
+
+### 测试
+
+- 新增 429/503 与断流终态、累计 SSE、空围栏、重复进度、同 ID 并行碰撞、无 ID 后补 ID、工具名/参数分片、工具结果回灌和非法参数失败路径回归。
+- 通过 lint、TypeScript、核心/模块/Agent Loop/wire 测试、生产构建、Windows x64 目录包、clean-release 和图标验证。
+
 ## 1.2.97 - 2026-08-13
 
 ### Grok/NewAPI 流生命周期与可见内容修复

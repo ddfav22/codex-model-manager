@@ -5,6 +5,7 @@ const {
   AGENT_SAFETY_STOP_SIGNAL,
   agentCompletionResult,
   awaitsExplicitUserInput,
+  hasAgenticToolHistory,
   hasAgentCompletionSignal,
   looksLikeStalledToolContinuation,
   requiresAgentCompletionSignal,
@@ -21,13 +22,21 @@ const {
   recoveryFailureKindForError,
   recoveryFailureKindForStatus,
   recoveryFailureMessage,
-  responsesRequestToChat
+  recoveryFailureStopsLoop,
+  parseEmulatedToolCall,
+  promptToolCatalog,
+  requestHasActiveSkillContext,
+  requestHasSkillContext,
+  responsesRequestToChat,
+  shouldForceGrokAgentLoopEmulation
 } = require('./protocolProxy')
 const {
   anchorShortContinuation,
+  isExplicitSessionContinuationText,
   isInterruptedContinuationText,
   isShortContinuationText,
   recoveryConversationContext,
+  recoverySystemInstructions,
   stripAgentControlSignals
 } = require('./protocol/contextContinuity')
 const {
@@ -38,7 +47,11 @@ const {
   isInternalToolCallsOnly,
   stripInternalToolTranscript
 } = require('./protocol/internalToolTranscript')
-const { emulatedToolSyntaxStart, partialControlMarkerStart } = require('./protocol/emulatedToolSyntax')
+const {
+  emulatedToolSyntaxStart,
+  markdownToolFenceStart,
+  partialControlMarkerStart
+} = require('./protocol/emulatedToolSyntax')
 const { encodedToolFrameStart, parseEncodedToolFrames } = require('./protocol/encodedToolFrames')
 const {
   createVisibleAssistantStreamSanitizer,
@@ -46,6 +59,7 @@ const {
   normalizeVisibleAssistantText,
   stripEmptyInternalXml,
   stripEmptyXmlMarkdownFence,
+  stripToolControlTags,
   stripToolHtmlScaffold
 } = require('./protocol/visibleAssistantText')
 
@@ -62,6 +76,10 @@ assert.strictEqual(recoveryFailureKindForStatus(503), 'http_server_error')
 assert.strictEqual(recoveryFailureKindForStatus(429), 'http_rate_limit')
 assert.strictEqual(recoveryFailureKindForStatus(400), 'http_request_rejected')
 assert.strictEqual(recoveryFailureKindForError(new Error('prompt tool recovery timed out')), 'timeout')
+assert.strictEqual(recoveryFailureStopsLoop('http_rate_limit'), true)
+assert.strictEqual(recoveryFailureStopsLoop('http_server_error'), true)
+assert.strictEqual(recoveryFailureStopsLoop('transport_error'), true)
+assert.strictEqual(recoveryFailureStopsLoop('client_response_closed'), true)
 assert.match(recoveryFailureMessage(['timeout']), /等待 60 秒仍未返回/)
 assert.match(recoveryFailureMessage(['http_server_error']), /服务暂时不可用/)
 
@@ -289,6 +307,152 @@ assert.strictEqual(
   '最终结果'
 )
 assert.strictEqual(stripAgentControlSignals('正在处理。\n上游模型未能完成剩余步骤，请重试本轮任务。'), '正在处理。')
+const skillBody = `---\nname: security-skill\n---\n${'SKILL_BODY_SENTINEL '.repeat(500)}`
+const skillRecoveryContext = recoveryConversationContext([
+  { role: 'user', content: `Read SKILL.md and follow it.\n${skillBody}` },
+  ...Array.from({ length: 12 }, (_, index) => ({ role: 'user', content: `later message ${index}` }))
+])
+
+assert.ok(skillRecoveryContext.some(message => message.content.includes('SKILL_BODY_SENTINEL')))
+assert.ok(skillRecoveryContext.find(message => message.content.includes('SKILL_BODY_SENTINEL')).content.length > 3500)
+assert.deepStrictEqual(
+  recoverySystemInstructions([
+    { role: 'system', content: '<skills_instructions>SKILL_SYSTEM_SENTINEL</skills_instructions>' },
+    { role: 'system', content: '<skills_instructions>SKILL_SYSTEM_SENTINEL</skills_instructions>' }
+  ]),
+  ['<skills_instructions>SKILL_SYSTEM_SENTINEL</skills_instructions>']
+)
+const skillTools = Array.from({ length: 30 }, (_, index) => ({
+  type: 'function',
+  function: {
+    name: index === 29 ? 'mcp__security__scan_target' : `noise_tool_${index}`,
+    description: '',
+    parameters: { type: 'object', properties: {} }
+  }
+}))
+const skillCatalog = promptToolCatalog(skillTools, [
+  { role: 'system', content: '<skills_instructions>Use mcp__security__scan_target.</skills_instructions>' }
+])
+
+assert.ok(skillCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
+const skillResultCatalog = promptToolCatalog(skillTools, [
+  { role: 'system', content: 'generic managed instructions' },
+  { role: 'user', content: `Read SKILL.md and call mcp__security__scan_target. ${'skill step '.repeat(20)}` },
+  ...Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `later non-skill message ${index}` }))
+])
+assert.ok(skillResultCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
+assert.strictEqual(
+  requestHasSkillContext({ instructions: '<skills_instructions>Use the skill.</skills_instructions>' }),
+  true
+)
+assert.strictEqual(requestHasSkillContext({ instructions: 'ordinary request', input: 'Read SKILL.md now.' }), true)
+assert.strictEqual(requestHasSkillContext({ instructions: 'ordinary request', input: 'ordinary input' }), false)
+assert.strictEqual(
+  requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: { name: 'security' } } }, input: [] }),
+  true
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({ metadata: { codex_internal: { active_skill: {} } }, input: [] }),
+  false
+)
+assert.strictEqual(requestHasActiveSkillContext({ input: 'What is a skill?' }), false)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>security-pentest\nSKILL.md</skills_instructions>',
+    input: '/security-pentest\n先读取并执行该技能。'
+  }),
+  true
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>security-pentest\nSKILL.md</skills_instructions>',
+    input: '/plan\n普通计划文本'
+  }),
+  false
+)
+assert.strictEqual(requestHasActiveSkillContext({ input: '[[skill:security-pentest]]\n执行检查。' }), true)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>security-pentest\nSKILL.md</skills_instructions>',
+    input: '$security-pentest\n执行检查。'
+  }),
+  true
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: '<skills_instructions>generic catalog</skills_instructions>',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '普通回答即可。' }] }]
+  }),
+  false
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    input: [
+      {
+        type: 'message',
+        role: 'developer',
+        content: [
+          { type: 'input_text', text: '<skills_instructions>136 entries include SKILL.md.</skills_instructions>' }
+        ]
+      },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '普通回答即可。' }] }
+    ]
+  }),
+  false
+)
+assert.strictEqual(
+  requestHasActiveSkillContext({
+    instructions: 'ordinary managed instructions',
+    input: [
+      {
+        type: 'function_call',
+        name: 'exec',
+        arguments: JSON.stringify({ input: 'Read C:/Users/test/.agents/skills/security/SKILL.md' })
+      },
+      { type: 'function_call_output', call_id: 'call_skill', output: 'SKILL.md loaded' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '检查目标。' }] }
+    ]
+  }),
+  true
+)
+assert.strictEqual(
+  shouldForceGrokAgentLoopEmulation(
+    { adapter: 'grok-chat' },
+    {
+      instructions: '<skills_instructions>Use the selected skill.</skills_instructions>',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '按 Skill 执行任务。' }] }]
+    },
+    { request: { tools: [{ function: { name: 'exec' } }] } }
+  ),
+  true
+)
+assert.strictEqual(
+  shouldForceGrokAgentLoopEmulation(
+    { adapter: 'grok-chat' },
+    { instructions: 'ordinary request', input: [] },
+    { request: { tools: [{ function: { name: 'exec' } }] } }
+  ),
+  false
+)
+assert.strictEqual(
+  shouldForceGrokAgentLoopEmulation(
+    { adapter: 'grok-chat' },
+    { instructions: 'ordinary request', input: [{ type: 'function_call_output', call_id: 'call_1', output: 'done' }] },
+    { request: { tools: [{ function: { name: 'exec' } }] } }
+  ),
+  false
+)
+const stringInputConversion = responsesRequestToChat({
+  model: 'grok-4.5',
+  input: 'STRING_INPUT_SENTINEL',
+  tools: [{ type: 'function', name: 'exec', parameters: { type: 'object', properties: {} } }]
+})
+
+assert.ok(
+  stringInputConversion.request.messages.some(
+    message => message.role === 'user' && message.content === 'STRING_INPUT_SENTINEL'
+  )
+)
 const internalCalls = internalToolCallsTranscript([{ name: 'exec', arguments: '{}', call_id: 'call_internal' }])
 const internalResult = internalToolResultTranscript('call_internal', 'ok')
 const internalAdapter = internalAdapterInstruction('continue')
@@ -315,6 +479,16 @@ assert.strictEqual(isShortContinuationText('继续！！！'), true)
 assert.strictEqual(isShortContinuationText('继续修复 Projects 显示问题'), false)
 assert.strictEqual(isInterruptedContinuationText('继续安装并验证 Python'), true)
 assert.strictEqual(isInterruptedContinuationText('检查另一个新任务'), false)
+assert.strictEqual(isExplicitSessionContinuationText('019ff536-a62b-7502-9263-d1bfb6c15241\n继续这个会话任务'), true)
+assert.strictEqual(isExplicitSessionContinuationText('继续这个会话任务'), true)
+assert.strictEqual(isExplicitSessionContinuationText('继续修复 Projects 显示问题'), false)
+const agenticHistoryFixture = [
+  { type: 'custom_tool_call', name: 'exec', call_id: 'call_history' },
+  { type: 'custom_tool_call_output', call_id: 'call_history', output: 'done' },
+  { type: 'message', role: 'user', content: [{ type: 'input_text', text: '报告当前状态。' }] }
+]
+assert.strictEqual(hasAgenticToolHistory(agenticHistoryFixture), true)
+assert.strictEqual(hasAgenticToolHistory([{ type: 'message', role: 'user', content: '普通问候' }]), false)
 assert.strictEqual(partialControlMarkerStart('Ping 已通。\n<codex_tool_cal'), 'Ping 已通。\n'.length)
 assert.strictEqual(partialControlMarkerStart('仍在处理。\n[CODEX_AGENT_LOOP_COM'), '仍在处理。\n'.length)
 assert.strictEqual(
@@ -331,6 +505,23 @@ assert.strictEqual(
 )
 
 assert.strictEqual(emulatedToolSyntaxStart('<!DOCTYPE html>\n<html>', { includePartial: true }), 0)
+assert.strictEqual(partialControlMarkerStart('prefix\n<tool_cal'), 'prefix\n'.length)
+assert.strictEqual(
+  emulatedToolSyntaxStart('prefix\n<function_call>{"name":"exec"}', { includePartial: false }),
+  'prefix\n'.length
+)
+const genericToolCall = parseEmulatedToolCall(
+  '<tool_call>{"name":"shell_command","arguments":{"command":"ok"}}</tool_call>',
+  new Set(['shell_command'])
+)
+assert.strictEqual(genericToolCall?.function?.name, 'shell_command')
+assert.deepStrictEqual(JSON.parse(genericToolCall.function.arguments), { command: 'ok' })
+assert.strictEqual(markdownToolFenceStart('prefix html````html repeated tool scaffold'), 'prefix '.length)
+assert.strictEqual(
+  emulatedToolSyntaxStart('Plan\n```html\n<html>noise</html>', { includeMarkdownFence: true }),
+  'Plan\n'.length
+)
+assert.strictEqual(emulatedToolSyntaxStart('Plan\n```js\nconst value = 1\n```', { includeMarkdownFence: true }), -1)
 assert.strictEqual(normalizeVisibleAssistantText('\\n\\n\\n\\n'), '')
 assert.strictEqual(normalizeVisibleAssistantText('"\\n\\n\\n\\n"'), '')
 assert.strictEqual(normalizeVisibleAssistantText('first\\n\\n\\nsecond'), 'first\n\nsecond')
@@ -339,6 +530,37 @@ assert.strictEqual(stripEmptyInternalXml('<tool_result />\n<function_call></func
 assert.strictEqual(stripEmptyXmlMarkdownFence('before\n```xml\n\n```\nafter'), 'before\n\nafter')
 assert.strictEqual(stripEmptyXmlMarkdownFence('```XML \r\n \t\r\n```'), '')
 assert.strictEqual(stripEmptyXmlMarkdownFence('```xml\n<root />\n```'), '```xml\n<root />\n```')
+assert.strictEqual(
+  stripToolControlTags('before <tool_call>{"name":"exec","arguments":{"input":"text(1)"}}</tool_call> after'),
+  'before  after'
+)
+assert.strictEqual(
+  stripToolControlTags(
+    '<function_call>{"name":"exec"}</function_call>\n<custom_tool_call_output>{"call_id":"call_1","output":"ok"}</custom_tool_call_output>done'
+  ),
+  '\ndone'
+)
+assert.strictEqual(stripToolControlTags('&lt;function_call&gt;{"name":"exec"}&lt;/function_call&gt;visible'), 'visible')
+assert.strictEqual(
+  stripToolControlTags('\\u003ccustom_tool_call\\u003e{"name":"exec"}\\u003c/custom_tool_call\\u003evisible'),
+  'visible'
+)
+assert.strictEqual(
+  stripToolControlTags('\\u003ctool_call\\u003e{\\u0022name\\u0022:\\u0022exec\\u0022}\\u003c/tool_call\\u003evisible'),
+  'visible'
+)
+assert.strictEqual(
+  stripToolControlTags('<div><function_call>normal HTML content</function_call></div>'),
+  '<div><function_call>normal HTML content</function_call></div>'
+)
+assert.strictEqual(stripToolControlTags('prefix <tool_call /> suffix'), 'prefix  suffix')
+assert.strictEqual(stripToolControlTags('prefix <tool_call></tool_call> suffix'), 'prefix  suffix')
+assert.strictEqual(stripToolControlTags('prefix <tool_call'), 'prefix ')
+assert.strictEqual(stripToolControlTags('prefix <function_call_output>done</function_call_output> suffix'), 'prefix  suffix')
+assert.strictEqual(
+  stripToolControlTags('```html\n<function_call>{"name":"exec"}</function_call>\n```'),
+  '```html\n<function_call>{"name":"exec"}</function_call>\n```'
+)
 const emptyXmlStreamSanitizer = createVisibleAssistantStreamSanitizer()
 const emptyXmlStreamChunks = [
   emptyXmlStreamSanitizer.push('继续执行。\n```x'),
@@ -351,6 +573,79 @@ const emptyXmlStreamOutput = emptyXmlStreamChunks.join('')
 
 assert.ok(emptyXmlStreamChunks.every(chunk => !chunk.includes('```')))
 assert.strictEqual(normalizeVisibleAssistantText(emptyXmlStreamOutput), '继续执行。\n\n完成。')
+
+const splitFenceRegressionCases = [
+  {
+    name: 'empty-closed-fence',
+    chunks: ['```xml\n', '\n', '```'],
+    expected: ''
+  },
+  {
+    name: 'half-opening-fence',
+    chunks: ['```x', 'ml\n', '\n'],
+    expected: ''
+  },
+  {
+    name: 'nonempty-cross-chunk-closed-fence',
+    chunks: ['```x', 'ml\n', '<root>', 'ok</root>\n', '```'],
+    expected: '```xml\n<root>ok</root>\n```'
+  }
+]
+
+for (const regressionCase of splitFenceRegressionCases) {
+  const sanitizer = createVisibleAssistantStreamSanitizer()
+  const emissions = regressionCase.chunks.map(chunk => sanitizer.push(chunk))
+  emissions.push(sanitizer.finish())
+  const output = emissions.join('')
+
+  assert.strictEqual(output, regressionCase.expected, regressionCase.name)
+  if (regressionCase.name === 'nonempty-cross-chunk-closed-fence') {
+    assert.deepStrictEqual(emissions.slice(0, -1), ['', '', '', '', regressionCase.expected], regressionCase.name)
+  } else {
+    assert.ok(
+      emissions.every(chunk => !chunk.includes('```')),
+      regressionCase.name
+    )
+  }
+}
+
+const plainStreamSanitizer = createVisibleAssistantStreamSanitizer()
+assert.strictEqual(plainStreamSanitizer.push('普通正文'), '普通正文')
+assert.strictEqual(plainStreamSanitizer.push('\n```js\nconst value = 1\n```'), '\n```js\nconst value = 1\n```')
+assert.strictEqual(plainStreamSanitizer.finish(), '')
+
+const toolControlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const toolControlStreamOutput = [
+  toolControlStreamSanitizer.push('before\n<custom_tool_'),
+  toolControlStreamSanitizer.push('call>{"name":"exec"}'),
+  toolControlStreamSanitizer.push('</custom_tool_call>\n'),
+  toolControlStreamSanitizer.push('&lt;function_call_output&gt;done'),
+  toolControlStreamSanitizer.push('&lt;/function_call_output&gt;after'),
+  toolControlStreamSanitizer.finish()
+].join('')
+assert.strictEqual(toolControlStreamOutput, 'before\n\nafter')
+
+const escapedToolControlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const escapedToolControlStreamOutput = [
+  escapedToolControlStreamSanitizer.push('\\u003ctool_'),
+  escapedToolControlStreamSanitizer.push('call\\u003e{"name":"exec"}'),
+  escapedToolControlStreamSanitizer.push('\\u003c/tool_call\\u003evisible'),
+  escapedToolControlStreamSanitizer.finish()
+].join('')
+assert.strictEqual(escapedToolControlStreamOutput, 'visible')
+
+const partialToolControlStreamSanitizer = createVisibleAssistantStreamSanitizer()
+assert.strictEqual(partialToolControlStreamSanitizer.push('before\n<tool_'), 'before\n')
+assert.strictEqual(partialToolControlStreamSanitizer.finish(), '')
+
+const mixedStreamSanitizer = createVisibleAssistantStreamSanitizer()
+const mixedStreamOutput = [
+  mixedStreamSanitizer.push('前文\n```xml\n'),
+  mixedStreamSanitizer.push(' \t\n'),
+  mixedStreamSanitizer.push('```\n后文'),
+  mixedStreamSanitizer.finish()
+].join('')
+assert.strictEqual(mixedStreamOutput, '前文\n\n后文')
 assert.strictEqual(
   stripEmptyInternalXml('<note></note><xml></xml><note>value</note>'),
   '<note></note><xml></xml><note>value</note>'
@@ -439,5 +734,24 @@ assert.match(interruptedContinuation.messages.at(-1).content, /prior turn was ma
 assert.match(interruptedContinuation.messages.at(-1).content, /Original task: 安装 Python/)
 assert.match(interruptedContinuation.messages.at(-1).content, /Completed tool results already preserved.*1/)
 assert.ok(interruptedContinuation.messages.every(message => !String(message.content || '').includes('turn_aborted')))
+
+const explicitSessionContinuation = anchorShortContinuation([
+  { role: 'user', content: '完成远端脚本验证并汇总结果。' },
+  { role: 'assistant', content: 'I will inspect the session and continue the unfinished task.' },
+  { role: 'user', content: '019ff536-a62b-7502-9263-d1bfb6c15241\n继续这个会话任务' }
+])
+
+assert.strictEqual(explicitSessionContinuation.anchored, true)
+assert.strictEqual(explicitSessionContinuation.interrupted, false)
+assert.strictEqual(explicitSessionContinuation.explicitSessionContinuation, true)
+assert.match(explicitSessionContinuation.messages.at(-1).content, /Original task: 完成远端脚本验证/)
+
+const nonContinuation = anchorShortContinuation([
+  { role: 'user', content: '先完成一次检查。' },
+  { role: 'assistant', content: '检查完成。' },
+  { role: 'user', content: '继续修复 Projects 显示问题' }
+])
+
+assert.strictEqual(nonContinuation.anchored, false)
 
 console.log('Grok Codex Agent Loop adapter tests passed')

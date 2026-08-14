@@ -25,11 +25,112 @@ function safeCallback(callback, value, snapshot) {
   }
 }
 
+const MAX_SEEN_CHAT_SNAPSHOTS = 128
+
+function looksLikeRepeatedMarkupFence(value) {
+  const compact = String(value || '').replace(/[\s\uFEFF]+/g, '')
+
+  if (!compact || compact.length > 256) return false
+
+  return /^(?:(?:`{1,3})?(?:html?|xml|json)(?:`{1,3})?){2,}$/i.test(compact)
+}
+
+/**
+ * NewAPI-compatible Grok channels are seen in the wild sending a complete
+ * assistant snapshot in `delta.content` for every SSE event.  Codex expects
+ * deltas, so blindly appending those snapshots renders `html````html...` and
+ * duplicates tool envelopes.  This small, provider-safe normalizer starts in
+ * incremental mode and switches to snapshot mode only after an incoming value
+ * grows the already assembled prefix.  Ordinary repeated prose remains
+ * untouched.
+ */
+function createChatDeltaNormalizer({ allowCumulativeSnapshots = false } = {}) {
+  let aggregate = ''
+  let snapshotMode = false
+  let lastInput = ''
+  const seenInputs = new Set()
+
+  const rememberInput = input => {
+    if (!input) return
+
+    seenInputs.add(input)
+    if (seenInputs.size <= MAX_SEEN_CHAT_SNAPSHOTS) return
+
+    const oldest = seenInputs.values().next().value
+
+    if (oldest !== undefined) seenInputs.delete(oldest)
+  }
+
+  return {
+    push(value, { snapshot = false } = {}) {
+      const incoming = String(value || '')
+
+      if (!incoming) return { delta: '', snapshot: aggregate }
+
+      const snapshotInput = allowCumulativeSnapshots || snapshot
+
+      if (incoming === aggregate && (snapshotMode || snapshotInput || looksLikeRepeatedMarkupFence(incoming))) {
+        snapshotMode = true
+        rememberInput(incoming)
+
+        return { delta: '', snapshot: aggregate }
+      }
+
+      if (snapshotInput && aggregate && incoming.length > aggregate.length && incoming.startsWith(aggregate)) {
+        snapshotMode = true
+      }
+
+      if (snapshotMode && aggregate && incoming.startsWith(aggregate)) {
+        const extension = incoming.slice(aggregate.length)
+
+        if (!extension) {
+          lastInput = incoming
+          rememberInput(incoming)
+
+          return { delta: '', snapshot: aggregate }
+        }
+
+        aggregate = incoming
+        lastInput = incoming
+        rememberInput(incoming)
+
+        return { delta: extension, snapshot: aggregate }
+      }
+
+      if (snapshotMode) {
+        const replayedMarkup =
+          seenInputs.has(incoming) ||
+          (incoming.length < aggregate.length &&
+            (aggregate.startsWith(incoming) || aggregate.endsWith(incoming)) &&
+            looksLikeRepeatedMarkupFence(incoming))
+
+        if (replayedMarkup || incoming === lastInput) {
+          lastInput = incoming
+          rememberInput(incoming)
+
+          return { delta: '', snapshot: aggregate }
+        }
+      }
+
+      aggregate += incoming
+      lastInput = incoming
+      rememberInput(incoming)
+
+      return { delta: incoming, snapshot: aggregate }
+    },
+    get snapshot() {
+      return aggregate
+    }
+  }
+}
+
 function assistantFromJson(parsed, options = {}) {
   const message = parsed?.choices?.[0]?.message || {}
   const content = textFromContent(message.content)
+  const normalizer = createChatDeltaNormalizer({ allowCumulativeSnapshots: true })
+  const normalized = normalizer.push(content, { snapshot: true })
 
-  safeCallback(options.onContentDelta, content, content)
+  safeCallback(options.onContentDelta, normalized.delta, normalized.snapshot)
 
   return {
     id: parsed?.id,
@@ -62,6 +163,9 @@ async function readChatAssistant(upstream, options = {}) {
   let content = ''
   let usage = null
   let byteCount = 0
+  const deltaNormalizer = createChatDeltaNormalizer({
+    allowCumulativeSnapshots: options.allowCumulativeSnapshots === true
+  })
   const parser = createParser({
     onEvent(event) {
       if (!event.data || event.data === '[DONE]') return
@@ -73,10 +177,15 @@ async function readChatAssistant(upstream, options = {}) {
         model ||= String(chunk.model || '')
         usage ||= chunk.usage || null
         for (const choice of Array.isArray(chunk.choices) ? chunk.choices : []) {
-          const delta = textFromContent(choice?.delta?.content)
+          const hasMessageSnapshot = choice?.message && choice.message.content !== undefined
+          const rawContent = hasMessageSnapshot
+            ? textFromContent(choice.message.content)
+            : textFromContent(choice?.delta?.content)
+          const normalized = deltaNormalizer.push(rawContent, { snapshot: hasMessageSnapshot })
+          const delta = normalized.delta
 
           if (!delta) continue
-          content += delta
+          content = normalized.snapshot
           safeCallback(options.onContentDelta, delta, content)
         }
       } catch {
@@ -109,4 +218,4 @@ async function readChatAssistant(upstream, options = {}) {
   return { id, model, content, usage }
 }
 
-module.exports = { readChatAssistant }
+module.exports = { createChatDeltaNormalizer, readChatAssistant }

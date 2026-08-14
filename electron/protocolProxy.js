@@ -20,8 +20,10 @@ const { annotateDiagnostic, codexRequestContext } = require('./protocol/codexDia
 const {
   anchorShortContinuation,
   internalAgentSignalCount,
+  isSkillContextMessage,
   isSyntheticChatUserMessage,
   recoveryConversationContext,
+  recoverySystemInstructions,
   sanitizeChatMessage,
   stripAgentControlSignals
 } = require('./protocol/contextContinuity')
@@ -31,6 +33,7 @@ const {
   awaitsExplicitUserInput,
   followsImmediateToolResult,
   followsImmediateResponsesToolResult,
+  hasAgenticToolHistory,
   hasAgentCompletionSignal,
   isMalformedToolRecovery,
   looksLikeStalledToolContinuation,
@@ -47,7 +50,7 @@ const {
   readResponseTextLimited,
   transportFailureKind
 } = require('./protocol/upstreamRequest')
-const { readChatAssistant } = require('./protocol/chatAssistantStream')
+const { createChatDeltaNormalizer, readChatAssistant } = require('./protocol/chatAssistantStream')
 const {
   MAX_OPTIONAL_PARAMETER_RETRIES,
   deterministicToolCallId,
@@ -90,7 +93,16 @@ const {
 const { version: APP_VERSION } = require('../package.json')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 60_000
-const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 0
+// A malformed/plan-only Grok response must never keep a Codex request open
+// indefinitely.  Keep the existing per-attempt timeout, but put a hard cap on
+// the whole emulation loop as well.  A value of zero here used to mean
+// "unlimited" and caused repeated 429/503 responses to be replayed forever.
+const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 60_000
+const PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS = 5
+// Provider/transport failures get a stricter one-shot budget.  A failed
+// recovery request must not become a second hidden retry loop while Codex is
+// already deciding whether the turn is incomplete.
+const PROMPT_TOOL_RECOVERY_MAX_TRANSPORT_ATTEMPTS = 1
 const PROMPT_TOOL_RECOVERY_MAX_TOKENS = 4096
 const PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES = 5
 const PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES = 5
@@ -326,10 +338,10 @@ function upstreamDiagnostic(diagnostic, upstream, errorText = '') {
 
 function userFacingUpstreamFailure(kind, retryCount) {
   if (kind === 'upstream_capacity') {
-    return `模型渠道当前负载较高，已自动重试 ${retryCount} 次仍未恢复；请稍后回复“继续”，或切换其他模型或渠道。`
+    return `模型渠道当前负载较高，已尝试 ${retryCount} 次仍未恢复；请检查渠道状态后手动重新提交，或切换其他模型/渠道。`
   }
   if (kind === 'context_too_large') {
-    return '本轮对话上下文过大，模型渠道无法接收；请让 Codex 压缩上下文，或新建任务后继续。'
+    return '本轮对话上下文过大，模型渠道无法接收；请让 Codex 压缩上下文，或新建任务后重新提交。'
   }
 
   return ''
@@ -346,6 +358,20 @@ function recoveryFailureKindForStatus(status) {
   return 'invalid_upstream_response'
 }
 
+function recoveryFailureStopsLoop(kind) {
+  const normalized = String(kind || '').trim().toLowerCase()
+
+  return normalized === 'http_rate_limit' ||
+    normalized === 'upstream_rate_limit' ||
+    normalized === 'http_server_error' ||
+    normalized === 'upstream_server_error' ||
+    normalized === 'http_timeout' ||
+    normalized === 'upstream_timeout' ||
+    normalized === 'transient_transport' ||
+    normalized === 'transport_error' ||
+    normalized === 'client_response_closed'
+}
+
 function recoveryFailureKindForError(error) {
   const message = String(error?.message || error || '').toLowerCase()
 
@@ -358,19 +384,28 @@ function recoveryFailureMessage(failureKinds) {
   const kinds = Array.isArray(failureKinds) ? failureKinds : []
 
   if (kinds.includes('timeout') || kinds.includes('http_timeout')) {
-    return '模型续接等待 60 秒仍未返回，自动重试已暂停；渠道恢复后回复“继续”即可从当前任务继续。'
+    return '模型续接等待 60 秒仍未返回，任务未完成；请检查渠道恢复状态后手动重新提交。'
   }
   if (kinds.includes('http_rate_limit')) {
-    return '模型渠道当前请求过多，自动重试已暂停；稍后回复“继续”即可从当前任务继续。'
+    return '模型渠道当前请求过多，任务未完成；请稍后检查渠道状态后手动重新提交。'
   }
   if (kinds.includes('http_server_error')) {
-    return '模型渠道服务暂时不可用，自动重试已暂停；服务恢复后回复“继续”即可从当前任务继续。'
+    return '模型渠道服务暂时不可用，任务未完成；请在服务恢复后手动重新提交。'
+  }
+  if (
+    kinds.includes('http_timeout') ||
+    kinds.includes('upstream_timeout') ||
+    kinds.includes('transient_transport') ||
+    kinds.includes('transport_error') ||
+    kinds.includes('client_response_closed')
+  ) {
+    return '模型渠道连接在任务完成前中断，任务未完成；请检查网络或上游服务后手动重新提交。'
   }
   if (kinds.includes('http_request_rejected')) {
-    return '模型渠道拒绝了续接请求，请检查渠道与模型配置后回复“继续”。'
+    return '模型渠道拒绝了续接请求，任务未完成；请检查渠道与模型配置后手动重新提交。'
   }
 
-  return '模型渠道连续连接失败，自动续接已暂停；网络恢复后回复“继续”即可从当前任务继续。'
+  return '模型渠道连续连接失败，任务未完成；请检查网络或上游服务后手动重新提交。'
 }
 
 async function runWithAbortTimeout(parentSignal, timeoutMs, task) {
@@ -524,7 +559,33 @@ function coalesceAssistantMessages(messages) {
     ) {
       combineAssistantContent(previous, message)
       if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
-        previous.tool_calls = [...(previous.tool_calls || []), ...message.tool_calls]
+        previous.tool_calls ||= []
+
+        for (const incomingCall of message.tool_calls) {
+          const incomingId = String(incomingCall?.id || '').trim()
+          const existingCall = incomingId
+            ? previous.tool_calls.find(
+                candidate =>
+                  String(candidate?.id || '').trim() === incomingId &&
+                  toolFragmentsCompatible(candidate, incomingCall)
+              )
+            : null
+
+          if (!existingCall) {
+            previous.tool_calls.push(incomingCall)
+            continue
+          }
+
+          existingCall.function ||= {}
+          existingCall.function.name = mergeStreamedToolName(
+            existingCall.function.name,
+            incomingCall?.function?.name
+          )
+          existingCall.function.arguments = mergeStreamedToolArguments(
+            existingCall.function.arguments,
+            incomingCall?.function?.arguments
+          )
+        }
       }
       continue
     }
@@ -594,7 +655,13 @@ function chatMessagesFromInput(instructions, input, toolNames) {
     }
   }
 
-  if (!messages.length && typeof input === 'string') messages.push({ role: 'user', content: input })
+  if (typeof input === 'string' && input.trim()) {
+    const alreadyForwarded = messages.some(
+      message => message?.role === 'user' && String(message?.content || '').trim() === input.trim()
+    )
+
+    if (!alreadyForwarded) messages.push({ role: 'user', content: input })
+  }
 
   return coalesceAssistantMessages(messages)
 }
@@ -628,7 +695,8 @@ function createToolNameMap() {
     register,
     toChat: responseName => responsesToChat.get(responseName) || register(responseName),
     toResponses: chatName => chatToResponses.get(chatName) || chatName,
-    isCustomChat: chatName => customResponseNames.has(chatToResponses.get(chatName) || chatName)
+    isCustomChat: chatName => customResponseNames.has(chatToResponses.get(chatName) || chatName),
+    isKnownChat: chatName => chatToResponses.has(String(chatName || ''))
   }
 }
 
@@ -784,12 +852,59 @@ async function chatUpstreamErrorBody(upstream) {
   return readResponseTextLimited(upstream)
 }
 
-function promptToolCatalog(tools, messages = []) {
-  const conversationText = (Array.isArray(messages) ? messages : [])
+function boundedRelevanceText(value, maximumChars = 96_000) {
+  const text = String(value || '')
+
+  if (text.length <= maximumChars) return text
+
+  const headLength = Math.floor(maximumChars * 0.7)
+  const tailLength = maximumChars - headLength
+
+  return `${text.slice(0, headLength)}\n[...skill relevance context shortened...]\n${text.slice(-tailLength)}`
+}
+
+function responseToolChoiceNames(toolChoice) {
+  const names = []
+  const add = value => {
+    const name = String(value || '').trim()
+
+    if (name) names.push(name)
+  }
+
+  if (typeof toolChoice === 'string') return names
+  add(toolChoice?.name)
+  add(toolChoice?.function?.name)
+
+  for (const tool of Array.isArray(toolChoice?.tools) ? toolChoice.tools : []) {
+    add(tool?.name)
+    add(tool?.function?.name)
+  }
+
+  return [...new Set(names)]
+}
+
+function promptToolCatalog(tools, messages = [], options = {}) {
+  const source = Array.isArray(messages) ? messages : []
+  const systemText = source
+    .filter(message => String(message?.role || '').toLowerCase() === 'system')
+    .map(message => String(message?.content || ''))
+  const recentConversationText = source
+    .filter(message => String(message?.role || '').toLowerCase() !== 'system')
     .slice(-8)
     .map(message => String(message?.content || ''))
-    .join('\n')
-    .toLowerCase()
+  const skillContextText = source
+    .filter(
+      message =>
+        String(message?.role || '').toLowerCase() !== 'system' && isSkillContextMessage(message)
+    )
+    .slice(-2)
+    .map(message => String(message?.content || ''))
+  const conversationText = boundedRelevanceText(
+    [...systemText, ...skillContextText, ...recentConversationText].join('\n')
+  ).toLowerCase()
+  const requiredNames = new Set(
+    (Array.isArray(options.requiredToolNames) ? options.requiredToolNames : []).map(name => String(name).toLowerCase())
+  )
   const coreTools = new Set([
     'exec',
     'shell_command',
@@ -805,14 +920,17 @@ function promptToolCatalog(tools, messages = []) {
     .filter(tool => tool?.type === 'function' && tool.function?.name)
     .map((tool, index) => {
       const name = String(tool.function.name)
+      const normalizedName = name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()
       const nameTerms = name
         .toLowerCase()
         .split(/[^a-z0-9]+/)
         .filter(term => term.length >= 3)
       const relevance = nameTerms.reduce(
         (score, term) => score + (conversationText.includes(term) ? 20 : 0),
-        coreTools.has(name) ? 1000 : 0
-      )
+        coreTools.has(name.toLowerCase()) ? 1000 : 0
+      ) +
+        (requiredNames.has(name.toLowerCase()) || requiredNames.has(normalizedName) ? 10000 : 0) +
+        (conversationText.includes(name.toLowerCase()) || conversationText.includes(normalizedName) ? 500 : 0)
 
       return { tool, index, relevance }
     })
@@ -869,7 +987,9 @@ function toolEmulationRequest(request) {
   const sourceMessages = Array.isArray(request.messages) ? request.messages : []
   const continuation = anchorShortContinuation(sourceMessages)
   const originalMessages = continuation.messages
-  const catalog = promptToolCatalog(request.tools, originalMessages)
+  const catalog = promptToolCatalog(request.tools, originalMessages, {
+    requiredToolNames: responseToolChoiceNames(request.tool_choice)
+  })
   const allowed = new Set(catalog.map(tool => tool.name))
   const messages = []
   const removedControlSignalCount = sourceMessages.reduce(
@@ -962,6 +1082,7 @@ function toolEmulationRequest(request) {
       removedControlSignalCount,
       shortContinuationAnchored: continuation.anchored,
       interruptedContinuationAnchored: continuation.anchored && continuation.interrupted,
+      explicitSessionContinuation: continuation.explicitSessionContinuation === true,
       continuationTaskLength: continuation.task.length,
       continuationAssistantStateLength: continuation.assistantState.length,
       continuationToolResultCount: continuation.toolResultCount
@@ -1028,6 +1149,54 @@ function firstBalancedJsonObject(text) {
   return ''
 }
 
+function emulatedToolCallEnvelope(parsed) {
+  const envelope = parsed?.tool_call || parsed?.function || parsed
+  const name = String(envelope?.name || envelope?.tool || envelope?.tool_name || '').trim()
+  const callId = String(envelope?.call_id || envelope?.callId || envelope?.id || '').trim()
+
+  if (!name) return null
+
+  let argumentValue = envelope?.arguments ?? envelope?.args
+
+  if (argumentValue === undefined && name === 'exec' && envelope?.input !== undefined) {
+    argumentValue = { input: envelope.input }
+  }
+  if (argumentValue === undefined) argumentValue = {}
+
+  return { name, callId, argumentValue }
+}
+
+function emulatedArgumentFragment(name, value) {
+  if (typeof value !== 'string') return normalizeEmulatedToolArguments(name, value)
+
+  const text = value
+  const trimmed = text.trimStart()
+  const structuredFragment =
+    trimmed.startsWith('{') ||
+    trimmed.startsWith('[') ||
+    /[{}[\]":,]/.test(text)
+
+  // A marker may carry a partial JSON argument string.  Do not reinterpret
+  // that fragment as free-form exec input before the following marker arrives.
+  return structuredFragment ? text : normalizeEmulatedToolArguments(name, text)
+}
+
+function emulatedToolCallMarkers(text) {
+  const markers = []
+  const pattern =
+    /<(codex_tool_call|tool_call|function_call|custom_tool_call)\b[^>]*>\s*([\s\S]{1,1048576}?)\s*<\/\1\s*>/gi
+
+  for (const match of String(text || '').matchAll(pattern)) {
+    try {
+      markers.push(JSON.parse(match[2]))
+    } catch {
+      // A malformed marker is handled by the normal recovery path.
+    }
+  }
+
+  return markers
+}
+
 function parseEmulatedToolCall(content, allowed) {
   const text = String(content || '').slice(0, 1024 * 1024)
   const encodedFrame = parseEncodedToolFrames(text).find(frame => allowed.has(frame.name))
@@ -1042,33 +1211,83 @@ function parseEmulatedToolCall(content, allowed) {
       }
     }
   }
-  const marker = text.match(/<codex_tool_call>\s*([\s\S]{1,1048576}?)\s*<\/codex_tool_call>/i)
+  const markerPayloads = emulatedToolCallMarkers(text)
+  const marker = markerPayloads[0]
   const fenced = text.match(/```(?:json)?\s*([\s\S]{1,1048576}?)\s*```/i)
   const candidates = [
-    ...new Set([marker?.[1], fenced?.[1], text.trim(), firstBalancedJsonObject(text)].filter(Boolean))
+    ...new Set([marker ? JSON.stringify(marker) : '', fenced?.[1], text.trim(), firstBalancedJsonObject(text)].filter(Boolean))
   ]
+
+  const parsedMarkers = markerPayloads
+    .map(emulatedToolCallEnvelope)
+    .filter(candidate => candidate && allowed.has(candidate.name))
+
+  if (parsedMarkers.length) {
+    const groups = []
+
+    for (const markerCandidate of parsedMarkers) {
+      const fragment = emulatedArgumentFragment(markerCandidate.name, markerCandidate.argumentValue)
+      const explicitId = markerCandidate.callId
+      const group =
+        groups.find(candidate =>
+          explicitId
+            ? candidate.callId === explicitId
+            : !candidate.callId && candidate.name === markerCandidate.name
+        ) ||
+        (!explicitId && groups.at(-1)?.name === markerCandidate.name ? groups.at(-1) : null)
+
+      if (!group) {
+        groups.push({
+          name: markerCandidate.name,
+          callId: explicitId,
+          arguments: fragment,
+          fragments: [fragment]
+        })
+        continue
+      }
+
+      const merged = mergeStreamedToolArguments(group.arguments, fragment)
+      if (merged !== group.arguments) group.fragments.push(fragment)
+      group.arguments = merged
+    }
+
+    const selected = groups[0]
+    let argumentsValue = selected.arguments
+
+    // For a multi-marker call, reject an unmergeable/truncated argument set so
+    // Codex receives an explicit incomplete turn instead of a malformed tool.
+    if (selected.fragments.length > 1) {
+      try {
+        JSON.parse(argumentsValue)
+      } catch {
+        return null
+      }
+    }
+    argumentsValue = normalizeEmulatedToolArguments(selected.name, argumentsValue)
+
+    return {
+      id: selected.callId || `call_${randomUUID().replace(/-/g, '')}`,
+      type: 'function',
+      function: { name: selected.name, arguments: argumentsValue.slice(0, 1024 * 1024) },
+      argumentFragments: selected.fragments
+    }
+  }
 
   for (const raw of candidates) {
     try {
       const parsed = JSON.parse(raw)
-      const envelope = parsed?.tool_call || parsed?.function || parsed
-      const name = String(envelope?.name || envelope?.tool || envelope?.tool_name || '')
+      const envelope = emulatedToolCallEnvelope(parsed)
+      const name = envelope?.name || ''
 
       if (!allowed.has(name)) continue
 
-      let argumentValue = envelope?.arguments ?? envelope?.args
-
-      if (argumentValue === undefined && name === 'exec' && envelope?.input !== undefined) {
-        argumentValue = { input: envelope.input }
-      }
-      if (argumentValue === undefined) argumentValue = {}
-
-      const args = normalizeEmulatedToolArguments(name, argumentValue)
+      const args = normalizeEmulatedToolArguments(name, envelope.argumentValue)
 
       return {
-        id: `call_${randomUUID().replace(/-/g, '')}`,
+        id: envelope.callId || `call_${randomUUID().replace(/-/g, '')}`,
         type: 'function',
-        function: { name, arguments: args.slice(0, 1024 * 1024) }
+        function: { name, arguments: args.slice(0, 1024 * 1024) },
+        argumentFragments: [args]
       }
     } catch {
       // Try the next common Grok-compatible tool envelope.
@@ -1116,6 +1335,9 @@ async function synthesizeEmulatedToolResponse(
   const sourceFollowsToolResult = followsImmediateResponsesToolResult(sourceInput)
   const followsToolResult = convertedFollowsToolResult || sourceFollowsToolResult
   const likelyRequiresTool = requestLikelyRequiresTool(request?.messages, allowed)
+  const toolHistoryPresent = hasAgenticToolHistory(sourceInput)
+  const agenticTurn = likelyRequiresTool || (toolHistoryPresent && allowed.size > 0)
+  const completionSignalRequired = followsToolResult || agenticTurn
   const visibleAssistantText = content =>
     normalizeVisibleAssistantText(stripInternalToolTranscript(stripAgentControlSignals(content)))
   const rememberProgress = content => {
@@ -1141,7 +1363,10 @@ async function synthesizeEmulatedToolResponse(
     }
 
     const safeText = (includePartial = false) => {
-      const syntaxStart = emulatedToolSyntaxStart(buffer, { includePartial })
+      const syntaxStart = emulatedToolSyntaxStart(buffer, {
+        includePartial,
+        includeMarkdownFence: true
+      })
 
       return syntaxStart >= 0 ? buffer.slice(0, syntaxStart) : buffer
     }
@@ -1192,6 +1417,7 @@ async function synthesizeEmulatedToolResponse(
   const initialProgressObserver = createProgressObserver()
   let assistant = await readChatAssistantWithTransientRetry(upstream, options.retryInitialUpstream, {
     signal: options.signal,
+    allowCumulativeSnapshots: options.allowCumulativeSnapshots === true,
     onContentDelta: initialProgressObserver.onContentDelta
   })
 
@@ -1206,14 +1432,28 @@ async function synthesizeEmulatedToolResponse(
   const initialNaturalStall =
     !toolCall && looksLikeStalledToolContinuation(firstContent, { afterToolResult: followsToolResult })
   const initialMissingCompletionSignal =
-    !toolCall && requiresAgentCompletionSignal(firstContent, { afterToolResult: followsToolResult })
-  const initialToolOmission = toolIntentRequired && !toolCall && !awaitsExplicitUserInput(firstContent)
+    !toolCall &&
+    requiresAgentCompletionSignal(firstContent, {
+      afterToolResult: followsToolResult,
+      agenticTurn
+    })
+  const initialToolOmission =
+    toolIntentRequired &&
+    !toolCall &&
+    !hasAgentCompletionSignal(firstContent) &&
+    !awaitsExplicitUserInput(firstContent)
   const initialStalledContinuation = initialNaturalStall || initialMissingCompletionSignal || initialToolOmission
   const stalledAfterToolResult = followsToolResult && initialStalledContinuation
   const inferredTerminalCandidate = false
-  const unlimitedRecovery = initialStalledContinuation
-  const maximumRecoveryAttempts = 0
-  const maximumRecoveryMs = Math.max(0, Number(options.maximumRecoveryMs || 0)) || Infinity
+  // Recovery is an internal protocol repair, not an automatic user
+  // continuation.  It is deliberately finite so a provider outage cannot
+  // turn one Codex turn into an unbounded sequence of large requests.
+  const unlimitedRecovery = false
+  const maximumRecoveryAttempts = PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
+  const requestedRecoveryMs = Number(options.maximumRecoveryMs)
+  const maximumRecoveryMs = Number.isFinite(requestedRecoveryMs) && requestedRecoveryMs > 0
+    ? Math.min(requestedRecoveryMs, PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS)
+    : PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS
   const recoveryBudgetStartedAt = Date.now()
   let recoveryAssistant = assistant
   let recoveryAttempts = 0
@@ -1231,6 +1471,10 @@ async function synthesizeEmulatedToolResponse(
   const recoveryRequestMs = []
   const recoveryFailureKinds = []
   const recoveryDecisionKinds = []
+  const recoveryAttemptLimit = () =>
+    recoveryFailureKinds.some(recoveryFailureStopsLoop)
+      ? Math.min(maximumRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_TRANSPORT_ATTEMPTS)
+      : maximumRecoveryAttempts
   const publishProgress = content => {
     const text = visibleAssistantText(content)
 
@@ -1249,7 +1493,7 @@ async function synthesizeEmulatedToolResponse(
 
   while (
     !toolCall &&
-    (unlimitedRecovery || recoveryAttempts < maximumRecoveryAttempts) &&
+    (unlimitedRecovery || recoveryAttempts < recoveryAttemptLimit()) &&
     Date.now() - recoveryBudgetStartedAt < maximumRecoveryMs &&
     currentStalledContinuation &&
     !recoveryCircuitBreaker &&
@@ -1289,8 +1533,16 @@ async function synthesizeEmulatedToolResponse(
       if (recoveryFailureKinds.length === failureCountBeforeAttempt) recoveryFailureKinds.push('unknown')
       failedRecoveryAttempts += 1
       consecutiveRecoveryFailures += 1
-      if (unlimitedRecovery && consecutiveRecoveryFailures >= PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES) {
+      const attemptFailureKinds = recoveryFailureKinds.slice(failureCountBeforeAttempt)
+      const terminalFailureKind = attemptFailureKinds.find(recoveryFailureStopsLoop)
+
+      if (terminalFailureKind) {
+        recoveryCircuitBreaker = terminalFailureKind
+        break
+      }
+      if (consecutiveRecoveryFailures >= PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES) {
         recoveryCircuitBreaker = 'consecutive_transport_failures'
+        break
       }
       continue
     }
@@ -1321,9 +1573,16 @@ async function synthesizeEmulatedToolResponse(
     const retryMissingCompletionSignal =
       !retriedToolCall &&
       !explicitUserInputRequired &&
-      requiresAgentCompletionSignal(retryContent, { afterToolResult: followsToolResult })
+      requiresAgentCompletionSignal(retryContent, {
+        afterToolResult: followsToolResult,
+        agenticTurn
+      })
     const retryToolOmission =
-      toolIntentRequired && !retriedToolCall && !explicitUserInputRequired && !awaitsExplicitUserInput(retryContent)
+      toolIntentRequired &&
+      !retriedToolCall &&
+      !explicitUserInputRequired &&
+      !hasAgentCompletionSignal(retryContent) &&
+      !awaitsExplicitUserInput(retryContent)
     const retryStalledContinuation = retryNaturalStall || retryMissingCompletionSignal || retryToolOmission
 
     if (retryStalledContinuation) {
@@ -1338,7 +1597,7 @@ async function synthesizeEmulatedToolResponse(
         previousRecoveryFingerprint = recoveryFingerprint
         repeatedRecoveryResponses = recoveryFingerprint ? 1 : 0
       }
-      if (unlimitedRecovery && repeatedRecoveryResponses >= PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES) {
+      if (repeatedRecoveryResponses >= PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES) {
         recoveryCircuitBreaker = 'identical_stalled_responses'
       }
     }
@@ -1349,6 +1608,7 @@ async function synthesizeEmulatedToolResponse(
       !retryToolOmission &&
       shouldAcceptContinuationRecovery({
         afterToolResult: followsToolResult,
+        agenticTurn,
         explicitUserInputRequired,
         stalledAfterToolResult: followsToolResult && currentStalledContinuation,
         stalledContinuation: currentStalledContinuation,
@@ -1381,12 +1641,14 @@ async function synthesizeEmulatedToolResponse(
     (Boolean(recoveryCircuitBreaker) ||
       (!unlimitedRecovery && recoveryAttempts >= maximumRecoveryAttempts) ||
       recoveryTimeBudgetExhausted)
+  const incompleteReason =
+    !toolCall && initialStalledContinuation && !acceptedRetry ? 'agent_loop_recovery_exhausted' : ''
 
   if (!toolCall && exhaustedRecovery) {
     const finalText = recoveryCircuitBreaker
-      ? recoveryCircuitBreaker === 'consecutive_transport_failures'
+      ? recoveryCircuitBreaker === 'consecutive_transport_failures' || recoveryFailureStopsLoop(recoveryCircuitBreaker)
         ? recoveryFailureMessage(recoveryFailureKinds)
-        : '模型连续返回相同的中间计划，自动续接已暂停；回复“继续”即可从当前任务继续。'
+        : '模型连续返回相同的中间计划，任务未完成；请检查上游响应后手动重新提交。'
       : isMalformedToolRecovery(initialAssistant.content)
         ? 'The upstream model did not produce a valid Codex tool call.'
         : hasAgentCompletionSignal(initialAssistant.content)
@@ -1415,10 +1677,16 @@ async function synthesizeEmulatedToolResponse(
   const id = assistant.id || `chatcmpl-${randomUUID()}`
   const model = assistant.model || request.model
   const created = Math.floor(Date.now() / 1000)
-  const message = toolCall
-    ? { role: 'assistant', content: null, tool_calls: [toolCall] }
+  const wireToolCall = toolCall
+    ? (() => {
+        const { argumentFragments: _argumentFragments, ...call } = toolCall
+        return call
+      })()
+    : null
+  const message = wireToolCall
+    ? { role: 'assistant', content: null, tool_calls: [wireToolCall] }
     : { role: 'assistant', content: assistant.content }
-  const finishReason = toolCall ? 'tool_calls' : 'stop'
+  const finishReason = wireToolCall ? 'tool_calls' : 'stop'
   const payload = {
     id,
     object: 'chat.completion',
@@ -1436,11 +1704,11 @@ async function synthesizeEmulatedToolResponse(
     recoveryAttemptTimeoutMs: PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
     totalSynthesisMs: Date.now() - synthesisStartedAt,
     retryStartsWithJson: /^\s*{/.test(retryContent),
-    toolCallName: toolCall?.function?.name || '',
-    toolInputLength: String(toolCall?.function?.arguments || '').length,
-    toolCallUsesShellCommand: /tools\.shell_command/.test(String(toolCall?.function?.arguments || '')),
-    toolCallUsesWebRun: /tools\.web__run/.test(String(toolCall?.function?.arguments || '')),
-    toolCallMentionsCalculator: /\b(?:calc|calculator)(?:\.exe)?\b/i.test(String(toolCall?.function?.arguments || '')),
+    toolCallName: wireToolCall?.function?.name || '',
+    toolInputLength: String(wireToolCall?.function?.arguments || '').length,
+    toolCallUsesShellCommand: /tools\.shell_command/.test(String(wireToolCall?.function?.arguments || '')),
+    toolCallUsesWebRun: /tools\.web__run/.test(String(wireToolCall?.function?.arguments || '')),
+    toolCallMentionsCalculator: /\b(?:calc|calculator)(?:\.exe)?\b/i.test(String(wireToolCall?.function?.arguments || '')),
     continuationRecovery: {
       toolResultPresent: followsToolResult,
       convertedToolResultPresent: convertedFollowsToolResult,
@@ -1449,8 +1717,10 @@ async function synthesizeEmulatedToolResponse(
       stalledAfterToolResult,
       naturalStall: initialNaturalStall,
       toolIntentRequired,
+      agenticTurn,
+      toolHistoryPresent,
       initialToolOmission,
-      completionSignalRequired: followsToolResult,
+      completionSignalRequired,
       completionSignalPresent: hasAgentCompletionSignal(firstContent),
       missingCompletionSignal: initialMissingCompletionSignal,
       retryAttempted: recoveryAttempts > 0,
@@ -1466,7 +1736,7 @@ async function synthesizeEmulatedToolResponse(
       recoveryElapsedMs,
       recoveryTimeBudgetExhausted,
       acceptedRetry,
-      retryProducedToolCall: Boolean(toolCall && acceptedRetry),
+      retryProducedToolCall: Boolean(wireToolCall && acceptedRetry),
       recoveryDecisionKinds,
       acceptedRecoveryDecision: acceptedRetry ? recoveryDecisionKinds.at(-1) || 'legacy' : '',
       visibleProgressCount: visibleProgressMessages.length,
@@ -1480,8 +1750,12 @@ async function synthesizeEmulatedToolResponse(
       safetyStopTriggered,
       acceptedCompletionSignal,
       inferredTerminalCandidate,
-      inferredCompletionAccepted
-    }
+      inferredCompletionAccepted,
+      incomplete: Boolean(incompleteReason),
+      incompleteReason
+    },
+    incomplete: Boolean(incompleteReason),
+    incompleteReason
   }
 
   if (request.stream === false) {
@@ -1496,22 +1770,55 @@ async function synthesizeEmulatedToolResponse(
     return result
   }
 
-  const chunks = [
-    {
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model,
-      choices: [
+  const argumentFragments = wireToolCall
+    ? Array.isArray(toolCall.argumentFragments) && toolCall.argumentFragments.length
+      ? toolCall.argumentFragments
+      : [wireToolCall.function?.arguments || '']
+    : []
+  const contentChunks = wireToolCall
+    ? argumentFragments.map((fragment, index) => ({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              ...(index === 0 ? { role: 'assistant' } : {}),
+              tool_calls: [
+                {
+                  index: 0,
+                  id: wireToolCall.id,
+                  type: 'function',
+                  function: {
+                    ...(index === 0 ? { name: wireToolCall.function?.name } : {}),
+                    arguments: fragment
+                  }
+                }
+              ]
+            },
+            finish_reason: null
+          }
+        ]
+      }))
+    : [
         {
-          index: 0,
-          delta: toolCall
-            ? { role: 'assistant', tool_calls: [{ index: 0, ...toolCall }] }
-            : { role: 'assistant', content: assistant.content },
-          finish_reason: null
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [
+            {
+              index: 0,
+              delta: { role: 'assistant', content: assistant.content },
+              finish_reason: null
+            }
+          ]
         }
       ]
-    },
+  const chunks = [
+    ...contentChunks,
     {
       id,
       object: 'chat.completion.chunk',
@@ -1546,6 +1853,20 @@ function customInputFromChatArguments(value) {
   }
 
   return raw
+}
+
+function hasValidFunctionArguments(value) {
+  const raw = String(value || '').trim()
+
+  if (!raw) return false
+
+  try {
+    const parsed = JSON.parse(raw)
+
+    return Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+  } catch {
+    return false
+  }
 }
 
 function responseUsageFromChat(usage = {}) {
@@ -1594,7 +1915,7 @@ function writeEvent(response, type, payload) {
   response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...payload, sequence_number: sequenceNumber })}\n\n`)
 }
 
-function createStreamState(body, toolNames, response) {
+function createStreamState(body, toolNames, response, options = {}) {
   const state = {
     response,
     toolNames,
@@ -1606,15 +1927,24 @@ function createStreamState(body, toolNames, response) {
     started: false,
     textStarted: false,
     text: '',
+    chatDeltaNormalizer: createChatDeltaNormalizer({
+      allowCumulativeSnapshots: options.allowCumulativeSnapshots === true
+    }),
+    textStreamSanitizer: createVisibleAssistantStreamSanitizer(),
+    reasoningStreamSanitizer: createVisibleAssistantStreamSanitizer(),
     messageId: `msg_${randomUUID().replace(/-/g, '')}`,
     tools: new Map(),
     announcedToolIds: new Set(),
     usage: null,
     progressOutput: [],
     liveProgress: null,
+    nextOutputIndex: 0,
+    textOutputIndex: null,
     sawDone: false,
     terminalType: '',
     incompleteReason: '',
+    emulationIncomplete: false,
+    emulationIncompleteReason: '',
     reasoningClosed: false,
     outputOffset: 0,
     finished: false
@@ -1640,7 +1970,7 @@ function startLiveProgress(state) {
   if (state.liveProgress) return
   ensureResponseStarted(state)
   const item = progressItem('')
-  const outputIndex = state.progressOutput.length
+  const outputIndex = state.nextOutputIndex++
 
   state.liveProgress = { item, outputIndex, text: '' }
   writeEvent(state.response, 'response.output_item.added', {
@@ -1691,8 +2021,8 @@ function finishLiveProgress(state) {
     part
   })
   writeEvent(state.response, 'response.output_item.done', { output_index: live.outputIndex, item })
-  state.progressOutput.push(item)
-  state.outputOffset = state.progressOutput.length
+  state.progressOutput.push({ outputIndex: live.outputIndex, item })
+  state.outputOffset = state.nextOutputIndex
   state.liveProgress = null
 }
 
@@ -1718,27 +2048,169 @@ function ensureTextStarted(state) {
   ensureResponseStarted(state)
   if (state.textStarted) return
   state.textStarted = true
+  state.textOutputIndex = state.nextOutputIndex++
   writeEvent(state.response, 'response.output_item.added', {
-    output_index: state.outputOffset,
+    output_index: state.textOutputIndex,
     item: { id: state.messageId, type: 'message', status: 'in_progress', role: 'assistant', content: [] }
   })
   writeEvent(state.response, 'response.content_part.added', {
     item_id: state.messageId,
-    output_index: state.outputOffset,
+    output_index: state.textOutputIndex,
     content_index: 0,
     part: { type: 'output_text', text: '', annotations: [] }
   })
 }
 
-function toolStateFor(state, chatTool, fallbackIndex) {
+function toolFragmentsCompatible(existing, incoming, options = {}) {
+  const existingName = String(existing?.function?.name || existing?.name || '').trim()
+  const incomingName = String(incoming?.function?.name || incoming?.name || '').trim()
+
+  if (existingName && incomingName && existingName !== incomingName) {
+    const mergedName = mergeStreamedToolName(existingName, incomingName)
+    const namePrefix =
+      existingName.startsWith(incomingName) ||
+      incomingName.startsWith(existingName) ||
+      existingName.endsWith('_') ||
+      incomingName.endsWith('_') ||
+      options.isKnownName?.(mergedName) === true
+
+    if (!namePrefix) return false
+  }
+
+  const existingArguments = normalizeToolArguments(existing?.function?.arguments ?? existing?.arguments)
+  const incomingArguments = normalizeToolArguments(incoming?.function?.arguments ?? incoming?.arguments)
+
+  if (!existingArguments || !incomingArguments) return true
+  if (existingArguments === incomingArguments) return true
+
+  // Two complete JSON values with different content are distinct calls even
+  // when a provider accidentally reuses a call_id. Partial JSON fragments may
+  // still be merged by the streaming overlap normalizer below.
+  try {
+    const existingJson = JSON.parse(existingArguments)
+    const incomingJson = JSON.parse(incomingArguments)
+
+    if (JSON.stringify(existingJson) !== JSON.stringify(incomingJson)) return false
+  } catch {
+    // At least one fragment is incomplete; compare the coalesced value below.
+  }
+
+  try {
+    JSON.parse(mergeStreamedToolArguments(existingArguments, incomingArguments))
+    return true
+  } catch {
+    // Keep the conservative boundary checks for non-JSON/custom fragments.
+  }
+
+  return (
+    existingArguments.startsWith(incomingArguments) ||
+    incomingArguments.startsWith(existingArguments) ||
+    existingArguments.endsWith(incomingArguments) ||
+    incomingArguments.endsWith(existingArguments)
+  )
+}
+
+function toolArgumentFragmentsOverlap(existing, incoming) {
+  const current = normalizeToolArguments(existing?.function?.arguments ?? existing?.arguments)
+  const next = normalizeToolArguments(incoming?.function?.arguments ?? incoming?.arguments)
+
+  if (!current || !next) return false
+  const merged = mergeStreamedToolArguments(current, next)
+
+  return merged.length < current.length + next.length || current.startsWith(next) || next.startsWith(current)
+}
+
+function canAdoptUnidentifiedToolFragment(state, existing, incoming) {
+  if (!toolFragmentsCompatible(existing, incoming, { isKnownName: state.toolNames.isKnownChat })) return false
+  if (toolArgumentFragmentsOverlap(existing, incoming)) return true
+
+  const current = normalizeToolArguments(existing?.function?.arguments ?? existing?.arguments)
+  const next = normalizeToolArguments(incoming?.function?.arguments ?? incoming?.arguments)
+
+  return Boolean(current && next && hasValidFunctionArguments(mergeStreamedToolArguments(current, next)))
+}
+
+function toolStateFor(state, chatTool, fallbackIndex, batchContext = null) {
   const parsedIndex = Number(chatTool.index ?? fallbackIndex)
-  const index = Number.isInteger(parsedIndex) && parsedIndex >= 0 ? parsedIndex : state.tools.size
-  let tool = state.tools.get(index)
+  let index = Number.isInteger(parsedIndex) && parsedIndex >= 0 ? parsedIndex : state.tools.size
+  const incomingId = String(chatTool.id || '').trim()
+  let tool
+
+  const indexedTool = state.tools.get(index)
+  const sameBatchId = Boolean(incomingId && batchContext?.callIds?.has(incomingId))
+
+  // Prefer the provider's array index before doing any call-id lookup.  A
+  // provider can (incorrectly but commonly) reuse one call_id for parallel
+  // calls; the index is the only stable discriminator in that batch.  Keep
+  // the original provider id separately from our collision-safe wire id so a
+  // later replay can still find the right state after `uniqueToolCallId`
+  // appends `_d2`/`_d3`.
+  if (
+    indexedTool &&
+    (!incomingId || !indexedTool.providerId || indexedTool.providerId === incomingId) &&
+    toolFragmentsCompatible(indexedTool, chatTool, { isKnownName: state.toolNames.isKnownChat })
+  ) {
+    tool = indexedTool
+  }
+
+  // A provider may replay the same call_id with a different array index while
+  // streaming cumulative arguments. Reuse the already-open state when the
+  // name/argument fragments are compatible; different names remain separate
+  // calls so an invalid provider-side ID collision cannot collapse parallel
+  // tools into one.
+  if (!tool && incomingId && !sameBatchId) {
+    const candidates = [...state.tools.values()].filter(candidate => {
+      const providerId = String(candidate.providerId || '').trim()
+      const wireId = String(candidate.id || '').trim()
+
+      return (
+        (providerId === incomingId || wireId === incomingId) &&
+        toolFragmentsCompatible(candidate, chatTool, { isKnownName: state.toolNames.isKnownChat })
+      )
+    })
+    const indexedProviderCandidate = candidates.find(candidate => candidate.providerIndex === index)
+
+    // An exact provider-index match wins.  If there is only one candidate,
+    // allow a cross-index cumulative replay; with multiple candidates and no
+    // index match, create a separate item rather than merging two parallel
+    // calls nondeterministically.
+    tool = indexedProviderCandidate || (candidates.length === 1 ? candidates[0] : null)
+  }
+
+  // Some relays omit the id on the first fragment and add it on a later
+  // fragment (often while also changing the array index).  Claim only one
+  // still-unannounced, id-less candidate with matching name/overlap; never
+  // steal an already announced tool from another call.
+  if (!tool && incomingId && !indexedTool && !sameBatchId) {
+    const candidates = [...state.tools.values()].filter(candidate => {
+      if (candidate.announced || candidate.id || candidate.providerId) return false
+
+      return canAdoptUnidentifiedToolFragment(state, candidate, chatTool)
+    })
+
+    // Do not guess when more than one unannounced no-id call could match.
+    if (candidates.length === 1) tool = candidates[0]
+  }
+
+  if (
+    !tool &&
+    indexedTool &&
+    (!incomingId || !indexedTool.id || String(indexedTool.id).trim() === incomingId) &&
+    toolFragmentsCompatible(indexedTool, chatTool, { isKnownName: state.toolNames.isKnownChat })
+  ) {
+    tool = indexedTool
+  }
+
+  if (!tool) {
+    while (state.tools.has(index)) index += 1
+  }
 
   if (!tool) {
     tool = {
       index,
       id: '',
+      providerId: '',
+      providerIndex: index,
       itemId: '',
       name: '',
       arguments: '',
@@ -1748,7 +2220,11 @@ function toolStateFor(state, chatTool, fallbackIndex) {
     state.tools.set(index, tool)
   }
 
-  if (chatTool.id && !tool.announced) tool.id = String(chatTool.id)
+  if (incomingId) {
+    tool.providerId ||= incomingId
+    tool.providerIndex = index
+    if (!tool.announced) tool.id = incomingId
+  }
   if (chatTool.function?.name) tool.name = mergeStreamedToolName(tool.name, chatTool.function.name)
 
   return tool
@@ -1776,14 +2252,20 @@ function ensureToolItemId(state, tool) {
 }
 
 function announceTool(state, tool, options = {}) {
-  if (tool.announced || !tool.name || (!tool.id && options.force !== true)) return
+  if (
+    tool.announced ||
+    !tool.name ||
+    (!tool.id && options.force !== true) ||
+    !state.toolNames.isKnownChat(tool.name)
+  ) return
   ensureResponseStarted(state)
   ensureToolCallId(state, tool)
   tool.announced = true
   const custom = ensureToolItemId(state, tool)
+  tool.outputIndex = state.nextOutputIndex++
 
   writeEvent(state.response, 'response.output_item.added', {
-    output_index: state.outputOffset + (state.textStarted ? tool.index + 1 : tool.index),
+    output_index: tool.outputIndex,
     item: custom
       ? {
           id: tool.itemId,
@@ -1813,7 +2295,7 @@ function flushToolArgumentDelta(state, tool) {
   tool.emittedArgumentsLength = tool.arguments.length
   writeEvent(state.response, 'response.function_call_arguments.delta', {
     item_id: tool.itemId,
-    output_index: state.outputOffset + (state.textStarted ? tool.index + 1 : tool.index),
+    output_index: tool.outputIndex,
     delta
   })
 }
@@ -1826,8 +2308,12 @@ function consumeChatChunk(state, chunk) {
 
   for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
     const delta = choice.delta && Object.keys(choice.delta).length ? choice.delta : choice.message || choice.delta || {}
-    const reasoning = sanitizeVisibleAssistantDelta(reasoningFromChatDelta(delta))
-    const text = sanitizeVisibleAssistantDelta(textFromChatDelta(delta.content))
+    const toolBatchContext = { callIds: new Set() }
+    const reasoning = sanitizeVisibleAssistantDelta(
+      state.reasoningStreamSanitizer.push(reasoningFromChatDelta(delta))
+    )
+    const normalizedText = state.chatDeltaNormalizer.push(textFromChatDelta(delta.content))
+    const text = sanitizeVisibleAssistantDelta(state.textStreamSanitizer.push(normalizedText.delta))
 
     if (reasoning && !state.reasoningClosed) appendLiveProgress(state, reasoning)
 
@@ -1838,7 +2324,7 @@ function consumeChatChunk(state, chunk) {
       state.text += text
       writeEvent(state.response, 'response.output_text.delta', {
         item_id: state.messageId,
-        output_index: state.outputOffset,
+        output_index: state.textOutputIndex,
         content_index: 0,
         delta: text,
         logprobs: []
@@ -1846,7 +2332,10 @@ function consumeChatChunk(state, chunk) {
     }
 
     for (const [toolPosition, chatTool] of (Array.isArray(delta.tool_calls) ? delta.tool_calls : []).entries()) {
-      const tool = toolStateFor(state, chatTool, toolPosition)
+      const tool = toolStateFor(state, chatTool, toolPosition, toolBatchContext)
+      const incomingId = String(chatTool?.id || '').trim()
+
+      if (incomingId) toolBatchContext.callIds.add(incomingId)
 
       state.reasoningClosed = true
       tool.arguments = mergeStreamedToolArguments(tool.arguments, chatTool.function?.arguments)
@@ -1863,7 +2352,8 @@ function consumeChatChunk(state, chunk) {
           id: `call_${state.responseId.replace(/^resp_/, '')}`,
           function: delta.function_call
         },
-        0
+        0,
+        toolBatchContext
       )
 
       state.reasoningClosed = true
@@ -1875,45 +2365,62 @@ function consumeChatChunk(state, chunk) {
   }
 }
 
+function flushVisibleAssistantStreams(state) {
+  const reasoning = sanitizeVisibleAssistantDelta(state.reasoningStreamSanitizer.finish())
+  const text = sanitizeVisibleAssistantDelta(state.textStreamSanitizer.finish())
+
+  if (reasoning && !state.reasoningClosed) appendLiveProgress(state, reasoning)
+  if (!text) return
+
+  state.reasoningClosed = true
+  finishLiveProgress(state)
+  ensureTextStarted(state)
+  state.text += text
+  writeEvent(state.response, 'response.output_text.delta', {
+    item_id: state.messageId,
+    output_index: state.textOutputIndex,
+    content_index: 0,
+    delta: text,
+    logprobs: []
+  })
+}
+
 function finishResponseStream(state, options = {}) {
   if (state.finished) return
+  flushVisibleAssistantStreams(state)
+  const invalidToolArguments = [...state.tools.values()].filter(
+    tool => tool.name && !state.toolNames.isCustomChat(tool.name) && !hasValidFunctionArguments(tool.arguments)
+  )
+  if (invalidToolArguments.length) state.incompleteReason = 'invalid_tool_arguments'
   state.finished = true
   const terminalType = String(options.terminalType || state.terminalType || '')
-  const completed = options.completed === true || state.sawDone || terminalType === 'response.completed'
+  const completed =
+    !invalidToolArguments.length &&
+    options.completed !== false &&
+    (options.completed === true || state.sawDone || terminalType === 'response.completed')
   const status = completed ? 'completed' : 'incomplete'
   const incompleteReason = String(options.reason || state.incompleteReason || 'upstream_stream_ended')
   finishLiveProgress(state)
   ensureResponseStarted(state)
-  const output = [...state.progressOutput]
+  const outputEntries = state.progressOutput.map(entry => ({
+    outputIndex: Number(entry?.outputIndex),
+    item: entry?.item || entry
+  }))
+  const finalizations = []
 
   if (state.textStarted) {
     const part = { type: 'output_text', text: state.text, annotations: [] }
     const item = { id: state.messageId, type: 'message', status: 'completed', role: 'assistant', content: [part] }
-
-    writeEvent(state.response, 'response.output_text.done', {
-      item_id: state.messageId,
-      output_index: state.outputOffset,
-      content_index: 0,
-      text: state.text,
-      logprobs: []
-    })
-    writeEvent(state.response, 'response.content_part.done', {
-      item_id: state.messageId,
-      output_index: state.outputOffset,
-      content_index: 0,
-      part
-    })
-    writeEvent(state.response, 'response.output_item.done', { output_index: state.outputOffset, item })
-    output.push(item)
+    finalizations.push({ outputIndex: state.textOutputIndex, kind: 'text', item, part })
   }
 
   for (const tool of [...state.tools.values()].sort((left, right) => left.index - right.index)) {
     announceTool(state, tool, { force: true })
     if (!tool.announced) continue
-    flushToolArgumentDelta(state, tool)
-    const outputIndex = state.outputOffset + (state.textStarted ? tool.index + 1 : tool.index)
+    const outputIndex = tool.outputIndex
     const custom = state.toolNames.isCustomChat(tool.name)
     const input = customInputFromChatArguments(tool.arguments)
+    const invalidArguments = !custom && !hasValidFunctionArguments(tool.arguments)
     const item = custom
       ? {
           id: tool.itemId,
@@ -1926,12 +2433,40 @@ function finishResponseStream(state, options = {}) {
       : {
           id: tool.itemId,
           type: 'function_call',
-          status: 'completed',
+          status: invalidArguments ? 'incomplete' : 'completed',
           arguments: tool.arguments,
           call_id: tool.id,
-          name: state.toolNames.toResponses(tool.name)
-        }
+           name: state.toolNames.toResponses(tool.name)
+         }
 
+    finalizations.push({ outputIndex, kind: 'tool', item, tool, custom, input, invalidArguments })
+  }
+
+  for (const finalization of finalizations.sort((left, right) => left.outputIndex - right.outputIndex)) {
+    if (finalization.kind === 'text') {
+      writeEvent(state.response, 'response.output_text.done', {
+        item_id: state.messageId,
+        output_index: finalization.outputIndex,
+        content_index: 0,
+        text: state.text,
+        logprobs: []
+      })
+      writeEvent(state.response, 'response.content_part.done', {
+        item_id: state.messageId,
+        output_index: finalization.outputIndex,
+        content_index: 0,
+        part: finalization.part
+      })
+      writeEvent(state.response, 'response.output_item.done', {
+        output_index: finalization.outputIndex,
+        item: finalization.item
+      })
+      outputEntries.push({ outputIndex: finalization.outputIndex, item: finalization.item })
+      continue
+    }
+
+    const { tool, custom, input, outputIndex, item, invalidArguments } = finalization
+    if (!invalidArguments) flushToolArgumentDelta(state, tool)
     if (custom) {
       writeEvent(state.response, 'response.custom_tool_call_input.delta', {
         item_id: tool.itemId,
@@ -1943,7 +2478,7 @@ function finishResponseStream(state, options = {}) {
         output_index: outputIndex,
         input
       })
-    } else {
+    } else if (!invalidArguments) {
       writeEvent(state.response, 'response.function_call_arguments.done', {
         item_id: tool.itemId,
         output_index: outputIndex,
@@ -1952,9 +2487,12 @@ function finishResponseStream(state, options = {}) {
     }
 
     writeEvent(state.response, 'response.output_item.done', { output_index: outputIndex, item })
-    output.push(item)
+    outputEntries.push({ outputIndex, item })
   }
 
+  const output = outputEntries
+    .sort((left, right) => left.outputIndex - right.outputIndex)
+    .map(entry => entry.item)
   const responsePayload = baseResponse(state, status, output, responseUsageFromChat(state.usage || {}))
 
   if (!completed) {
@@ -2008,7 +2546,8 @@ function finishIncompleteResponseAfterError(response, kind, error) {
   const reason = incompleteReasonForTransport(kind, error)
   const errorPayload = {
     type: reason,
-    message: String(error?.message || error || '上游响应未完成').slice(0, 500)
+    message: String(error?.message || error || '上游响应未完成').slice(0, 500),
+    retryable: false
   }
 
   if (state) {
@@ -2035,9 +2574,38 @@ function finishIncompleteResponseAfterError(response, kind, error) {
   return true
 }
 
-async function pipeChatStreamToResponses(upstream, body, toolNames, response, preparedState = null) {
+function finishControlledProviderFailure(response, body, kind, message) {
+  const state = createStreamState(body, createToolNameMap(), response)
+  const reason = String(kind || 'upstream_provider_error')
+  const error = {
+    type: reason,
+    message: String(message || '模型渠道暂时不可用，任务未完成；请检查渠道状态后手动重新提交。').slice(0, 500),
+    retryable: false
+  }
+
+  if (body?.stream === false) {
+    const payload = baseResponse(state, 'incomplete', [], null)
+    payload.error = error
+    payload.incomplete_details = { reason, retryable: false }
+    response.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'x-codex-retryable': 'false'
+    })
+    response.end(JSON.stringify(payload))
+    return
+  }
+
+  finishResponseStream(state, {
+    completed: false,
+    terminalType: 'response.incomplete',
+    reason,
+    error
+  })
+}
+
+async function pipeChatStreamToResponses(upstream, body, toolNames, response, preparedState = null, options = {}) {
   ensureResponsesStreamHeaders(response)
-  const state = preparedState || createStreamState(body, toolNames, response)
+  const state = preparedState || createStreamState(body, toolNames, response, options)
   const stopHeartbeat = startResponsesStreamHeartbeat(response)
 
   try {
@@ -2045,9 +2613,19 @@ async function pipeChatStreamToResponses(upstream, body, toolNames, response, pr
     const parser = createParser({
       onEvent(event) {
         if (event.data === '[DONE]') {
-          state.sawDone = true
-          state.terminalType = 'done'
-          finishResponseStream(state)
+          if (state.emulationIncomplete) {
+            state.terminalType = 'response.incomplete'
+            state.incompleteReason = state.emulationIncompleteReason || 'agent_loop_recovery_exhausted'
+            finishResponseStream(state, {
+              completed: false,
+              terminalType: state.terminalType,
+              reason: state.incompleteReason
+            })
+          } else {
+            state.sawDone = true
+            state.terminalType = 'done'
+            finishResponseStream(state)
+          }
           return
         }
 
@@ -2100,16 +2678,17 @@ async function pipeChatStreamToResponses(upstream, body, toolNames, response, pr
   }
 }
 
-async function sendNonStreamingResponse(upstream, body, toolNames, response) {
+async function sendNonStreamingResponse(upstream, body, toolNames, response, options = {}) {
   const progressMessages = upstream.codexProgressMessages
   const chat = await readResponseJsonLimited(upstream)
-  const state = createStreamState(body, toolNames, response)
+  const state = createStreamState(body, toolNames, response, options)
 
   state.progressOutput = (Array.isArray(progressMessages) ? progressMessages : [])
     .map(text => String(text || '').trim())
     .filter(Boolean)
-    .map(progressItem)
+    .map((text, outputIndex) => ({ outputIndex, item: progressItem(text) }))
   state.outputOffset = state.progressOutput.length
+  state.nextOutputIndex = state.progressOutput.length
   state.responseId = String(chat.id || state.responseId).replace(/^chatcmpl-/, 'resp_')
   state.model = chat.model || state.model
   state.usage = chat.usage || null
@@ -2140,7 +2719,10 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
     tool.arguments = message.function_call.arguments || ''
   }
 
-  const output = [...state.progressOutput]
+  const invalidToolArguments = [...state.tools.values()].some(
+    tool => tool.name && !state.toolNames.isCustomChat(tool.name) && !hasValidFunctionArguments(tool.arguments)
+  )
+  const output = state.progressOutput.map(entry => entry.item || entry)
 
   if (state.textStarted) {
     output.push({
@@ -2167,9 +2749,9 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
             name: toolNames.toResponses(tool.name)
           }
         : {
-            id: tool.itemId,
-            type: 'function_call',
-            status: 'completed',
+          id: tool.itemId,
+          type: 'function_call',
+          status: hasValidFunctionArguments(tool.arguments) ? 'completed' : 'incomplete',
             arguments: tool.arguments,
             call_id: tool.id,
             name: toolNames.toResponses(tool.name)
@@ -2177,8 +2759,19 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response) {
     )
   }
 
+  const incompleteReason = invalidToolArguments
+    ? 'invalid_tool_arguments'
+    : String(upstream.codexToolEmulation?.incompleteReason || '')
+  const responsePayload = baseResponse(
+    state,
+    incompleteReason ? 'incomplete' : 'completed',
+    output,
+    responseUsageFromChat(state.usage || {})
+  )
+
+  if (incompleteReason) responsePayload.incomplete_details = { reason: incompleteReason }
   response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-  response.end(JSON.stringify(baseResponse(state, 'completed', output, responseUsageFromChat(state.usage || {}))))
+  response.end(JSON.stringify(responsePayload))
 }
 
 function readJsonBody(request, limit = 25 * 1024 * 1024) {
@@ -2441,7 +3034,10 @@ async function requestCompactionSummary(channel, rawBody, capability, preferredW
   const assistant =
     wireApi === 'responses'
       ? await readResponsesAssistant(upstream)
-      : await readChatAssistantWithTransientRetry(upstream, sendChat, { signal: upstreamSignal })
+      : await readChatAssistantWithTransientRetry(upstream, sendChat, {
+          signal: upstreamSignal,
+          allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+        })
 
   return {
     ok: true,
@@ -2676,6 +3272,190 @@ function responseToolNames(tools) {
   return names.filter(Boolean)
 }
 
+function containsSkillContext(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '')
+
+  return /(?:<skills_instructions\b|\bSKILL\.md\b|\bskill\b|skill instructions|技能(?:说明|指令))/i.test(text)
+}
+
+function requestHasSkillContext(body) {
+  if (containsSkillContext(body?.instructions)) return true
+  if (typeof body?.input === 'string' && containsSkillContext(body.input)) return true
+
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    if (containsSkillContext(item?.content) || containsSkillContext(item?.output) || containsSkillContext(item?.input)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+const ACTIVE_SKILL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
+const RESERVED_SLASH_COMMANDS = new Set([
+  'clear',
+  'compact',
+  'fork',
+  'goal',
+  'help',
+  'mcp',
+  'model',
+  'new',
+  'permissions',
+  'plan',
+  'resume',
+  'status'
+])
+
+function activeSkillMetadataIsValid(value) {
+  if (typeof value === 'string') return ACTIVE_SKILL_NAME_PATTERN.test(value.trim())
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+
+  const name = String(value.name || value.id || '').trim()
+
+  return ACTIVE_SKILL_NAME_PATTERN.test(name)
+}
+
+function textFromSkillSelectionValue(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value
+      .map(item => textFromSkillSelectionValue(item))
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (!value || typeof value !== 'object') return ''
+
+  if (typeof value.text === 'string') return value.text
+
+  return [value.content, value.input, value.output, value.arguments]
+    .map(item => textFromSkillSelectionValue(item))
+    .filter(Boolean)
+    .join('\n')
+}
+
+function skillCatalogText(body) {
+  const values = [body?.instructions]
+
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    const role = String(item?.role || '').toLowerCase()
+    if (role === 'developer' || role === 'system') values.push(textFromSkillSelectionValue(item))
+  }
+
+  return values.filter(Boolean).join('\n')
+}
+
+function hasSkillCatalogForName(body, name) {
+  const catalog = skillCatalogText(body)
+
+  if (!/<skills_instructions\b|\bSKILL\.md\b/i.test(catalog)) return false
+
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+  return new RegExp(`(?:^|[^A-Za-z0-9_.:-])${escaped}(?:$|[^A-Za-z0-9_.:-])`, 'im').test(catalog)
+}
+
+function hasExplicitSkillSelection(body) {
+  const values = []
+
+  if (typeof body?.input === 'string') values.push(body.input)
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    if (String(item?.role || '').toLowerCase() === 'user') values.push(textFromSkillSelectionValue(item))
+  }
+
+  for (const value of values) {
+    if (/\[\[skill:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\]\]/i.test(value)) return true
+
+    const firstLine = String(value).trim().split(/\r?\n/, 1)[0]
+    const slashMatch = firstLine.match(/^(?:\/|\$)([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})(?:\s|$)/)
+
+    if (!slashMatch) continue
+
+    const name = slashMatch[1]
+    if (RESERVED_SLASH_COMMANDS.has(name.toLowerCase())) continue
+    if (hasSkillCatalogForName(body, name)) return true
+  }
+
+  return false
+}
+
+function requestHasActiveSkillContext(body) {
+  const activeSkillMetadata = body?.metadata?.codex_internal?.active_skill
+
+  if (activeSkillMetadataIsValid(activeSkillMetadata)) return true
+
+  if (hasExplicitSkillSelection(body)) return true
+
+  if (typeof body?.input === 'string' && explicitSkillRequest(body.input)) return true
+
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    const role = String(item?.role || '').toLowerCase()
+    const isUserMessage = item?.type === 'message' && role === 'user'
+    const isToolOutput = item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output'
+    const isToolCall = item?.type === 'function_call' || item?.type === 'custom_tool_call'
+    const toolText = JSON.stringify({
+      name: item?.name,
+      arguments: item?.arguments,
+      input: item?.input,
+      output: item?.output
+    })
+
+    // The global developer `<skills_instructions>` catalog is present on many
+    // ordinary turns and is deliberately not enough to activate the bridge.
+    // A concrete Skill read/call or its result is an active-turn signal.
+    if (
+      (isToolCall || isToolOutput) &&
+      /(?:\bSKILL\.md\b|\.agents[\\/]skills|read.{0,30}skill|读取.{0,30}技能)/i.test(toolText)
+    ) {
+      return true
+    }
+    if (
+      isUserMessage &&
+      explicitSkillRequest(item?.content)
+    ) {
+      return true
+    }
+    if (
+      isToolOutput &&
+      /(?:<skills_instructions\b|\bSKILL\.md\b|\.agents[\\/]skills|\.codex[\\/]skills)/i.test(
+        textFromSkillSelectionValue({ content: item?.content, output: item?.output })
+      )
+    ) {
+      return true
+    }
+  }
+
+  // Some integrations provide an explicit selected-skill envelope. Restrict
+  // this check to request-level instructions and developer/system blocks so a
+  // user can’t activate the bridge by quoting the internal tag in ordinary
+  // content.
+  const envelopeText = [String(body?.instructions || '')]
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    const role = String(item?.role || '').toLowerCase()
+    if (role === 'developer' || role === 'system') envelopeText.push(textFromSkillSelectionValue(item))
+  }
+
+  return /<(?:selected|active)_skill\b/i.test(envelopeText.join('\n'))
+}
+
+function explicitSkillRequest(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '')
+
+  return /(?:使用|按照|遵循|调用|执行|读取|加载|应用|use|follow|read|load|run|apply).{0,100}(?:技能|skill)|(?:技能|skill).{0,100}(?:使用|按照|遵循|调用|执行|读取|加载|应用|use|follow|read|load|run|apply)/i.test(
+    text
+  )
+}
+
+function shouldForceGrokAgentLoopEmulation(capability, body, converted) {
+  if (capability?.adapter !== 'grok-chat') return false
+  if (!Array.isArray(converted?.request?.tools) || !converted.request.tools.length) return false
+
+  // Keep ordinary native Grok tool probing/backward compatibility unchanged;
+  // the extra emulation boundary is required when Codex has injected a Skill
+  // contract, where a one-call native probe cannot prove a multi-step loop.
+  return requestHasActiveSkillContext(body)
+}
+
 async function pipeFetchBody(upstream, response, headers = {}) {
   const contentType = String(headers['content-type'] || upstream.headers.get('content-type') || '').toLowerCase()
   if (contentType.includes('text/event-stream') && !response.headersSent) response.writeHead(upstream.status, headers)
@@ -2786,6 +3566,7 @@ async function handleResponsesRequest(
       item => item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output'
     ).length,
     sourceFollowsToolResult: followsImmediateResponsesToolResult(inputItems),
+    skillContextPresent: requestHasSkillContext(body),
     ...requestCodexContext,
     sourceInputTailKinds: inputItems.slice(-6).map(item => ({
       type: String(item?.type || (item?.role ? 'message' : '')),
@@ -2880,6 +3661,11 @@ async function handleResponsesRequest(
       const failureKind = upstreamFailureKind(upstream.status, buffer.toString('utf8'))
       const userMessage = userFacingUpstreamFailure(failureKind, Number(upstream.codexRetryDiagnostic?.retryCount || 0))
 
+      if (recoveryFailureStopsLoop(failureKind)) {
+        finishControlledProviderFailure(response, body, failureKind, userMessage || buffer.toString('utf8'))
+        return
+      }
+
       if (userMessage) {
         response.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8' })
         response.end(JSON.stringify({ error: { type: failureKind, message: userMessage } }))
@@ -2948,7 +3734,9 @@ async function handleResponsesRequest(
         ),
       payload
     )
-  const forcePromptToolEmulation = capability.toolTransport === 'prompt-emulated' && forwardedNames.length > 0
+  const forceGrokAgentLoopEmulation = shouldForceGrokAgentLoopEmulation(capability, body, converted)
+  const forcePromptToolEmulation =
+    (capability.toolTransport === 'prompt-emulated' || forceGrokAgentLoopEmulation) && forwardedNames.length > 0
   let emulatedStreamState = null
   let upstream = forcePromptToolEmulation
     ? new Response(JSON.stringify({ error: { message: 'tool calls are not supported by the selected adapter' } }), {
@@ -2969,18 +3757,29 @@ async function handleResponsesRequest(
 
     if (fallbackUpstream.ok) {
       reportWireApi('responses')
+      const imageDelivery = nativeResponseImageDelivery(fallbackUpstream, {
+        generatedImagesRoot: requestOptions.generatedImagesRoot
+      })
+      const [, nativeImageDelivery] = await Promise.all([
+        pipeFetchBody(
+          imageDelivery.delivery,
+          response,
+          upstreamResponseHeaders(imageDelivery.delivery, body.stream)
+        ),
+        imageDelivery.completion
+      ])
       if (typeof onDiagnostic === 'function') {
         try {
-          onDiagnostic({ ...commonDiagnostic, wireApi: 'responses', protocolFallback: chatFailure })
+          onDiagnostic({
+            ...commonDiagnostic,
+            wireApi: 'responses',
+            protocolFallback: chatFailure,
+            nativeImageDelivery
+          })
         } catch {
           // Diagnostics must never interrupt the model request.
         }
       }
-      await pipeFetchBody(fallbackUpstream, response, {
-        'content-type':
-          fallbackUpstream.headers.get('content-type') ||
-          (body.stream === false ? 'application/json; charset=utf-8' : 'text/event-stream; charset=utf-8')
-      })
       return
     }
     await readResponseBufferLimited(fallbackUpstream)
@@ -2993,7 +3792,11 @@ async function handleResponsesRequest(
     const imageRecoveryInstruction = emulatedImageTool
       ? `For image generation, call the exact allowed ${emulatedImageTool.name} tool with a prompt argument; reading an image skill is not completion. `
       : 'For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. '
-    emulatedStreamState = converted.request.stream ? createStreamState(body, converted.toolNames, response) : null
+    emulatedStreamState = converted.request.stream
+      ? createStreamState(body, converted.toolNames, response, {
+          allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+        })
+      : null
     let stopHeartbeat = () => {}
 
     if (emulatedStreamState) {
@@ -3015,6 +3818,7 @@ async function handleResponsesRequest(
       try {
         let structuredRecoverySupported = true
         let recoveryContextMessageCount = 0
+        let recoverySystemMessageCount = 0
 
         upstream = await synthesizeEmulatedToolResponse(
           fallbackUpstream,
@@ -3023,9 +3827,8 @@ async function handleResponsesRequest(
           async (firstAssistant, retryContext = {}) => {
             const strictToolRecovery = Boolean(retryContext.stalledContinuation)
             const decisionContract = recoveryDecisionContract(AGENT_COMPLETION_SIGNAL)
-            const recoveryAttemptDescription = retryContext.unlimitedRecovery
-              ? `This is bounded recovery attempt ${retryContext.attempt || 1} with no fixed round limit; only duplicate-response and transport-failure circuit breakers remain. `
-              : `This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 1}. `
+            const recoveryAttemptDescription =
+              `This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 1}. `
             const recoveryPrompt = retryContext.naturalStall
               ? 'The previous answer stopped at a plan-only sentence instead of executing the next Codex agent step. ' +
                 recoveryAttemptDescription +
@@ -3057,8 +3860,12 @@ async function handleResponsesRequest(
                       'Continue the original user task now. Reading or loading a skill is not a final answer. ' +
                       decisionContract
             const conversation = recoveryConversationContext(emulation.payload.messages)
+            const preservedSystemInstructions = recoverySystemInstructions(emulation.payload.messages, {
+              maximumChars: 24000
+            })
 
             recoveryContextMessageCount = conversation.length
+            recoverySystemMessageCount = preservedSystemInstructions.length
             const retryPayload = {
               ...emulation.payload,
               messages: [
@@ -3066,6 +3873,7 @@ async function handleResponsesRequest(
                   role: 'system',
                   content: recoveryPrompt
                 },
+                ...preservedSystemInstructions.map(content => ({ role: 'system', content })),
                 {
                   role: 'user',
                   content: JSON.stringify({
@@ -3093,7 +3901,11 @@ async function handleResponsesRequest(
                     return readChatAssistantWithTransientRetry(
                       retryUpstream,
                       () => sendUpstream(retryPayload, recoverySignal),
-                      { signal: recoverySignal, onContentDelta: retryContext.onContentDelta }
+                      {
+                        signal: recoverySignal,
+                        onContentDelta: retryContext.onContentDelta,
+                        allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+                      }
                     )
                   }
 
@@ -3114,7 +3926,11 @@ async function handleResponsesRequest(
                       return readChatAssistantWithTransientRetry(
                         compatibleRetryUpstream,
                         () => sendUpstream(compatibleRetryPayload, recoverySignal),
-                        { signal: recoverySignal, onContentDelta: retryContext.onContentDelta }
+                        {
+                          signal: recoverySignal,
+                          onContentDelta: retryContext.onContentDelta,
+                          allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+                        }
                       )
                     }
                     retryContext.recordFailure?.(recoveryFailureKindForStatus(compatibleRetryUpstream.status))
@@ -3136,6 +3952,7 @@ async function handleResponsesRequest(
           body.input,
           {
             signal: upstreamSignal,
+            allowCumulativeSnapshots: capability.adapter === 'grok-chat',
             retryInitialUpstream: () => sendUpstream(emulation.payload, upstreamSignal),
             maximumRecoveryMs: PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
             onProgressStart: emulatedStreamState
@@ -3165,9 +3982,16 @@ async function handleResponsesRequest(
           }
         )
         if (upstream.codexToolEmulation) {
+          if (emulatedStreamState) {
+            emulatedStreamState.emulationIncomplete = upstream.codexToolEmulation.incomplete === true
+            emulatedStreamState.emulationIncompleteReason = String(
+              upstream.codexToolEmulation.incompleteReason || 'agent_loop_recovery_exhausted'
+            )
+          }
           upstream.codexToolEmulation.contextContinuity = {
             ...emulation.contextContinuity,
-            recoveryContextMessageCount
+            recoveryContextMessageCount,
+            recoverySystemMessageCount
           }
         }
       } finally {
@@ -3183,6 +4007,7 @@ async function handleResponsesRequest(
             ...diagnostic,
             toolTransport: 'prompt-emulated',
             forcedByCompatibilityTest: forcePromptToolEmulation,
+            forcedBySkillCompatibility: forceGrokAgentLoopEmulation,
             nativeToolFailureKind,
             outcome: 'upstream_accepted',
             emulation: upstream.codexToolEmulation || null
@@ -3225,6 +4050,16 @@ async function handleResponsesRequest(
       return
     }
 
+    if (recoveryFailureStopsLoop(failureDiagnostic.upstreamFailureKind)) {
+      finishControlledProviderFailure(
+        response,
+        body,
+        failureDiagnostic.upstreamFailureKind,
+        userMessage || errorBody
+      )
+      return
+    }
+
     if (userMessage) {
       response.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8' })
       response.end(JSON.stringify({ error: { type: failureDiagnostic.upstreamFailureKind, message: userMessage } }))
@@ -3246,9 +4081,13 @@ async function handleResponsesRequest(
     }
   }
   if (converted.request.stream) {
-    await pipeChatStreamToResponses(upstream, body, converted.toolNames, response, emulatedStreamState)
+    await pipeChatStreamToResponses(upstream, body, converted.toolNames, response, emulatedStreamState, {
+      allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+    })
   } else {
-    await sendNonStreamingResponse(upstream, body, converted.toolNames, response)
+    await sendNonStreamingResponse(upstream, body, converted.toolNames, response, {
+      allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+    })
   }
 }
 
@@ -3461,6 +4300,8 @@ function createProtocolProxy({
 module.exports = {
   DEFAULT_PROTOCOL_PROXY_PORT,
   PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS,
+  PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS,
+  PROMPT_TOOL_RECOVERY_MAX_TRANSPORT_ATTEMPTS,
   PROMPT_TOOL_RECOVERY_MAX_CONSECUTIVE_FAILURES,
   PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES,
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
@@ -3480,10 +4321,16 @@ module.exports = {
   modelIdentityInstruction,
   normalizeCompactionInput,
   normalizeResponsesToolItemIds,
+  parseEmulatedToolCall,
+  promptToolCatalog,
+  requestHasActiveSkillContext,
+  requestHasSkillContext,
   recoveryFailureKindForError,
   recoveryFailureKindForStatus,
+  recoveryFailureStopsLoop,
   recoveryFailureMessage,
   runWithAbortTimeout,
+  shouldForceGrokAgentLoopEmulation,
   startResponsesStreamHeartbeat,
   upstreamFailureKind,
   upstreamRejectsNativeTools,

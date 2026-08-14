@@ -139,6 +139,7 @@ function nativeResponseImageDelivery(upstream, options = {}) {
   let terminalDelivered = false
   const materialized = []
   const seenItems = new Set()
+  const observedItems = new Set()
 
   const finish = () => {
     if (!resolveCompletion) return
@@ -154,9 +155,11 @@ function nativeResponseImageDelivery(upstream, options = {}) {
     const index = Number.isInteger(outputIndex) && outputIndex >= 0 ? outputIndex : maxOutputIndex + 1
     const key = String(item?.id || `output-${index}-bytes-${encoded.length}`)
 
+    if (!observedItems.has(key)) {
+      observedItems.add(key)
+      stats.imageCount += 1
+    }
     if (seenItems.has(key)) return
-    seenItems.add(key)
-    stats.imageCount += 1
     try {
       const image = materializeNativeImageGenerationCall(item, {
         generatedImagesRoot: options.generatedImagesRoot,
@@ -165,6 +168,10 @@ function nativeResponseImageDelivery(upstream, options = {}) {
       })
 
       if (image) {
+        // Mark only after successful materialization.  A provider can emit a
+        // placeholder item first and a valid result with the same id in the
+        // terminal response; the latter must still be delivered to Codex.
+        seenItems.add(key)
         materialized.push(image)
         stats.materializedCount += 1
       }

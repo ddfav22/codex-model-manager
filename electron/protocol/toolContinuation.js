@@ -28,7 +28,7 @@ function awaitsExplicitUserInput(content) {
 }
 
 function requiresAgentCompletionSignal(content, options = {}) {
-  if (!options.afterToolResult) return false
+  if (!options.afterToolResult && !options.agenticTurn) return false
 
   const text = String(content || '').trim()
 
@@ -145,6 +145,22 @@ function requestLikelyRequiresTool(messages, allowedToolNames = []) {
   return currentInformation.test(text) || explicitLocalAction.test(text)
 }
 
+function hasAgenticToolHistory(input) {
+  if (!Array.isArray(input)) return false
+
+  let toolCallCount = 0
+  let toolOutputCount = 0
+
+  for (const item of input) {
+    const type = String(item?.type || '').toLowerCase()
+
+    if (type === 'function_call' || type === 'custom_tool_call') toolCallCount += 1
+    if (type === 'function_call_output' || type === 'custom_tool_call_output') toolOutputCount += 1
+  }
+
+  return toolCallCount > 0 && toolOutputCount > 0
+}
+
 function isMalformedToolRecovery(content) {
   const text = String(content || '').trim()
 
@@ -228,6 +244,7 @@ function looksLikeStalledToolContinuation(content, options = {}) {
 
 function shouldAcceptContinuationRecovery({
   afterToolResult,
+  agenticTurn,
   explicitUserInputRequired,
   stalledAfterToolResult,
   stalledContinuation,
@@ -237,7 +254,13 @@ function shouldAcceptContinuationRecovery({
   if (retryToolCall) return true
   if (!(stalledContinuation ?? stalledAfterToolResult) || !String(retryContent || '').trim()) return false
   if (explicitUserInputRequired) return !isMalformedToolRecovery(retryContent)
-  if (requiresAgentCompletionSignal(retryContent, { afterToolResult: Boolean(afterToolResult) })) return false
+  if (
+    requiresAgentCompletionSignal(retryContent, {
+      afterToolResult: Boolean(afterToolResult),
+      agenticTurn: Boolean(agenticTurn)
+    })
+  )
+    return false
   if (looksLikeStalledToolContinuation(retryContent, { afterToolResult: Boolean(stalledAfterToolResult) })) return false
 
   return !isMalformedToolRecovery(retryContent)
@@ -251,6 +274,7 @@ module.exports = {
   followsImmediateToolResult,
   followsImmediateResponsesToolResult,
   hasAgentCompletionSignal,
+  hasAgenticToolHistory,
   isMalformedToolRecovery,
   isSyntheticContinuationContext,
   latestActionableUserText,
