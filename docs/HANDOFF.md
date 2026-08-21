@@ -240,3 +240,9 @@ npm run test:installer
 - v1.2.74 发布并原位部署到稳定映射盘后，首次真实启动复现了 Chromium GPU 子进程连续九次 `error_code=18`，随后 `GPU process isn't usable` 致命退出；这解释了新版程序文件存在但进程和新日志缺失的现场症状。
 - v1.2.75 在 Electron 初始化前调用 `app.disableHardwareAcceleration()`。管理器 UI 不依赖 WebGL，该兼容模式不影响 Codex、模型代理、本地工具或用户数据；`process.start` 同时记录 `hardwareAcceleration=disabled`。
 - 新增模块边界断言，确保禁用硬件加速发生在便携数据目录初始化之前。源码、打包、安装器、云端发布和稳定目录启动日志仍待完整复验。
+
+## 2026-08-21：1.2.104 Grok/NewAPI 图片合同修复
+
+- ainiubi 的 `grok-imagine-image-quality` MCP 工具只公开 `prompt`、`n=1`、允许的 `aspect_ratio` 和 `resolution=1k`；不再把 GPT 图片字段放进 Grok schema，避免模型按 schema 生成后被本地校验拒绝。
+- 图片运行时保存所有已同步且有图片模型的 Token/模型候选。只有明确的模型授权/可用性错误才切换候选；429/5xx 最多有界退避一次，网络超时不盲目重发。
+- 上游错误保留分类、状态、Retry-After 和安全请求 ID，但不记录 Key、提示词或完整 Base64。真实渠道权限 smoke 仍需用户在更新后的客户端中自行验证。

@@ -341,6 +341,29 @@ const skillResultCatalog = promptToolCatalog(skillTools, [
   ...Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `later non-skill message ${index}` }))
 ])
 assert.ok(skillResultCatalog.some(tool => tool.name === 'mcp__security__scan_target'))
+const imageToolCatalog = promptToolCatalog(
+  [
+    ...Array.from({ length: 30 }, (_, index) => ({
+      type: 'function',
+      function: {
+        name: `noise_image_context_${index}`,
+        description: '',
+        parameters: { type: 'object', properties: {} }
+      }
+    })),
+    {
+      type: 'function',
+      function: {
+        name: 'mcp__chatgpt_model_manager_image__generate_image',
+        description: 'Generate an image through NewAPI POST /v1/images/generations.',
+        parameters: { type: 'object', properties: { prompt: { type: 'string' } } }
+      }
+    }
+  ],
+  [{ role: 'user', content: '生成一张图片' }]
+)
+
+assert.ok(imageToolCatalog.some(tool => tool.name === 'mcp__chatgpt_model_manager_image__generate_image'))
 assert.strictEqual(
   requestHasSkillContext({ instructions: '<skills_instructions>Use the skill.</skills_instructions>' }),
   true
@@ -556,7 +579,10 @@ assert.strictEqual(
 assert.strictEqual(stripToolControlTags('prefix <tool_call /> suffix'), 'prefix  suffix')
 assert.strictEqual(stripToolControlTags('prefix <tool_call></tool_call> suffix'), 'prefix  suffix')
 assert.strictEqual(stripToolControlTags('prefix <tool_call'), 'prefix ')
-assert.strictEqual(stripToolControlTags('prefix <function_call_output>done</function_call_output> suffix'), 'prefix  suffix')
+assert.strictEqual(
+  stripToolControlTags('prefix <function_call_output>done</function_call_output> suffix'),
+  'prefix  suffix'
+)
 assert.strictEqual(
   stripToolControlTags('```html\n<function_call>{"name":"exec"}</function_call>\n```'),
   '```html\n<function_call>{"name":"exec"}</function_call>\n```'

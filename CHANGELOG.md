@@ -2,6 +2,16 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.104 - 2026-08-21
+
+### Grok/NewAPI image generation
+
+- Align the Grok Imagine quality MCP schema with the ainiubi/NewAPI contract: only expose `prompt`, `n=1`, `aspect_ratio`, and `resolution=1k`; do not advertise GPT-only fields that the validator rejects.
+- Restrict `grok-imagine-image-2.0` quality to `low` or `medium`, and recognize namespaced model IDs by their leaf name.
+- Keep an ordered set of validated image-token/model candidates; fail over only for explicit model-access failures and retry 429/5xx at most once with a bounded delay.
+- Preserve structured upstream status/type/request-id diagnostics without exposing credentials, prompts, or Base64 payloads.
+- Add schema, namespaced model, permission failover, MCP payload, and upstream retry regressions.
+
 ## 1.2.103 - 2026-08-14
 
 ### Grok tool-control text boundary

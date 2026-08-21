@@ -13,7 +13,7 @@ const {
   isTransientResponsesProbeFailure,
   responsesProbeRuntimeOptions
 } = require('./protocol/probeRequests')
-const { preferredImageGenerationModel } = require('./protocol/newApiImageGeneration')
+const { preferredImageGenerationModels } = require('./protocol/newApiImageGeneration')
 const {
   compressDirectoryZip,
   compressZip,
@@ -2197,21 +2197,24 @@ function newApiImageGenerationRuntime(channel) {
     ...keys.filter(item => String(item?.id) !== String(selectedTokenId))
   ]
 
+  const candidates = []
+
   for (const item of orderedKeys) {
     if (item?.status !== undefined && Number(item.status) !== 1) continue
-    const defaultModel = preferredImageGenerationModel(item?.models)
     const apiKey = item?.envKey ? readUserEnvVar(item.envKey) : ''
 
-    if (defaultModel && apiKey) {
-      return {
-        apiKey,
-        baseUrl: channel.baseUrl,
-        defaultModel
-      }
+    if (!apiKey) continue
+    for (const defaultModel of preferredImageGenerationModels(item?.models)) {
+      candidates.push({ apiKey, baseUrl: channel.baseUrl, defaultModel })
     }
   }
 
-  return null
+  if (!candidates.length) return null
+
+  return {
+    ...candidates[0],
+    candidates
+  }
 }
 
 async function postChatCompletion(endpoint, apiKey, body, signal) {

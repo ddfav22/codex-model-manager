@@ -12,26 +12,11 @@ const MAX_IMAGE_ERROR_BYTES = 64 * 1024
 const MAX_IMAGE_PROMPT_LENGTH = 8000
 const MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 60_000
+const IMAGE_GENERATION_MAX_RETRIES = 1
+const IMAGE_GENERATION_MAX_RETRY_DELAY_MS = 5_000
 const SUPPORTED_MCP_PROTOCOLS = new Set(['2025-06-18', '2025-03-26', '2024-11-05'])
-const GROK_CLI_IMAGE_ASPECT_RATIOS = new Set([
-  '1:1',
-  '16:9',
-  '9:16',
-  '4:3',
-  '3:4',
-  '3:2',
-  '2:3',
-  '2:1',
-  '1:2',
-  'auto'
-])
-const IMAGE_ASPECT_RATIOS = new Set([
-  ...GROK_CLI_IMAGE_ASPECT_RATIOS,
-  '9:19.5',
-  '19.5:9',
-  '9:20',
-  '20:9'
-])
+const GROK_CLI_IMAGE_ASPECT_RATIOS = new Set(['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '2:1', '1:2', 'auto'])
+const IMAGE_ASPECT_RATIOS = new Set([...GROK_CLI_IMAGE_ASPECT_RATIOS, '9:19.5', '19.5:9', '9:20', '20:9'])
 const PREFERRED_IMAGE_MODELS = [
   'grok-imagine-image-quality',
   'grok-imagine-image-2.0',
@@ -77,25 +62,57 @@ function isImageGenerationModel(value) {
   )
 }
 
-function preferredImageGenerationModel(models) {
-  const candidates = [
-    ...new Set((Array.isArray(models) ? models : []).map(model => String(model || '').trim()))
-  ].filter(isImageGenerationModel)
-
-  for (const preferred of PREFERRED_IMAGE_MODELS) {
-    const matched = candidates.find(model => model.toLowerCase() === preferred)
-
-    if (matched) return matched
-  }
-
-  return candidates[0] || ''
-}
-
-function imageModelFamily(value) {
+function imageModelLeaf(value) {
   const normalized = String(value || '')
     .trim()
     .toLowerCase()
-  const leaf = normalized.split(/[/:]/).pop() || normalized
+
+  return normalized.split(/[/:]/).pop() || normalized
+}
+
+function preferredImageGenerationModels(models) {
+  const candidates = [
+    ...new Set((Array.isArray(models) ? models : []).map(model => String(model || '').trim()))
+  ].filter(isImageGenerationModel)
+  const ordered = []
+
+  for (const preferred of PREFERRED_IMAGE_MODELS) {
+    for (const candidate of candidates) {
+      if (imageModelLeaf(candidate) === preferred && !ordered.includes(candidate)) ordered.push(candidate)
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (!ordered.includes(candidate)) ordered.push(candidate)
+  }
+
+  return ordered
+}
+
+function preferredImageGenerationModel(models) {
+  return preferredImageGenerationModels(models)[0] || ''
+}
+
+class ImageGenerationUpstreamError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'ImageGenerationUpstreamError'
+    this.code = 'IMAGE_GENERATION_UPSTREAM'
+    this.status = Number(details.status || 0) || 502
+    this.upstreamStatus = Number(details.upstreamStatus || details.status || 0) || 0
+    this.errorType = String(details.errorType || 'image_generation_upstream_error')
+    this.upstreamErrorType = String(details.upstreamErrorType || '')
+    this.upstreamCode = String(details.upstreamCode || '')
+    this.requestId = String(details.requestId || '')
+    this.retryAfterSeconds = Number(details.retryAfterSeconds || 0) || 0
+    this.retryAfterProvided = Boolean(details.retryAfterProvided)
+    this.retryable = Boolean(details.retryable)
+    this.modelAccess = Boolean(details.modelAccess)
+  }
+}
+
+function imageModelFamily(value) {
+  const leaf = imageModelLeaf(value)
 
   if (leaf === DEFAULT_IMAGE_MODEL) return 'grok-quality'
   if (/^grok-imagine(?:-image)?(?:$|-)/.test(leaf)) return 'grok-imagine'
@@ -128,13 +145,14 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
   const prompt = boundedString(argumentsValue.prompt, 'prompt', { maximum: MAX_IMAGE_PROMPT_LENGTH })
 
   if (!prompt) throw new ImageGenerationValidationError('prompt 不能为空')
-  const model =
-    boundedString(argumentsValue.model, 'model', {
-      maximum: 128,
-      pattern: /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/
-    }) ||
-    options.defaultModel ||
-    DEFAULT_IMAGE_MODEL
+  const requestedModel = boundedString(argumentsValue.model, 'model', {
+    maximum: 128,
+    pattern: /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/
+  })
+  if (requestedModel && options.allowModelOverride === false) {
+    throw new ImageGenerationValidationError('generate_image 使用当前渠道已验证的图片模型，不接受 model 覆盖')
+  }
+  const model = requestedModel || options.defaultModel || DEFAULT_IMAGE_MODEL
   const size = boundedString(argumentsValue.size, 'size', {
     maximum: 32,
     pattern: /^(?:auto|\d{2,5}x\d{2,5}|\d{1,2}:\d{1,2}(?:_[a-zA-Z0-9]+)?)$/i
@@ -187,6 +205,7 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
   const modelFamily = imageModelFamily(model)
   const grokCliImage = modelFamily === 'grok-quality'
   const grokImagineImage = modelFamily === 'grok-imagine'
+  const grokImagine2 = /^grok-imagine-image-2\.0(?:$|-)/.test(imageModelLeaf(model))
   const gptImage = modelFamily === 'gpt-image'
   const dallEImage = modelFamily === 'dall-e'
   const normalizedOutputFormat = outputFormat.toLowerCase() === 'jpg' ? 'jpeg' : outputFormat.toLowerCase()
@@ -229,6 +248,12 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
       throw new ImageGenerationValidationError(
         `${model} 不使用 ${unsupported.join('、')}；请改用 aspect_ratio、resolution、quality 和 response_format`
       )
+    }
+    if (quality && !grokImagine2) {
+      throw new ImageGenerationValidationError(`${model} 不使用 quality；仅 grok-imagine-image-2.0 支持 low 或 medium`)
+    }
+    if (quality && !/^(?:low|medium)$/i.test(quality)) {
+      throw new ImageGenerationValidationError(`${model} 的 quality 只支持 low 或 medium`)
     }
   } else if (gptImage) {
     const unsupported = [
@@ -688,7 +713,163 @@ function redactedUpstreamError(text, status, model = '', secrets = []) {
   return message || `图片生成上游返回 HTTP ${status}`
 }
 
-async function generateNewApiImage(channel, argumentsValue, options = {}) {
+function boundedDiagnosticToken(value, maximum = 160) {
+  return String(value || '')
+    .replace(/[^a-zA-Z0-9._:/-]/g, '')
+    .slice(0, maximum)
+}
+
+function imageUpstreamError(upstream, responseText, model, secrets) {
+  let payload = null
+
+  try {
+    payload = JSON.parse(String(responseText || ''))
+  } catch {
+    payload = null
+  }
+  const upstreamStatus = Number(upstream?.status || 0) || 0
+  const upstreamMessage = String(payload?.error?.message || payload?.message || '')
+  const retryable = upstreamStatus === 429 || (upstreamStatus >= 500 && upstreamStatus <= 599)
+  const retryAfterHeader = String(upstream?.headers?.get?.('retry-after') || '').trim()
+  const retryAfterNumber = Number(retryAfterHeader)
+  const retryAfterDate = Date.parse(retryAfterHeader)
+  const retryAfterSeconds =
+    Number.isFinite(retryAfterNumber) && retryAfterNumber >= 0
+      ? retryAfterNumber
+      : Number.isFinite(retryAfterDate)
+        ? Math.max(0, (retryAfterDate - Date.now()) / 1000)
+        : 0
+  const upstreamErrorType = boundedDiagnosticToken(payload?.error?.type || payload?.type)
+  const upstreamCode = boundedDiagnosticToken(payload?.error?.code || payload?.code)
+  const requestId = boundedDiagnosticToken(
+    upstream?.headers?.get?.('x-oneapi-request-id') ||
+      upstream?.headers?.get?.('x-request-id') ||
+      payload?.error?.request_id ||
+      payload?.request_id
+  )
+  const errorType =
+    upstreamStatus === 400
+      ? 'image_generation_invalid_request'
+      : upstreamStatus === 401
+        ? 'image_generation_auth_error'
+        : upstreamStatus === 403
+          ? 'image_generation_permission_error'
+          : upstreamStatus === 429
+            ? 'image_generation_rate_limit'
+            : 'image_generation_upstream_error'
+
+  return new ImageGenerationUpstreamError(redactedUpstreamError(responseText, upstreamStatus, model, secrets), {
+    status: upstreamStatus >= 400 && upstreamStatus <= 599 ? upstreamStatus : 502,
+    upstreamStatus,
+    errorType,
+    upstreamErrorType,
+    upstreamCode,
+    requestId,
+    retryAfterSeconds,
+    retryAfterProvided: Boolean(retryAfterHeader),
+    modelAccess: /\b(?:model|access|authoriz|permission|entitlement|available|support)\b/i.test(upstreamMessage),
+    retryable
+  })
+}
+
+function imageCandidateCanFailOver(error) {
+  if (!(error instanceof ImageGenerationUpstreamError)) return false
+  if (error.upstreamStatus === 401) return true
+  if (![400, 403, 404].includes(error.upstreamStatus)) return false
+
+  return error.modelAccess
+}
+
+function imageRetryDelayMs(error, retryIndex, options = {}) {
+  if (error.retryAfterProvided && Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds >= 0) {
+    return Math.min(IMAGE_GENERATION_MAX_RETRY_DELAY_MS, Math.round(error.retryAfterSeconds * 1000))
+  }
+  const random = Math.max(0, Math.min(1, Number((options.randomImpl || Math.random)()) || 0))
+  const jitter = 0.75 + random * 0.5
+
+  return Math.min(IMAGE_GENERATION_MAX_RETRY_DELAY_MS, Math.round(750 * 2 ** retryIndex * jitter))
+}
+
+async function waitForImageRetry(milliseconds, options = {}) {
+  if (milliseconds <= 0) return
+  if (typeof options.sleepImpl === 'function') {
+    await options.sleepImpl(milliseconds, options.signal)
+    return
+  }
+  if (options.signal?.aborted) throw options.signal.reason || new Error('Image generation was cancelled')
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(done, milliseconds)
+    const onAbort = () => done(options.signal.reason || new Error('Image generation was cancelled'))
+
+    function done(error) {
+      clearTimeout(timer)
+      options.signal?.removeEventListener?.('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+
+    timer.unref?.()
+    options.signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
+function imageGenerationCandidates(channel, argumentsValue, options = {}) {
+  const imageRuntime =
+    channel?.imageGeneration && typeof channel.imageGeneration === 'object' ? channel.imageGeneration : null
+
+  if (options.requireImageRuntime && !imageRuntime?.defaultModel) {
+    throw new ImageGenerationValidationError(
+      'No validated image model is available for this channel. Sync the NewAPI keys and model catalog again.'
+    )
+  }
+  const candidates = []
+  const add = candidate => {
+    const baseUrl = String(candidate?.baseUrl || '').trim()
+    const apiKey = String(candidate?.apiKey || '').trim()
+    const defaultModel = String(candidate?.defaultModel || '').trim()
+
+    if (!baseUrl || !apiKey || !defaultModel) return
+    if (
+      candidates.some(item => item.baseUrl === baseUrl && item.apiKey === apiKey && item.defaultModel === defaultModel)
+    ) {
+      return
+    }
+    candidates.push({ baseUrl, apiKey, defaultModel })
+  }
+
+  for (const candidate of Array.isArray(imageRuntime?.candidates) ? imageRuntime.candidates : []) add(candidate)
+  if (imageRuntime) add(imageRuntime)
+
+  const explicitModel = String(argumentsValue?.model || options.defaultModel || '').trim()
+
+  if (explicitModel) {
+    const matching = candidates.filter(
+      candidate =>
+        candidate.defaultModel.toLowerCase() === explicitModel.toLowerCase() ||
+        imageModelLeaf(candidate.defaultModel) === imageModelLeaf(explicitModel)
+    )
+
+    if (matching.length) return matching
+    if (!options.requireImageRuntime) {
+      return [{ baseUrl: channel?.baseUrl, apiKey: channel?.apiKey, defaultModel: explicitModel }].filter(
+        candidate => candidate.baseUrl && candidate.apiKey
+      )
+    }
+  }
+
+  if (!candidates.length) {
+    add({
+      baseUrl: channel?.baseUrl,
+      apiKey: channel?.apiKey,
+      defaultModel: options.defaultModel || DEFAULT_IMAGE_MODEL
+    })
+  }
+
+  return candidates
+}
+
+async function generateNewApiImageSingleCandidate(channel, argumentsValue, options = {}) {
   if (!channel?.baseUrl || !channel?.apiKey) throw new Error('图片生成渠道或 API Key 不可用')
 
   const imageRuntime =
@@ -738,7 +919,7 @@ async function generateNewApiImage(channel, argumentsValue, options = {}) {
       promptLength: payload.prompt.length,
       durationMs: Date.now() - startedAt
     })
-    throw new Error(redactedUpstreamError(responseText, upstream.status, payload.model, [imageApiKey]))
+    throw imageUpstreamError(upstream, responseText, payload.model, [imageApiKey])
   }
 
   let responsePayload
@@ -764,7 +945,107 @@ async function generateNewApiImage(channel, argumentsValue, options = {}) {
     durationMs: Date.now() - startedAt
   })
 
-  return { payload, responsePayload, result }
+  return { payload, responsePayload, result, status: upstream.status }
+}
+
+async function generateNewApiImage(channel, argumentsValue, options = {}) {
+  const candidates = imageGenerationCandidates(channel, argumentsValue, options)
+
+  if (!candidates.length) throw new Error('Image generation channel or API key is unavailable')
+  const startedAt = Date.now()
+  let lastError = null
+
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+    const candidate = candidates[candidateIndex]
+    let payload
+
+    try {
+      payload = imageGenerationPayload(argumentsValue, {
+        ...options,
+        defaultModel: candidate.defaultModel
+      })
+    } catch (error) {
+      if (candidateIndex === 0) throw error
+      continue
+    }
+
+    for (let retryIndex = 0; retryIndex <= IMAGE_GENERATION_MAX_RETRIES; retryIndex += 1) {
+      try {
+        const generated = await generateNewApiImageSingleCandidate(
+          { baseUrl: candidate.baseUrl, apiKey: candidate.apiKey },
+          argumentsValue,
+          {
+            ...options,
+            defaultModel: candidate.defaultModel,
+            onDiagnostic: undefined
+          }
+        )
+
+        options.onDiagnostic?.({
+          operation: 'newapi_image_generation',
+          outcome: 'success',
+          status: generated.status,
+          model: generated.payload.model,
+          promptLength: generated.payload.prompt.length,
+          candidateIndex,
+          candidateCount: candidates.length,
+          retryCount: retryIndex,
+          imageCount: generated.result.structuredContent.images.length,
+          responseKinds: generated.result.structuredContent.images.map(image => image.kind),
+          durationMs: Date.now() - startedAt
+        })
+
+        return generated
+      } catch (error) {
+        lastError = error
+        if (!(error instanceof ImageGenerationUpstreamError)) throw error
+
+        if (error.retryable && retryIndex < IMAGE_GENERATION_MAX_RETRIES) {
+          const delayMs = imageRetryDelayMs(error, retryIndex, options)
+
+          options.onDiagnostic?.({
+            operation: 'newapi_image_generation',
+            outcome: 'retry_scheduled',
+            status: error.upstreamStatus,
+            errorType: error.upstreamErrorType,
+            errorCode: error.upstreamCode,
+            requestId: error.requestId,
+            model: payload.model,
+            promptLength: payload.prompt.length,
+            candidateIndex,
+            candidateCount: candidates.length,
+            retryCount: retryIndex + 1,
+            retryDelayMs: delayMs,
+            durationMs: Date.now() - startedAt
+          })
+          await waitForImageRetry(delayMs, options)
+          continue
+        }
+
+        const failOver = imageCandidateCanFailOver(error) && candidateIndex + 1 < candidates.length
+
+        options.onDiagnostic?.({
+          operation: 'newapi_image_generation',
+          outcome: failOver ? 'candidate_rejected' : 'upstream_error',
+          status: error.upstreamStatus,
+          errorType: error.errorType,
+          errorCode: error.upstreamCode,
+          requestId: error.requestId,
+          retryable: error.retryable,
+          model: payload.model,
+          promptLength: payload.prompt.length,
+          candidateIndex,
+          candidateCount: candidates.length,
+          retryCount: retryIndex,
+          durationMs: Date.now() - startedAt
+        })
+        if (!failOver) throw error
+        break
+      }
+    }
+  }
+
+  throw lastError || new Error('No usable image model and NewAPI key combination is available')
 }
 
 function imageToolDefinition(options = {}) {
@@ -772,12 +1053,9 @@ function imageToolDefinition(options = {}) {
   const family = imageModelFamily(defaultModel)
   const grokDefault = family === 'grok-quality' || family === 'grok-imagine'
   const qualityDefault = family === 'grok-quality'
+  const grokImagine2 = /^grok-imagine-image-2\.0(?:$|-)/.test(imageModelLeaf(defaultModel))
   const properties = {
     prompt: { type: 'string', minLength: 1, maxLength: MAX_IMAGE_PROMPT_LENGTH },
-    model: {
-      type: 'string',
-      description: `Image model ID. The channel default is ${defaultModel}; use parameters supported by that model family.`
-    },
     n: {
       type: 'integer',
       minimum: 1,
@@ -785,16 +1063,6 @@ function imageToolDefinition(options = {}) {
       description: qualityDefault
         ? `${defaultModel} currently supports only one image per call.`
         : 'Number of images, limited by the selected NewAPI image model.'
-    },
-    size: { type: 'string', description: 'GPT/DALL-E image size, such as 1024x1024 or auto.' },
-    quality: { type: 'string', description: 'GPT or Grok Imagine quality value.' },
-    style: { type: 'string', description: 'DALL-E style.' },
-    output_format: { type: 'string', enum: ['png', 'webp', 'jpeg'], description: 'GPT image output format.' },
-    output_compression: {
-      type: 'integer',
-      minimum: 0,
-      maximum: 100,
-      description: 'GPT JPEG/WebP compression.'
     }
   }
 
@@ -809,13 +1077,37 @@ function imageToolDefinition(options = {}) {
       enum: qualityDefault ? ['1k'] : ['1k', '2k'],
       description: qualityDefault ? `${defaultModel} currently supports resolution 1k.` : 'Grok Imagine resolution.'
     }
+    if (grokImagine2) {
+      properties.quality = {
+        type: 'string',
+        enum: ['low', 'medium'],
+        description: 'grok-imagine-image-2.0 generation quality.'
+      }
+    }
+  } else if (family === 'gpt-image') {
+    properties.size = { type: 'string', description: 'GPT image size, such as 1024x1024 or auto.' }
+    properties.quality = { type: 'string', description: 'GPT image quality.' }
+    properties.output_format = {
+      type: 'string',
+      enum: ['png', 'webp', 'jpeg'],
+      description: 'GPT image output format.'
+    }
+    properties.output_compression = {
+      type: 'integer',
+      minimum: 0,
+      maximum: 100,
+      description: 'GPT JPEG/WebP compression.'
+    }
+  } else if (family === 'dall-e') {
+    properties.size = { type: 'string', description: 'DALL-E image size.' }
+    properties.quality = { type: 'string', description: 'DALL-E image quality.' }
+    properties.style = { type: 'string', description: 'DALL-E style.' }
   }
 
   return {
     name: IMAGE_TOOL_NAME,
     title: 'NewAPI 图片生成',
-    description:
-      'Generate an image through the selected NewAPI channel using POST /v1/images/generations. Use this when the user asks to create or generate an image. The tool returns either displayable image data or a renderable image URL.',
+    description: `Generate an image with the channel-validated ${defaultModel} model through NewAPI POST /v1/images/generations. Use only the parameters present in this schema. The tool returns displayable image data or a renderable image URL.`,
     inputSchema: {
       type: 'object',
       properties,
@@ -906,8 +1198,9 @@ async function handleImageMcpRequest(request, response, channel, options = {}) {
     return
   }
   if (method === 'tools/list') {
+    const defaultModel = String(channel?.imageGeneration?.defaultModel || '').trim()
     jsonRpcResponse(response, id, {
-      tools: [imageToolDefinition({ defaultModel: channel?.imageGeneration?.defaultModel })]
+      tools: defaultModel ? [imageToolDefinition({ defaultModel })] : []
     })
     return
   }
@@ -928,6 +1221,8 @@ async function handleImageMcpRequest(request, response, channel, options = {}) {
     const generated = await generateNewApiImage(channel, body.params?.arguments || {}, {
       ...options,
       defaultResponseFormat: 'b64_json',
+      allowModelOverride: false,
+      requireImageRuntime: true,
       materializeImages: true
     })
 
@@ -959,9 +1254,11 @@ module.exports = {
   materializedImageToolResult,
   nativeImageGenerationBase64,
   ImageGenerationValidationError,
+  ImageGenerationUpstreamError,
   isImageGenerationModel,
   isAllowedMcpOrigin,
   preferredImageGenerationModel,
+  preferredImageGenerationModels,
   safeImageUrl,
   upstreamImagesUrl
 }
