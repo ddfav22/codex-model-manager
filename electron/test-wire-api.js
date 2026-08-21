@@ -681,7 +681,9 @@ async function main() {
           'content-type': 'application/json; charset=utf-8',
           'retry-after': '0'
         })
-        response.end(JSON.stringify({ error: { type: 'provider_unavailable', message: 'upstream service unavailable' } }))
+        response.end(
+          JSON.stringify({ error: { type: 'provider_unavailable', message: 'upstream service unavailable' } })
+        )
         return
       }
 
@@ -847,24 +849,20 @@ async function main() {
       }
 
       if (requestBody.model === 'grok-tool-fragment-idempotency') {
-        const hasFirstResult = requestBody.messages?.some(
-          message => {
-            const serialized = JSON.stringify(message || '')
-            return (
-              (message?.role === 'tool' && message.tool_call_id === 'call_fragment_loop') ||
-              (serialized.includes('tool_result') && serialized.includes('call_fragment_loop'))
-            )
-          }
-        )
-        const hasSecondResult = requestBody.messages?.some(
-          message => {
-            const serialized = JSON.stringify(message || '')
-            return (
-              (message?.role === 'tool' && message.tool_call_id === 'call_fragment_second') ||
-              (serialized.includes('tool_result') && serialized.includes('call_fragment_second'))
-            )
-          }
-        )
+        const hasFirstResult = requestBody.messages?.some(message => {
+          const serialized = JSON.stringify(message || '')
+          return (
+            (message?.role === 'tool' && message.tool_call_id === 'call_fragment_loop') ||
+            (serialized.includes('tool_result') && serialized.includes('call_fragment_loop'))
+          )
+        })
+        const hasSecondResult = requestBody.messages?.some(message => {
+          const serialized = JSON.stringify(message || '')
+          return (
+            (message?.role === 'tool' && message.tool_call_id === 'call_fragment_second') ||
+            (serialized.includes('tool_result') && serialized.includes('call_fragment_second'))
+          )
+        })
         const marker = (callId, argumentsValue, name = 'shell_command') =>
           `<codex_tool_call>${JSON.stringify({ name, call_id: callId, arguments: argumentsValue })}</codex_tool_call>`
         const chunks = hasSecondResult
@@ -913,9 +911,7 @@ async function main() {
 
       if (requestBody.model === 'grok-current-live-data') {
         const recovering = requestBody.messages?.some(message =>
-          /requires a verified tool result|omitted the required completion signal/i.test(
-            String(message?.content || '')
-          )
+          /requires a verified tool result|omitted the required completion signal/i.test(String(message?.content || ''))
         )
         const requestText = JSON.stringify(requestBody)
         if (recovering) currentLiveRecoveryRequests += 1
@@ -1105,10 +1101,7 @@ async function main() {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache'
         })
-        for (const content of [
-          '我接下来会执行 PowerShell 脚本并保存结果。',
-          '\n\n结论：已完成脚本保存。'
-        ]) {
+        for (const content of ['我接下来会执行 PowerShell 脚本并保存结果。', '\n\n结论：已完成脚本保存。']) {
           response.write(
             `data: ${JSON.stringify({
               id: 'chatcmpl-streamed-terminal-dedupe',
@@ -1450,15 +1443,16 @@ async function main() {
       }
 
       if (
-        ['gpt-native-image-base64', 'grok-image-responses-fallback', 'grok-image-responses-fallback-nonstream'].includes(
-          requestBody.model
-        )
+        [
+          'gpt-native-image-base64',
+          'grok-image-responses-fallback',
+          'grok-image-responses-fallback-nonstream'
+        ].includes(requestBody.model)
       ) {
         const imageItem = {
-          id:
-            requestBody.model.startsWith('grok-image-responses-fallback')
-              ? 'ig_wire_grok_fallback_base64'
-              : 'ig_wire_native_base64',
+          id: requestBody.model.startsWith('grok-image-responses-fallback')
+            ? 'ig_wire_grok_fallback_base64'
+            : 'ig_wire_native_base64',
           type: 'image_generation_call',
           status: 'completed',
           result: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII='
@@ -1799,7 +1793,8 @@ async function main() {
               decision: 'tool',
               name: 'exec',
               arguments: {
-                input: 'const result = await tools.shell_command({ command: "Write-Output LONG_RECOVERED" }); text(result);'
+                input:
+                  'const result = await tools.shell_command({ command: "Write-Output LONG_RECOVERED" }); text(result);'
               }
             })
           : ['继续执行剩余步骤。', '```xml', '', '```', '<codex_tool_call>{"name":"exec"', 'x'.repeat(2200)].join('\n')
@@ -2270,8 +2265,8 @@ async function main() {
           model === 'grok-completion-signal-recovery-failure' ||
           model === 'grok-delayed-recovery-over-legacy-timeout' ||
           model === 'grok-completion-signal-user-input' ||
-           model === 'grok-empty-xml-final' ||
-           model === 'grok-agentic-short-no-signal' ||
+          model === 'grok-empty-xml-final' ||
+          model === 'grok-agentic-short-no-signal' ||
           model === 'grok-long-malformed-after-tool-result' ||
           model === 'grok-stalled-continuation' ||
           model === 'grok-repeated-stall-fuse' ||
@@ -2288,18 +2283,18 @@ async function main() {
           model === 'grok-escaped-whitespace' ||
           model === 'grok-html-tool-scaffold' ||
           model === 'grok-encoded-tool-frame' ||
-           model === 'grok-streamed-internal-transcript' ||
-           model === 'grok-short-continue-anchor' ||
-           model === 'grok-interrupted-continue-anchor' ||
-           model === 'grok-tool-fragment-idempotency' ||
-           model === 'grok-rate-limit-terminal' ||
-           model === 'grok-server-error-terminal'
+          model === 'grok-streamed-internal-transcript' ||
+          model === 'grok-short-continue-anchor' ||
+          model === 'grok-interrupted-continue-anchor' ||
+          model === 'grok-tool-fragment-idempotency' ||
+          model === 'grok-rate-limit-terminal' ||
+          model === 'grok-server-error-terminal'
           ? { wireApi: 'chat', toolTransport: 'prompt-emulated' }
           : ['grok-image-responses-fallback', 'grok-image-responses-fallback-nonstream'].includes(model)
             ? { wireApi: 'chat', toolTransport: 'native' }
-          : {
-              wireApi: model.startsWith('gpt-native') || model === 'gpt-newapi-chat-only' ? 'responses' : undefined
-            }
+            : {
+                wireApi: model.startsWith('gpt-native') || model === 'gpt-newapi-chat-only' ? 'responses' : undefined
+              }
       )
     ])
   )
@@ -2329,6 +2324,18 @@ async function main() {
         modelAliases: catalogResult.aliases,
         modelCatalog: generatedCatalog.filter(model => expectedPickerModels.includes(model.slug)),
         modelCapabilities,
+        imageGeneration: {
+          baseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
+          apiKey: 'test-key',
+          defaultModel: DEFAULT_IMAGE_MODEL,
+          candidates: [
+            {
+              baseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
+              apiKey: 'test-key',
+              defaultModel: DEFAULT_IMAGE_MODEL
+            }
+          ]
+        },
         modelWireApis: {
           'gpt-native-responses-test': 'responses',
           'grok-4.5': 'chat',
@@ -2456,8 +2463,9 @@ async function main() {
   })
   const upstreamImageFailurePayload = await upstreamImageFailure.json()
 
-  assert.strictEqual(upstreamImageFailure.status, 502)
-  assert.strictEqual(upstreamImageFailurePayload.error.type, 'image_generation_error')
+  assert.strictEqual(upstreamImageFailure.status, 503)
+  assert.strictEqual(upstreamImageFailurePayload.error.type, 'image_generation_upstream_error')
+  assert.strictEqual(upstreamImageFailurePayload.error.retryable, true)
   assert.strictEqual(proxyDiagnostics.at(-1).outcome, 'upstream_error')
   upstreamRequests.length = 0
   const forbiddenGrokImageResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/images/generations`, {
@@ -2467,7 +2475,7 @@ async function main() {
   })
   const forbiddenGrokImagePayload = await forbiddenGrokImageResponse.json()
 
-  assert.strictEqual(forbiddenGrokImageResponse.status, 502)
+  assert.strictEqual(forbiddenGrokImageResponse.status, 403)
   assert.match(forbiddenGrokImagePayload.error.message, /没有图片模型 grok-imagine-image-quality 的访问权限/)
   assert.doesNotMatch(JSON.stringify(forbiddenGrokImagePayload), /private-image-request-id|test-key/)
   upstreamRequests.length = 0
@@ -2518,6 +2526,11 @@ async function main() {
     'auto'
   ])
   assert.deepStrictEqual(mcpTools.result.tools[0].inputSchema.properties.resolution.enum, ['1k'])
+  assert.strictEqual(mcpTools.result.tools[0].inputSchema.properties.quality, undefined)
+  assert.strictEqual(mcpTools.result.tools[0].inputSchema.properties.size, undefined)
+  assert.strictEqual(mcpTools.result.tools[0].inputSchema.properties.output_format, undefined)
+  assert.strictEqual(mcpTools.result.tools[0].inputSchema.properties.output_compression, undefined)
+  assert.strictEqual(mcpTools.result.tools[0].inputSchema.properties.model, undefined)
   const mcpImageResponse = await fetch(imageMcpUrl, {
     method: 'POST',
     headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -2624,7 +2637,9 @@ async function main() {
       body: JSON.stringify({
         model,
         stream: true,
-        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Provider failure terminal.' }] }]
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Provider failure terminal.' }] }
+        ]
       })
     })
     const providerFailureStream = await providerFailureResponse.text()
@@ -3110,14 +3125,21 @@ async function main() {
   const fragmentFirstResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'grok-tool-fragment-idempotency', stream: true, input: fragmentInput, tools: [fragmentTool] })
+    body: JSON.stringify({
+      model: 'grok-tool-fragment-idempotency',
+      stream: true,
+      input: fragmentInput,
+      tools: [fragmentTool]
+    })
   })
   const fragmentFirstStream = await fragmentFirstResponse.text()
   const fragmentFirstEvents = parseResponsesSseEvents(fragmentFirstStream)
   const fragmentFirstAdded = fragmentFirstEvents.filter(
     event => event.type === 'response.output_item.added' && event.item?.type === 'function_call'
   )
-  const fragmentFirstDeltas = fragmentFirstEvents.filter(event => event.type === 'response.function_call_arguments.delta')
+  const fragmentFirstDeltas = fragmentFirstEvents.filter(
+    event => event.type === 'response.function_call_arguments.delta'
+  )
   const fragmentFirstDone = fragmentFirstEvents.find(event => event.type === 'response.function_call_arguments.done')
   const fragmentFirstItemDone = fragmentFirstEvents.find(event => event.type === 'response.output_item.done')
   const fragmentFirstCompletedIndex = fragmentFirstEvents.findIndex(event => event.type === 'response.completed')
@@ -3158,7 +3180,12 @@ async function main() {
   const fragmentSecondResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'grok-tool-fragment-idempotency', stream: true, input: secondInput, tools: [fragmentTool] })
+    body: JSON.stringify({
+      model: 'grok-tool-fragment-idempotency',
+      stream: true,
+      input: secondInput,
+      tools: [fragmentTool]
+    })
   })
   const fragmentSecondStream = await fragmentSecondResponse.text()
   const fragmentSecondEvents = parseResponsesSseEvents(fragmentSecondStream)
@@ -3185,7 +3212,12 @@ async function main() {
   const fragmentFinalResponse = await fetch(`${proxy.baseUrl}/v1/test-channel/responses`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'grok-tool-fragment-idempotency', stream: true, input: secondInputWithResult, tools: [fragmentTool] })
+    body: JSON.stringify({
+      model: 'grok-tool-fragment-idempotency',
+      stream: true,
+      input: secondInputWithResult,
+      tools: [fragmentTool]
+    })
   })
   const fragmentFinalStream = await fragmentFinalResponse.text()
 
@@ -3417,9 +3449,7 @@ async function main() {
     body: JSON.stringify({
       model: 'grok-streamed-terminal-dedupe',
       stream: true,
-      input: [
-        { type: 'message', role: 'user', content: [{ type: 'input_text', text: '请简单回复你好。' }] }
-      ],
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '请简单回复你好。' }] }],
       tools: [{ type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration.' }]
     })
   })
@@ -4187,10 +4217,7 @@ async function main() {
   assert.ok(!exhaustedCompletionSignalStream.includes('event: response.completed'))
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.retryAttempted, true)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES)
-  assert.strictEqual(
-    exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts,
-    PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
-  )
+  assert.strictEqual(exhaustedCompletionSignalDiagnostic.maximumRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.unlimitedRecovery, false)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.repeatedRecoveryResponses, 5)
   assert.strictEqual(exhaustedCompletionSignalDiagnostic.recoveryCircuitBreaker, 'identical_stalled_responses')
@@ -4263,10 +4290,7 @@ async function main() {
   assert.strictEqual(recoveryFailureEmulation.recoveryAttemptTimeoutMs, 60000)
   assert.strictEqual(recoveryFailureDiagnostic.recoveryAttempts, 1)
   assert.strictEqual(recoveryFailureDiagnostic.failedRecoveryAttempts, 1)
-  assert.deepStrictEqual(
-    recoveryFailureDiagnostic.recoveryFailureKinds,
-    ['http_server_error']
-  )
+  assert.deepStrictEqual(recoveryFailureDiagnostic.recoveryFailureKinds, ['http_server_error'])
   assert.strictEqual(recoveryFailureDiagnostic.maximumRecoveryAttempts, PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS)
   assert.strictEqual(recoveryFailureDiagnostic.unlimitedRecovery, false)
   assert.strictEqual(recoveryFailureDiagnostic.recoveryCircuitBreaker, 'http_server_error')
@@ -4712,7 +4736,8 @@ async function main() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       model: 'grok-skill-native-guard',
-      instructions: '<skills_instructions>SKILL_SYSTEM_SENTINEL: call shell_command and verify its result.</skills_instructions>',
+      instructions:
+        '<skills_instructions>SKILL_SYSTEM_SENTINEL: call shell_command and verify its result.</skills_instructions>',
       input: [
         {
           type: 'message',

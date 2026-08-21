@@ -434,10 +434,25 @@ async function main() {
     preferredImageGenerationModel(['grok-4.5', 'gpt-image-1', 'grok-imagine-image-quality']),
     'grok-imagine-image-quality'
   )
+  assert.strictEqual(preferredImageGenerationModel(['gpt-image-2', 'grok-imagine-image-2.0']), 'grok-imagine-image-2.0')
   assert.strictEqual(
-    preferredImageGenerationModel(['gpt-image-2', 'grok-imagine-image-2.0']),
-    'grok-imagine-image-2.0'
+    preferredImageGenerationModel(['gpt-image-2', 'xai/grok-imagine-image-quality']),
+    'xai/grok-imagine-image-quality'
   )
+  const grokQualitySchema = imageToolDefinition({ defaultModel: DEFAULT_IMAGE_MODEL })
+
+  assert.strictEqual(grokQualitySchema.inputSchema.properties.quality, undefined)
+  assert.strictEqual(grokQualitySchema.inputSchema.properties.size, undefined)
+  assert.strictEqual(grokQualitySchema.inputSchema.properties.output_format, undefined)
+  assert.strictEqual(grokQualitySchema.inputSchema.properties.output_compression, undefined)
+  assert.strictEqual(grokQualitySchema.inputSchema.properties.model, undefined)
+  assert.deepStrictEqual(
+    Object.keys(grokQualitySchema.inputSchema.properties).sort(),
+    ['aspect_ratio', 'n', 'prompt', 'resolution'].sort()
+  )
+  const grokTwoSchema = imageToolDefinition({ defaultModel: 'xai/grok-imagine-image-2.0' })
+
+  assert.deepStrictEqual(grokTwoSchema.inputSchema.properties.quality.enum, ['low', 'medium'])
   assert.deepStrictEqual(
     imageGenerationPayload({
       prompt: 'poster',
@@ -457,6 +472,10 @@ async function main() {
       output_format: 'jpeg',
       output_compression: 85
     }
+  )
+  assert.throws(
+    () => imageGenerationPayload({ model: 'grok-imagine-image-2.0', prompt: 'x', quality: 'high' }),
+    /quality.*low.*medium/
   )
   assert.deepStrictEqual(
     imageGenerationPayload({
@@ -559,13 +578,14 @@ async function main() {
   ])
   assert.deepStrictEqual(imageTool.inputSchema.properties.resolution.enum, ['1k'])
   assert.strictEqual(imageTool.inputSchema.properties.n.maximum, 1)
-  assert.strictEqual(imageTool.inputSchema.properties.output_compression.maximum, 100)
+  assert.strictEqual(imageTool.inputSchema.properties.output_compression, undefined)
   const gptImageTool = imageToolDefinition({ defaultModel: 'azure:gpt-image-2' })
 
   assert.strictEqual(gptImageTool.inputSchema.properties.n.maximum, 4)
   assert.strictEqual(gptImageTool.inputSchema.properties.aspect_ratio, undefined)
   assert.strictEqual(gptImageTool.inputSchema.properties.resolution, undefined)
-  assert.match(gptImageTool.inputSchema.properties.model.description, /azure:gpt-image-2/)
+  assert.strictEqual(gptImageTool.inputSchema.properties.model, undefined)
+  assert.strictEqual(gptImageTool.inputSchema.properties.output_format.enum.includes('jpeg'), true)
   assert.strictEqual(isAllowedMcpOrigin(''), true)
   assert.strictEqual(isAllowedMcpOrigin('http://127.0.0.1:1234'), true)
   assert.strictEqual(isAllowedMcpOrigin('https://evil.example.com'), false)
@@ -794,6 +814,53 @@ async function main() {
   )
   assert.strictEqual(observedDedicatedImageRequest.request.headers.authorization, 'Bearer sk-image-secret')
   assert.strictEqual(observedDedicatedImageRequest.body.model, 'grok-imagine-image-quality')
+  const failoverRequests = []
+  const failoverDiagnostics = []
+  const failoverImage = await generateNewApiImage(
+    {
+      baseUrl: 'https://ainiubi.org/v1',
+      apiKey: 'sk-chat-secret',
+      imageGeneration: {
+        baseUrl: 'https://ainiubi.org/v1',
+        apiKey: 'sk-quality-secret',
+        defaultModel: 'grok-imagine-image-quality',
+        candidates: [
+          {
+            baseUrl: 'https://ainiubi.org/v1',
+            apiKey: 'sk-quality-secret',
+            defaultModel: 'grok-imagine-image-quality'
+          },
+          { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-gpt-secret', defaultModel: 'gpt-image-2' }
+        ]
+      }
+    },
+    { prompt: 'permission failover' },
+    {
+      fetchImpl: async (url, request) => {
+        const body = JSON.parse(request.body)
+
+        failoverRequests.push({ url, body, authorization: request.headers.authorization })
+        if (failoverRequests.length === 1) {
+          return new Response(
+            JSON.stringify({ error: { message: 'This token has no access to model grok-imagine-image-quality' } }),
+            { status: 403 }
+          )
+        }
+        return new Response(JSON.stringify({ data: [{ b64_json: inlinePng }] }), { status: 200 })
+      },
+      onDiagnostic: diagnostic => failoverDiagnostics.push(diagnostic)
+    }
+  )
+
+  assert.strictEqual(failoverRequests.length, 2)
+  assert.strictEqual(failoverRequests[0].body.model, 'grok-imagine-image-quality')
+  assert.strictEqual(failoverRequests[1].body.model, 'gpt-image-2')
+  assert.strictEqual(failoverRequests[1].authorization, 'Bearer sk-gpt-secret')
+  assert.strictEqual(failoverImage.payload.model, 'gpt-image-2')
+  assert.strictEqual(
+    failoverDiagnostics.some(item => item.outcome === 'candidate_rejected'),
+    true
+  )
   await generateNewApiImage(
     { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-gpt-secret' },
     { model: 'azure:gpt-image-2', prompt: 'gpt image', size: '1024x1024' },
@@ -2047,20 +2114,14 @@ async function main() {
   const cumulativeChatDeltas = []
   const cumulativeChatAssistant = await readChatAssistant(
     new Response(
-      [
-        'h',
-        'ht',
-        'html',
-        'html```html',
-        'html```html',
-        'html```html\n<div>tool noise</div>\n```'
-      ]
-        .map(content =>
-          `data: ${JSON.stringify({
-            id: 'chatcmpl-cumulative-snapshot',
-            model: 'grok-cumulative-snapshot',
-            choices: [{ index: 0, delta: { content } }]
-          })}\n\n`
+      ['h', 'ht', 'html', 'html```html', 'html```html', 'html```html\n<div>tool noise</div>\n```']
+        .map(
+          content =>
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-cumulative-snapshot',
+              model: 'grok-cumulative-snapshot',
+              choices: [{ index: 0, delta: { content } }]
+            })}\n\n`
         )
         .join('') + 'data: [DONE]\n\n',
       { headers: { 'content-type': 'text/event-stream; charset=utf-8' } }

@@ -359,9 +359,12 @@ function recoveryFailureKindForStatus(status) {
 }
 
 function recoveryFailureStopsLoop(kind) {
-  const normalized = String(kind || '').trim().toLowerCase()
+  const normalized = String(kind || '')
+    .trim()
+    .toLowerCase()
 
-  return normalized === 'http_rate_limit' ||
+  return (
+    normalized === 'http_rate_limit' ||
     normalized === 'upstream_rate_limit' ||
     normalized === 'http_server_error' ||
     normalized === 'upstream_server_error' ||
@@ -370,6 +373,7 @@ function recoveryFailureStopsLoop(kind) {
     normalized === 'transient_transport' ||
     normalized === 'transport_error' ||
     normalized === 'client_response_closed'
+  )
 }
 
 function recoveryFailureKindForError(error) {
@@ -566,8 +570,7 @@ function coalesceAssistantMessages(messages) {
           const existingCall = incomingId
             ? previous.tool_calls.find(
                 candidate =>
-                  String(candidate?.id || '').trim() === incomingId &&
-                  toolFragmentsCompatible(candidate, incomingCall)
+                  String(candidate?.id || '').trim() === incomingId && toolFragmentsCompatible(candidate, incomingCall)
               )
             : null
 
@@ -577,10 +580,7 @@ function coalesceAssistantMessages(messages) {
           }
 
           existingCall.function ||= {}
-          existingCall.function.name = mergeStreamedToolName(
-            existingCall.function.name,
-            incomingCall?.function?.name
-          )
+          existingCall.function.name = mergeStreamedToolName(existingCall.function.name, incomingCall?.function?.name)
           existingCall.function.arguments = mergeStreamedToolArguments(
             existingCall.function.arguments,
             incomingCall?.function?.arguments
@@ -893,10 +893,7 @@ function promptToolCatalog(tools, messages = [], options = {}) {
     .slice(-8)
     .map(message => String(message?.content || ''))
   const skillContextText = source
-    .filter(
-      message =>
-        String(message?.role || '').toLowerCase() !== 'system' && isSkillContextMessage(message)
-    )
+    .filter(message => String(message?.role || '').toLowerCase() !== 'system' && isSkillContextMessage(message))
     .slice(-2)
     .map(message => String(message?.content || ''))
   const conversationText = boundedRelevanceText(
@@ -925,10 +922,14 @@ function promptToolCatalog(tools, messages = [], options = {}) {
         .toLowerCase()
         .split(/[^a-z0-9]+/)
         .filter(term => term.length >= 3)
-      const relevance = nameTerms.reduce(
-        (score, term) => score + (conversationText.includes(term) ? 20 : 0),
-        coreTools.has(name.toLowerCase()) ? 1000 : 0
-      ) +
+      const relevance =
+        nameTerms.reduce(
+          (score, term) => score + (conversationText.includes(term) ? 20 : 0),
+          coreTools.has(name.toLowerCase()) ? 1000 : 0
+        ) +
+        (/generate[_-]?image/i.test(name) && /newapi|images\/generations/i.test(String(tool.function.description || ''))
+          ? 950
+          : 0) +
         (requiredNames.has(name.toLowerCase()) || requiredNames.has(normalizedName) ? 10000 : 0) +
         (conversationText.includes(name.toLowerCase()) || conversationText.includes(normalizedName) ? 500 : 0)
 
@@ -1171,10 +1172,7 @@ function emulatedArgumentFragment(name, value) {
 
   const text = value
   const trimmed = text.trimStart()
-  const structuredFragment =
-    trimmed.startsWith('{') ||
-    trimmed.startsWith('[') ||
-    /[{}[\]":,]/.test(text)
+  const structuredFragment = trimmed.startsWith('{') || trimmed.startsWith('[') || /[{}[\]":,]/.test(text)
 
   // A marker may carry a partial JSON argument string.  Do not reinterpret
   // that fragment as free-form exec input before the following marker arrives.
@@ -1215,7 +1213,9 @@ function parseEmulatedToolCall(content, allowed) {
   const marker = markerPayloads[0]
   const fenced = text.match(/```(?:json)?\s*([\s\S]{1,1048576}?)\s*```/i)
   const candidates = [
-    ...new Set([marker ? JSON.stringify(marker) : '', fenced?.[1], text.trim(), firstBalancedJsonObject(text)].filter(Boolean))
+    ...new Set(
+      [marker ? JSON.stringify(marker) : '', fenced?.[1], text.trim(), firstBalancedJsonObject(text)].filter(Boolean)
+    )
   ]
 
   const parsedMarkers = markerPayloads
@@ -1230,11 +1230,8 @@ function parseEmulatedToolCall(content, allowed) {
       const explicitId = markerCandidate.callId
       const group =
         groups.find(candidate =>
-          explicitId
-            ? candidate.callId === explicitId
-            : !candidate.callId && candidate.name === markerCandidate.name
-        ) ||
-        (!explicitId && groups.at(-1)?.name === markerCandidate.name ? groups.at(-1) : null)
+          explicitId ? candidate.callId === explicitId : !candidate.callId && candidate.name === markerCandidate.name
+        ) || (!explicitId && groups.at(-1)?.name === markerCandidate.name ? groups.at(-1) : null)
 
       if (!group) {
         groups.push({
@@ -1355,9 +1352,7 @@ async function synthesizeEmulatedToolResponse(
     let closed = false
     const streamSanitizer = createVisibleAssistantStreamSanitizer()
     const publishSanitizedDelta = content => {
-      const visible = sanitizeVisibleAssistantDelta(
-        stripAgentControlSignals(stripInternalToolTranscript(content))
-      )
+      const visible = sanitizeVisibleAssistantDelta(stripAgentControlSignals(stripInternalToolTranscript(content)))
 
       publishProgressDelta(visible)
     }
@@ -1438,10 +1433,7 @@ async function synthesizeEmulatedToolResponse(
       agenticTurn
     })
   const initialToolOmission =
-    toolIntentRequired &&
-    !toolCall &&
-    !hasAgentCompletionSignal(firstContent) &&
-    !awaitsExplicitUserInput(firstContent)
+    toolIntentRequired && !toolCall && !hasAgentCompletionSignal(firstContent) && !awaitsExplicitUserInput(firstContent)
   const initialStalledContinuation = initialNaturalStall || initialMissingCompletionSignal || initialToolOmission
   const stalledAfterToolResult = followsToolResult && initialStalledContinuation
   const inferredTerminalCandidate = false
@@ -1451,9 +1443,10 @@ async function synthesizeEmulatedToolResponse(
   const unlimitedRecovery = false
   const maximumRecoveryAttempts = PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS
   const requestedRecoveryMs = Number(options.maximumRecoveryMs)
-  const maximumRecoveryMs = Number.isFinite(requestedRecoveryMs) && requestedRecoveryMs > 0
-    ? Math.min(requestedRecoveryMs, PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS)
-    : PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS
+  const maximumRecoveryMs =
+    Number.isFinite(requestedRecoveryMs) && requestedRecoveryMs > 0
+      ? Math.min(requestedRecoveryMs, PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS)
+      : PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS
   const recoveryBudgetStartedAt = Date.now()
   let recoveryAssistant = assistant
   let recoveryAttempts = 0
@@ -1708,7 +1701,9 @@ async function synthesizeEmulatedToolResponse(
     toolInputLength: String(wireToolCall?.function?.arguments || '').length,
     toolCallUsesShellCommand: /tools\.shell_command/.test(String(wireToolCall?.function?.arguments || '')),
     toolCallUsesWebRun: /tools\.web__run/.test(String(wireToolCall?.function?.arguments || '')),
-    toolCallMentionsCalculator: /\b(?:calc|calculator)(?:\.exe)?\b/i.test(String(wireToolCall?.function?.arguments || '')),
+    toolCallMentionsCalculator: /\b(?:calc|calculator)(?:\.exe)?\b/i.test(
+      String(wireToolCall?.function?.arguments || '')
+    ),
     continuationRecovery: {
       toolResultPresent: followsToolResult,
       convertedToolResultPresent: convertedFollowsToolResult,
@@ -2252,12 +2247,8 @@ function ensureToolItemId(state, tool) {
 }
 
 function announceTool(state, tool, options = {}) {
-  if (
-    tool.announced ||
-    !tool.name ||
-    (!tool.id && options.force !== true) ||
-    !state.toolNames.isKnownChat(tool.name)
-  ) return
+  if (tool.announced || !tool.name || (!tool.id && options.force !== true) || !state.toolNames.isKnownChat(tool.name))
+    return
   ensureResponseStarted(state)
   ensureToolCallId(state, tool)
   tool.announced = true
@@ -2309,9 +2300,7 @@ function consumeChatChunk(state, chunk) {
   for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
     const delta = choice.delta && Object.keys(choice.delta).length ? choice.delta : choice.message || choice.delta || {}
     const toolBatchContext = { callIds: new Set() }
-    const reasoning = sanitizeVisibleAssistantDelta(
-      state.reasoningStreamSanitizer.push(reasoningFromChatDelta(delta))
-    )
+    const reasoning = sanitizeVisibleAssistantDelta(state.reasoningStreamSanitizer.push(reasoningFromChatDelta(delta)))
     const normalizedText = state.chatDeltaNormalizer.push(textFromChatDelta(delta.content))
     const text = sanitizeVisibleAssistantDelta(state.textStreamSanitizer.push(normalizedText.delta))
 
@@ -2436,8 +2425,8 @@ function finishResponseStream(state, options = {}) {
           status: invalidArguments ? 'incomplete' : 'completed',
           arguments: tool.arguments,
           call_id: tool.id,
-           name: state.toolNames.toResponses(tool.name)
-         }
+          name: state.toolNames.toResponses(tool.name)
+        }
 
     finalizations.push({ outputIndex, kind: 'tool', item, tool, custom, input, invalidArguments })
   }
@@ -2490,9 +2479,7 @@ function finishResponseStream(state, options = {}) {
     outputEntries.push({ outputIndex, item })
   }
 
-  const output = outputEntries
-    .sort((left, right) => left.outputIndex - right.outputIndex)
-    .map(entry => entry.item)
+  const output = outputEntries.sort((left, right) => left.outputIndex - right.outputIndex).map(entry => entry.item)
   const responsePayload = baseResponse(state, status, output, responseUsageFromChat(state.usage || {}))
 
   if (!completed) {
@@ -2749,9 +2736,9 @@ async function sendNonStreamingResponse(upstream, body, toolNames, response, opt
             name: toolNames.toResponses(tool.name)
           }
         : {
-          id: tool.itemId,
-          type: 'function_call',
-          status: hasValidFunctionArguments(tool.arguments) ? 'completed' : 'incomplete',
+            id: tool.itemId,
+            type: 'function_call',
+            status: hasValidFunctionArguments(tool.arguments) ? 'completed' : 'incomplete',
             arguments: tool.arguments,
             call_id: tool.id,
             name: toolNames.toResponses(tool.name)
@@ -3204,15 +3191,25 @@ async function handleImagesRequest(request, response, channel, onDiagnostic, opt
     response.end(JSON.stringify(generated.responsePayload))
   } catch (error) {
     if (response.headersSent) throw error
-    response.writeHead(error instanceof ImageGenerationValidationError ? 400 : 502, {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store'
-    })
+    const upstreamImageError = error?.code === 'IMAGE_GENERATION_UPSTREAM'
+    const status = upstreamImageError
+      ? Math.min(599, Math.max(400, Number(error.status || 502)))
+      : error instanceof ImageGenerationValidationError
+        ? 400
+        : 502
+    const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+
+    if (upstreamImageError && error.retryAfterSeconds > 0) headers['retry-after'] = String(error.retryAfterSeconds)
+    response.writeHead(status, headers)
     response.end(
       JSON.stringify({
         error: {
-          type: 'image_generation_error',
-          message: error instanceof Error ? error.message : String(error)
+          type: upstreamImageError ? error.errorType : 'image_generation_error',
+          message: error instanceof Error ? error.message : String(error),
+          ...(upstreamImageError ? { retryable: Boolean(error.retryable) } : {}),
+          ...(upstreamImageError && error.upstreamErrorType ? { upstream_type: error.upstreamErrorType } : {}),
+          ...(upstreamImageError && error.upstreamCode ? { upstream_code: error.upstreamCode } : {}),
+          ...(upstreamImageError && error.requestId ? { request_id: error.requestId } : {})
         }
       })
     )
@@ -3283,7 +3280,11 @@ function requestHasSkillContext(body) {
   if (typeof body?.input === 'string' && containsSkillContext(body.input)) return true
 
   for (const item of Array.isArray(body?.input) ? body.input : []) {
-    if (containsSkillContext(item?.content) || containsSkillContext(item?.output) || containsSkillContext(item?.input)) {
+    if (
+      containsSkillContext(item?.content) ||
+      containsSkillContext(item?.output) ||
+      containsSkillContext(item?.input)
+    ) {
       return true
     }
   }
@@ -3409,10 +3410,7 @@ function requestHasActiveSkillContext(body) {
     ) {
       return true
     }
-    if (
-      isUserMessage &&
-      explicitSkillRequest(item?.content)
-    ) {
+    if (isUserMessage && explicitSkillRequest(item?.content)) {
       return true
     }
     if (
@@ -3761,11 +3759,7 @@ async function handleResponsesRequest(
         generatedImagesRoot: requestOptions.generatedImagesRoot
       })
       const [, nativeImageDelivery] = await Promise.all([
-        pipeFetchBody(
-          imageDelivery.delivery,
-          response,
-          upstreamResponseHeaders(imageDelivery.delivery, body.stream)
-        ),
+        pipeFetchBody(imageDelivery.delivery, response, upstreamResponseHeaders(imageDelivery.delivery, body.stream)),
         imageDelivery.completion
       ])
       if (typeof onDiagnostic === 'function') {
@@ -3827,8 +3821,7 @@ async function handleResponsesRequest(
           async (firstAssistant, retryContext = {}) => {
             const strictToolRecovery = Boolean(retryContext.stalledContinuation)
             const decisionContract = recoveryDecisionContract(AGENT_COMPLETION_SIGNAL)
-            const recoveryAttemptDescription =
-              `This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 1}. `
+            const recoveryAttemptDescription = `This is bounded recovery attempt ${retryContext.attempt || 1} of ${retryContext.maximumAttempts || 1}. `
             const recoveryPrompt = retryContext.naturalStall
               ? 'The previous answer stopped at a plan-only sentence instead of executing the next Codex agent step. ' +
                 recoveryAttemptDescription +
@@ -4051,12 +4044,7 @@ async function handleResponsesRequest(
     }
 
     if (recoveryFailureStopsLoop(failureDiagnostic.upstreamFailureKind)) {
-      finishControlledProviderFailure(
-        response,
-        body,
-        failureDiagnostic.upstreamFailureKind,
-        userMessage || errorBody
-      )
+      finishControlledProviderFailure(response, body, failureDiagnostic.upstreamFailureKind, userMessage || errorBody)
       return
     }
 
