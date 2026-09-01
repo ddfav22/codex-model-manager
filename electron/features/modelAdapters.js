@@ -43,6 +43,20 @@ function modelListFromProvider(provider) {
   return String(provider?.model || '').trim() ? [String(provider.model).trim()] : []
 }
 
+// NewAPI accounts used by this application are intentionally limited to the
+// ChatGPT/OpenAI model family.  Keep the predicate separate from the broader
+// adapter profile so legacy configurations can still be read without exposing
+// non-ChatGPT models in the synchronisation UI.
+function isChatGptModel(model) {
+  const normalized = String(model || '').trim().toLowerCase()
+
+  return /^(?:gpt(?:-|$)|o[1-9](?:-|$)|codex(?:-|$))/.test(normalized)
+}
+
+function filterChatGptModels(models) {
+  return uniqueModelList({ models }).filter(isChatGptModel)
+}
+
 function modelAdapterProfile(model, test = null) {
   const normalized = String(model || '')
     .trim()
@@ -202,6 +216,8 @@ module.exports = {
   REASONING_DESCRIPTIONS,
   aggregateModelTests,
   modelAdapterProfile,
+  isChatGptModel,
+  filterChatGptModels,
   modelCapabilityMap,
   modelListFromProvider,
   modelWireApiMap,

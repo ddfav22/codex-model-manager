@@ -803,7 +803,7 @@ const ModelManager = () => {
   const restoreInitialBackup = () =>
     setConfirmDialog({
       title: '恢复初始 Codex 状态',
-      body: '将恢复本工具第一次运行时的 Provider、API 登录状态、config.toml 和模型目录。\n\n如果当时是全新、未登录的 ChatGPT.exe，恢复后也会回到未登录状态。项目与历史对话不会删除。',
+      body: '将恢复本工具第一次运行时捕获的 Provider、API 登录状态、config.toml 和模型目录。\n\n如果当时是全新、未登录的 ChatGPT.exe，恢复后也会回到未登录状态。sessions、archived_sessions 和本地项目文件夹不会删除；config.toml 会按首次快照原样恢复。',
       confirmText: '恢复初始状态',
       action: async () => {
         const result = await requireBridge().restoreInitialBackup()
