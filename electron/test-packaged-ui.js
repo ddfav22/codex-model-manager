@@ -601,6 +601,12 @@ async function main() {
       await wait(100)
       const importDialog = document.querySelector('[role="dialog"]')
       const importText = String(importDialog?.textContent || '')
+      const importButtons = importDialog
+        ? Array.from(importDialog.querySelectorAll('button')).map(element => ({
+            text: String(element.textContent || '').trim(),
+            ariaLabel: String(element.getAttribute('aria-label') || '').trim()
+          }))
+        : []
       clickControl('取消')
       await wait(100)
       const exportOpened = clickControl('导出')
@@ -640,8 +646,12 @@ async function main() {
         legacyImportProjectCount,
         importOpened,
         importDialogFound: Boolean(importDialog),
-        importSessionChoice: importText.includes('导入会话文件（.jsonl）'),
-        importProjectChoice: importText.includes('导入项目文件夹'),
+        importSessionChoice:
+          importText.includes('导入会话文件（.jsonl）') ||
+          importButtons.some(item => /导入会话文件/.test(item.text) || /导入会话文件/.test(item.ariaLabel)),
+        importProjectChoice:
+          importText.includes('导入项目文件夹') ||
+          importButtons.some(item => /导入项目文件夹/.test(item.text) || /导入项目文件夹/.test(item.ariaLabel)),
         exportOpened,
         exportDialogFound: Boolean(exportDialog),
         exportSessionChoice: exportText.includes('会话'),
