@@ -383,7 +383,7 @@ async function main() {
     diagnosticSeverity: 'warn',
     diagnosticKind: 'upstream_capacity',
     channelId: 'test-channel',
-    model: 'grok-test',
+    model: 'provider-test',
     codexThreadId: '019fd600-8202-7ff0-91b7-6eb858a9f684',
     codexTurnId: '019fd601-1111-7222-8333-444444444444',
     upstreamStatus: 503,
@@ -416,43 +416,22 @@ async function main() {
   assert.deepStrictEqual(imageGenerationPayload({ prompt: 'sunrise' }), {
     model: DEFAULT_IMAGE_MODEL,
     prompt: 'sunrise',
-    n: 1,
-    resolution: '1k',
-    response_format: 'b64_json'
+    n: 1
   })
   assert.deepStrictEqual(imageGenerationPayload({ prompt: 'sunrise' }, { defaultResponseFormat: 'b64_json' }), {
     model: DEFAULT_IMAGE_MODEL,
     prompt: 'sunrise',
-    n: 1,
-    resolution: '1k',
-    response_format: 'b64_json'
+    n: 1
   })
-  assert.strictEqual(DEFAULT_IMAGE_MODEL, 'grok-imagine-image-quality')
-  assert.strictEqual(isImageGenerationModel('grok-imagine-image-quality'), true)
-  assert.strictEqual(isImageGenerationModel('grok-4.5'), false)
+  assert.strictEqual(DEFAULT_IMAGE_MODEL, 'gpt-image-2')
+  assert.strictEqual(isImageGenerationModel('gpt-image-1'), true)
+  assert.strictEqual(isImageGenerationModel('dall-e-3'), true)
+  assert.strictEqual(isImageGenerationModel('third-party-image-model'), false)
   assert.strictEqual(
-    preferredImageGenerationModel(['grok-4.5', 'gpt-image-1', 'grok-imagine-image-quality']),
-    'grok-imagine-image-quality'
+    preferredImageGenerationModel(['dall-e-3', 'gpt-image-1', 'gpt-image-2']),
+    'gpt-image-2'
   )
-  assert.strictEqual(preferredImageGenerationModel(['gpt-image-2', 'grok-imagine-image-2.0']), 'grok-imagine-image-2.0')
-  assert.strictEqual(
-    preferredImageGenerationModel(['gpt-image-2', 'xai/grok-imagine-image-quality']),
-    'xai/grok-imagine-image-quality'
-  )
-  const grokQualitySchema = imageToolDefinition({ defaultModel: DEFAULT_IMAGE_MODEL })
-
-  assert.strictEqual(grokQualitySchema.inputSchema.properties.quality, undefined)
-  assert.strictEqual(grokQualitySchema.inputSchema.properties.size, undefined)
-  assert.strictEqual(grokQualitySchema.inputSchema.properties.output_format, undefined)
-  assert.strictEqual(grokQualitySchema.inputSchema.properties.output_compression, undefined)
-  assert.strictEqual(grokQualitySchema.inputSchema.properties.model, undefined)
-  assert.deepStrictEqual(
-    Object.keys(grokQualitySchema.inputSchema.properties).sort(),
-    ['aspect_ratio', 'n', 'prompt', 'resolution'].sort()
-  )
-  const grokTwoSchema = imageToolDefinition({ defaultModel: 'xai/grok-imagine-image-2.0' })
-
-  assert.deepStrictEqual(grokTwoSchema.inputSchema.properties.quality.enum, ['low', 'medium'])
+  assert.strictEqual(preferredImageGenerationModel(['dall-e-3']), 'dall-e-3')
   assert.deepStrictEqual(
     imageGenerationPayload({
       prompt: 'poster',
@@ -473,70 +452,39 @@ async function main() {
       output_compression: 85
     }
   )
-  assert.throws(
-    () => imageGenerationPayload({ model: 'grok-imagine-image-2.0', prompt: 'x', quality: 'high' }),
-    /quality.*low.*medium/
-  )
   assert.deepStrictEqual(
     imageGenerationPayload({
-      prompt: 'cinematic tram',
-      aspect_ratio: '16:9',
-      resolution: '1K',
-      response_format: 'b64_json'
-    }),
-    {
-      model: DEFAULT_IMAGE_MODEL,
-      prompt: 'cinematic tram',
-      n: 1,
-      aspect_ratio: '16:9',
-      resolution: '1k',
-      response_format: 'b64_json'
-    }
-  )
-  assert.deepStrictEqual(
-    imageGenerationPayload({
-      model: 'grok-imagine-image-2.0',
+      model: 'dall-e-3',
       prompt: 'future city',
       n: 2,
-      aspect_ratio: '2:1',
-      resolution: '2k',
-      quality: 'medium',
+      size: '1024x1024',
+      quality: 'hd',
+      style: 'vivid',
       response_format: 'b64_json'
     }),
     {
-      model: 'grok-imagine-image-2.0',
+      model: 'dall-e-3',
       prompt: 'future city',
       n: 2,
-      quality: 'medium',
-      aspect_ratio: '2:1',
-      resolution: '2k',
-      response_format: 'b64_json'
-    }
-  )
-  assert.deepStrictEqual(
-    imageGenerationPayload({
-      model: 'xai/grok-imagine-image-quality',
-      prompt: 'namespaced Grok',
-      aspect_ratio: '1:1'
-    }),
-    {
-      model: 'xai/grok-imagine-image-quality',
-      prompt: 'namespaced Grok',
-      n: 1,
-      aspect_ratio: '1:1',
-      resolution: '1k',
+      size: '1024x1024',
+      quality: 'hd',
+      style: 'vivid',
       response_format: 'b64_json'
     }
   )
   assert.throws(() => imageGenerationPayload({ prompt: '' }), /prompt/)
-  assert.throws(() => imageGenerationPayload({ prompt: 'x', n: 2 }), /当前只支持 n=1/)
-  assert.throws(() => imageGenerationPayload({ prompt: 'x', resolution: '2k' }), /resolution=1k/)
-  assert.throws(() => imageGenerationPayload({ prompt: 'x', response_format: 'url' }), /response_format=b64_json/)
-  assert.throws(() => imageGenerationPayload({ prompt: 'x', size: '1024x1024' }), /不使用 size/)
-  assert.throws(() => imageGenerationPayload({ prompt: 'x', quality: 'medium' }), /不使用 quality/)
+  assert.throws(() => imageGenerationPayload({ prompt: 'x', n: 5 }), /n/)
+  assert.throws(
+    () => imageGenerationPayload({ model: 'third-party-image-model', prompt: 'x' }),
+    /仅支持 ChatGPT\/OpenAI 图片模型/
+  )
   assert.throws(
     () => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', response_format: 'b64_json' }),
     /不使用 response_format/
+  )
+  assert.throws(
+    () => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', aspect_ratio: '1:1' }),
+    /不支持 aspect_ratio/
   )
   assert.deepStrictEqual(
     imageGenerationPayload({
@@ -561,31 +509,15 @@ async function main() {
     () => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', output_compression: 101 }),
     /output_compression/
   )
-  assert.throws(() => imageGenerationPayload({ model: 'gpt-image-2', prompt: 'x', n: 5 }), /n/)
   const imageTool = imageToolDefinition()
 
-  assert.deepStrictEqual(imageTool.inputSchema.properties.aspect_ratio.enum, [
-    '1:1',
-    '16:9',
-    '9:16',
-    '4:3',
-    '3:4',
-    '3:2',
-    '2:3',
-    '2:1',
-    '1:2',
-    'auto'
-  ])
-  assert.deepStrictEqual(imageTool.inputSchema.properties.resolution.enum, ['1k'])
-  assert.strictEqual(imageTool.inputSchema.properties.n.maximum, 1)
-  assert.strictEqual(imageTool.inputSchema.properties.output_compression, undefined)
-  const gptImageTool = imageToolDefinition({ defaultModel: 'azure:gpt-image-2' })
+  assert.strictEqual(imageTool.inputSchema.properties.n.maximum, 4)
+  assert.strictEqual(imageTool.inputSchema.properties.aspect_ratio, undefined)
+  assert.strictEqual(imageTool.inputSchema.properties.resolution, undefined)
+  assert.strictEqual(imageTool.inputSchema.properties.output_format.enum.includes('jpeg'), true)
+  const dallETool = imageToolDefinition({ defaultModel: 'dall-e-3' })
 
-  assert.strictEqual(gptImageTool.inputSchema.properties.n.maximum, 4)
-  assert.strictEqual(gptImageTool.inputSchema.properties.aspect_ratio, undefined)
-  assert.strictEqual(gptImageTool.inputSchema.properties.resolution, undefined)
-  assert.strictEqual(gptImageTool.inputSchema.properties.model, undefined)
-  assert.strictEqual(gptImageTool.inputSchema.properties.output_format.enum.includes('jpeg'), true)
+  assert.strictEqual(dallETool.inputSchema.properties.response_format.enum.includes('b64_json'), true)
   assert.strictEqual(isAllowedMcpOrigin(''), true)
   assert.strictEqual(isAllowedMcpOrigin('http://127.0.0.1:1234'), true)
   assert.strictEqual(isAllowedMcpOrigin('https://evil.example.com'), false)
@@ -767,7 +699,7 @@ async function main() {
   let observedImageRequest = null
   const generatedImage = await generateNewApiImage(
     { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-module-secret' },
-    { prompt: 'module prompt', aspect_ratio: '16:9' },
+    { prompt: 'module prompt', size: '1024x1024' },
     {
       fetchImpl: async (url, request) => {
         observedImageRequest = { url, request, body: JSON.parse(request.body) }
@@ -784,9 +716,13 @@ async function main() {
   assert.strictEqual(observedImageRequest.url, 'https://ainiubi.org/v1/images/generations')
   assert.strictEqual(observedImageRequest.request.headers.authorization, 'Bearer sk-module-secret')
   assert.strictEqual(observedImageRequest.body.prompt, 'module prompt')
-  assert.strictEqual(observedImageRequest.body.aspect_ratio, '16:9')
-  assert.strictEqual(observedImageRequest.body.resolution, '1k')
-  assert.strictEqual(observedImageRequest.body.response_format, 'b64_json')
+  // The default is part of the OpenAI-only contract; keep this assertion
+  // coupled to the exported constant so a documented default bump does not
+  // make the transport test stale.
+  assert.strictEqual(observedImageRequest.body.model, DEFAULT_IMAGE_MODEL)
+  assert.strictEqual(observedImageRequest.body.size, '1024x1024')
+  assert.strictEqual(observedImageRequest.body.aspect_ratio, undefined)
+  assert.strictEqual(observedImageRequest.body.resolution, undefined)
   assert.strictEqual(generatedImage.result.content[0].type, 'image')
   assert.strictEqual(generatedImage.result.content[0].mimeType, 'image/jpeg')
   assert.strictEqual(imageDiagnostics[0].promptLength, 'module prompt'.length)
@@ -800,7 +736,7 @@ async function main() {
       imageGeneration: {
         baseUrl: 'https://ainiubi.org/v1',
         apiKey: 'sk-image-secret',
-        defaultModel: 'grok-imagine-image-quality'
+        defaultModel: 'gpt-image-1'
       }
     },
     { prompt: 'dedicated image token' },
@@ -813,7 +749,7 @@ async function main() {
     }
   )
   assert.strictEqual(observedDedicatedImageRequest.request.headers.authorization, 'Bearer sk-image-secret')
-  assert.strictEqual(observedDedicatedImageRequest.body.model, 'grok-imagine-image-quality')
+  assert.strictEqual(observedDedicatedImageRequest.body.model, 'gpt-image-1')
   const failoverRequests = []
   const failoverDiagnostics = []
   const failoverImage = await generateNewApiImage(
@@ -823,14 +759,14 @@ async function main() {
       imageGeneration: {
         baseUrl: 'https://ainiubi.org/v1',
         apiKey: 'sk-quality-secret',
-        defaultModel: 'grok-imagine-image-quality',
+        defaultModel: 'gpt-image-1',
         candidates: [
           {
             baseUrl: 'https://ainiubi.org/v1',
             apiKey: 'sk-quality-secret',
-            defaultModel: 'grok-imagine-image-quality'
+            defaultModel: 'gpt-image-1'
           },
-          { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-gpt-secret', defaultModel: 'gpt-image-2' }
+          { baseUrl: 'https://ainiubi.org/v1', apiKey: 'sk-dall-e-secret', defaultModel: 'dall-e-3' }
         ]
       }
     },
@@ -842,7 +778,7 @@ async function main() {
         failoverRequests.push({ url, body, authorization: request.headers.authorization })
         if (failoverRequests.length === 1) {
           return new Response(
-            JSON.stringify({ error: { message: 'This token has no access to model grok-imagine-image-quality' } }),
+            JSON.stringify({ error: { message: 'This token has no access to model gpt-image-1' } }),
             { status: 403 }
           )
         }
@@ -853,10 +789,10 @@ async function main() {
   )
 
   assert.strictEqual(failoverRequests.length, 2)
-  assert.strictEqual(failoverRequests[0].body.model, 'grok-imagine-image-quality')
-  assert.strictEqual(failoverRequests[1].body.model, 'gpt-image-2')
-  assert.strictEqual(failoverRequests[1].authorization, 'Bearer sk-gpt-secret')
-  assert.strictEqual(failoverImage.payload.model, 'gpt-image-2')
+  assert.strictEqual(failoverRequests[0].body.model, 'gpt-image-1')
+  assert.strictEqual(failoverRequests[1].body.model, 'dall-e-3')
+  assert.strictEqual(failoverRequests[1].authorization, 'Bearer sk-dall-e-secret')
+  assert.strictEqual(failoverImage.payload.model, 'dall-e-3')
   assert.strictEqual(
     failoverDiagnostics.some(item => item.outcome === 'candidate_rejected'),
     true
@@ -899,7 +835,7 @@ async function main() {
           new Response(
             JSON.stringify({
               error: {
-                message: 'This token has no access to model grok-imagine-image-quality (request id: private-request-id)'
+                message: `This token has no access to model ${DEFAULT_IMAGE_MODEL} (request id: private-request-id)`
               }
             }),
             { status: 403 }
@@ -907,7 +843,8 @@ async function main() {
       }
     ),
     error =>
-      /没有图片模型 grok-imagine-image-quality 的访问权限/.test(error.message) &&
+      error instanceof Error &&
+      error.message.includes(`没有图片模型 ${DEFAULT_IMAGE_MODEL} 的访问权限`) &&
       !/private-request-id/.test(error.message)
   )
   await assert.rejects(
@@ -1079,7 +1016,7 @@ async function main() {
     undefined
   )
   const nonStreamingChat = responsesRequestToChat({
-    model: 'grok-4.5',
+    model: 'gpt-5.6',
     stream: false,
     input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'No stream.' }] }]
   })
@@ -1466,7 +1403,7 @@ async function main() {
     fs.mkdirSync(path.join(previousClientRoot, 'data', 'manager'), { recursive: true })
     fs.mkdirSync(path.join(olderClientRoot, 'data', 'manager'), { recursive: true })
     fs.mkdirSync(path.join(legacyHome, '.codex', 'codex-model-manager'), { recursive: true })
-    fs.mkdirSync(path.join(legacyElectronUserData, 'other-channels', 'grok-oauth'), { recursive: true })
+    fs.mkdirSync(path.join(legacyElectronUserData, 'other-channels', 'legacy-provider'), { recursive: true })
     fs.mkdirSync(path.join(legacyLocalAppData, 'ChatGPT Model Manager', 'logs'), { recursive: true })
     fs.writeFileSync(
       path.join(previousClientRoot, 'data', 'manager', 'channels.json'),
@@ -1483,7 +1420,7 @@ async function main() {
     )
     fs.writeFileSync(path.join(legacyElectronUserData, 'Preferences'), '{"theme":"portable-test"}')
     fs.writeFileSync(
-      path.join(legacyElectronUserData, 'other-channels', 'grok-oauth', 'account.json'),
+      path.join(legacyElectronUserData, 'other-channels', 'legacy-provider', 'account.json'),
       '{"id":"portable-test"}'
     )
     fs.writeFileSync(path.join(legacyLocalAppData, 'ChatGPT Model Manager', 'logs', 'legacy.log'), 'legacy-log')
@@ -1552,7 +1489,7 @@ async function main() {
     })
     assert.strictEqual(fs.existsSync(path.join(configured.electronUserData, 'Preferences')), true)
     assert.strictEqual(
-      fs.existsSync(path.join(configured.electronUserData, 'other-channels', 'grok-oauth', 'account.json')),
+      fs.existsSync(path.join(configured.electronUserData, 'other-channels', 'legacy-provider', 'account.json')),
       false
     )
     assert.strictEqual(fs.existsSync(path.join(configured.logs, 'legacy.log')), true)
@@ -1740,10 +1677,10 @@ async function main() {
   assert.strictEqual(quittingEvent.prevented, false)
   assert.strictEqual(quittingDialogCalls, 0)
 
-  assert.match(modelIdentityInstruction('grok-4.5'), /selected_upstream_model_id="grok-4\.5"/)
+  assert.match(modelIdentityInstruction('gpt-5.6'), /selected_upstream_model_id="gpt-5\.6"/)
   assert.strictEqual(
-    canonicalModelFor({ modelAliases: { 'gpt-native-slot': 'grok-4.5' } }, 'gpt-native-slot'),
-    'grok-4.5'
+    canonicalModelFor({ modelAliases: { 'gpt-native-slot': 'gpt-5.6' } }, 'gpt-native-slot'),
+    'gpt-5.6'
   )
   assert.strictEqual(normalizeReasoningEffort('ultra', ['low', 'high']), 'high')
 
@@ -2083,7 +2020,7 @@ async function main() {
       [
         `data: ${JSON.stringify({
           id: 'chatcmpl-module-stream',
-          model: 'grok-module-test',
+          model: 'gpt-module-test',
           choices: [{ index: 0, delta: { content: '第一段' } }]
         })}\n\n`,
         `data: ${JSON.stringify({
@@ -2106,7 +2043,7 @@ async function main() {
   ])
   assert.deepStrictEqual(chatAssistant, {
     id: 'chatcmpl-module-stream',
-    model: 'grok-module-test',
+    model: 'gpt-module-test',
     content: '第一段第二段',
     usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 }
   })
@@ -2119,7 +2056,7 @@ async function main() {
           content =>
             `data: ${JSON.stringify({
               id: 'chatcmpl-cumulative-snapshot',
-              model: 'grok-cumulative-snapshot',
+              model: 'gpt-cumulative-snapshot',
               choices: [{ index: 0, delta: { content } }]
             })}\n\n`
         )
@@ -2135,7 +2072,7 @@ async function main() {
   )
 
   const multiStepToolLoop = responsesRequestToChat({
-    model: 'grok-4.5',
+    model: 'gpt-5.6',
     stream: true,
     input: [
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Run the two-step check.' }] },

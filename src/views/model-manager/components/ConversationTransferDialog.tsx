@@ -68,7 +68,8 @@ export const ConversationTransferDialog = ({
               选择要导入的内容。对话使用 Codex JSONL 文件；项目会选择一个现有文件夹并加入项目列表。
             </Typography>
             <Alert severity='info' variant='outlined'>
-              导入后会自动刷新本地索引。重复导入前请确认目标文件或项目路径，避免产生重复记录。
+              导入后会刷新管理器列表；如需让 Codex 客户端立即看到新会话，请在导入后使用“修复客户端索引”并重启
+              Codex。重复导入前请确认目标文件或项目路径，避免产生重复记录。
             </Alert>
             <Button
               variant='outlined'

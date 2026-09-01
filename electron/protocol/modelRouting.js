@@ -11,9 +11,6 @@ function safeModelId(model) {
 function modelIdentityLabel(model) {
   const id = safeModelId(model)
 
-  if (/^grok(?:-|$)/i.test(id)) {
-    return id.replace(/^grok/i, 'Grok').replace(/-/g, ' ')
-  }
   if (/^gpt(?:-|$)/i.test(id)) {
     return id.replace(/^gpt/i, 'GPT').replace(/-(?=[A-Za-z])/g, ' ')
   }

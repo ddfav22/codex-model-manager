@@ -49,9 +49,22 @@ function registerIpcHandlers({
     'codex:testRelay': (_event, payload) => manager.testAndSaveRelay(payload),
     'codex:testSavedRelay': (_event, id, model) => manager.testSavedRelay(id, model),
     'codex:restoreDefault': () => manager.restoreDefaultProvider(),
-    'codex:restoreInitialBackup': () => manager.restoreInitialBackup(),
+    'codex:restoreInitialBackup': () =>
+      manager.restoreInitialBackup({
+        // Resetting the official client state while Codex is still running can
+        // leave SQLite/config files locked and let the client recreate deleted
+        // rows on its next startup.  The user explicitly confirmed the reset
+        // in the renderer, so stop only the known Codex processes before the
+        // transaction and report any failure through the normal error path.
+        stopClientsOnBusy: true
+      }),
     'codex:removeRelay': (_event, id) => manager.removeRelay(id),
-    'codex:deleteSession': (_event, idOrPath) => manager.deleteSession(idOrPath),
+    'codex:deleteSession': (_event, idOrPath) =>
+      manager.deleteSession(idOrPath, {
+        stopClientsOnBusy: true,
+        refreshConversationIndex: true,
+        pruneStateIndexOnFailure: true
+      }),
     'codex:deleteProject': (_event, projectPath) => manager.deleteProject(projectPath),
     'codex:deleteSkill': (_event, identifier) => manager.deleteSkill(identifier),
     'codex:importSkillFromGithub': (_event, url) => manager.importSkillFromGithub(url),
@@ -237,11 +250,14 @@ function registerIpcHandlers({
     logEvent('info', 'conversation.delete.start', {
       scope: safeFilters.scope,
       filteredByProject: Boolean(safeFilters.projectPath),
-      filteredByQuery: Boolean(safeFilters.query)
+      filteredByQuery: Boolean(safeFilters.query),
+      removeProjectFolders: safeFilters.removeProjectFolders === true
     })
     const result = await manager.deleteConversationData(safeFilters, {
       stopClientsOnBusy: true,
-      refreshConversationIndex: true
+      stopBeforeMutation: true,
+      refreshConversationIndex: true,
+      pruneStateIndexOnFailure: true
     })
 
     logEvent('info', 'conversation.delete.complete', {
@@ -256,6 +272,7 @@ function registerIpcHandlers({
       configurationUpdated: !result.configurationError,
       indexDeleteOk: result.indexDelete?.ok === true,
       indexDeleteCount: result.indexDelete?.deletedCount || 0,
+      removeProjectFolders: result.removeProjectFolders === true,
       indexRefreshOk: result.indexRefresh?.ok === true
     })
     return result

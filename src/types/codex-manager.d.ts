@@ -97,6 +97,40 @@ export type ConversationDeleteFilters = {
   scope?: 'active' | 'archived'
   query?: string
   projectPath?: string
+
+  /**
+   * Remove matching project directories from disk in addition to conversation
+   * records.  The safe default is false; callers must opt in explicitly.
+   */
+  removeProjectFolders?: boolean
+}
+
+/** Result of pruning Codex Desktop's project/thread state after a mutation. */
+export type ConversationGlobalStatePruneResult = {
+  changed: boolean
+  removedThreadCount: number
+  removedProjectCount: number
+  backupPath: string
+}
+
+/** Process-stop outcome returned when a mutation closes the desktop client. */
+export type CodexClientStopResult = {
+  ok: boolean
+  skipped?: boolean
+  reason?: string
+  stopped?: number
+  remaining?: string[]
+  error?: string
+}
+
+/** Safe fallback that lets Codex rebuild a stale SQLite conversation index. */
+export type CodexStateIndexPruneResult = {
+  ok: boolean
+  skipped: boolean
+  reason?: string
+  removed: string[]
+  backups: string[]
+  error?: string
 }
 
 export type ConversationDeleteResult = {
@@ -111,6 +145,8 @@ export type ConversationDeleteResult = {
   skippedProjects: Array<{ path: string; error: string }>
   stoppedProcessCount: number
   configurationError: string
+  stopResult?: CodexClientStopResult
+  stateIndexPrune?: CodexStateIndexPruneResult
   indexDelete: {
     ok: boolean
     skipped: boolean
@@ -119,10 +155,15 @@ export type ConversationDeleteResult = {
     errors?: Array<{ threadId: string; error: string }>
   }
   indexRefresh: { ok: boolean; skipped: boolean; reason?: string; error?: string }
+  removeProjectFolders?: boolean
+  globalStatePrune?: ConversationGlobalStatePruneResult
 }
 
 export type InitialBackup = {
   exists: boolean
+  metadataExists?: boolean
+  valid?: boolean
+  error?: string
   path: string
   configExists?: boolean
   authCaptured?: boolean
@@ -132,6 +173,14 @@ export type InitialBackup = {
   modelsCacheExists?: boolean
   modelsCachePath?: string
   createdAt: string
+}
+
+export type FreshCodexReset = {
+  removedFiles: string[]
+  removedSessionCount: number
+  clearedEnvironmentNames: string[]
+  environmentErrors?: Array<{ name: string; error: string }>
+  stoppedProcessCount?: number
 }
 
 export type CodexDiagnostics = {
@@ -422,6 +471,8 @@ export type RuntimeDiagnosticSummary = {
   codexTurnId: string
   upstreamStatus: number
   upstreamRetryCount: number
+  upstreamRetryDelayMs?: number
+  upstreamRequestId?: string
 }
 
 declare global {
@@ -484,17 +535,34 @@ declare global {
       }>
       onApplyRelayProgress: (listener: (progress: CodexActivationProgress) => void) => () => void
       restoreDefault: () => Promise<{ status: CodexStatus; restart: CodexRestart }>
-      restoreInitialBackup: () => Promise<{ status: CodexStatus; restart: CodexRestart }>
+      restoreInitialBackup: () => Promise<{
+        status: CodexStatus
+        restart: CodexRestart
+        freshReset?: FreshCodexReset
+        stopResult?: CodexClientStopResult
+      }>
       removeRelay: (id: string) => Promise<CodexStatus>
       openPath: (targetPath: string) => Promise<{ ok: boolean; error?: string }>
-      deleteSession: (idOrPath: string) => Promise<{ status: CodexStatus; deletedPath: string }>
+      deleteSession: (idOrPath: string) => Promise<{
+        status: CodexStatus
+        deletedPath: string
+        stopResult?: CodexClientStopResult
+        indexDelete?: ConversationDeleteResult['indexDelete']
+        indexRefresh?: ConversationDeleteResult['indexRefresh']
+        stateIndexPrune?: CodexStateIndexPruneResult
+        globalStatePrune?: ConversationGlobalStatePruneResult
+        projectRecordRemoved?: boolean
+        configurationError?: string
+      }>
       deleteConversationData: (filters: ConversationDeleteFilters) => Promise<ConversationDeleteResult>
       importConversationData: (kind: ConversationTransferKind) => Promise<ConversationImportResult | null>
       exportConversationData: (
         kind: ConversationTransferKind,
         sourcePath: string
       ) => Promise<ConversationExportResult | null>
-      deleteProject: (projectPath: string) => Promise<CodexStatus>
+      deleteProject: (
+        projectPath: string
+      ) => Promise<CodexStatus & { globalStatePrune?: ConversationGlobalStatePruneResult }>
       deleteSkill: (identifier: string) => Promise<CodexStatus>
       importSkillZip: () => Promise<CodexStatus | null>
       importAgentZip: () => Promise<CodexStatus | null>

@@ -50,6 +50,10 @@ function modelListFromProvider(provider) {
 function isChatGptModel(model) {
   const normalized = String(model || '').trim().toLowerCase()
 
+  // Image endpoints are OpenAI models too, but they are not chat models and
+  // must stay in the dedicated image runtime rather than Codex's chat list.
+  if (/^(?:gpt-image|chatgpt-image|dall-e)(?:-|$)/.test(normalized)) return false
+
   return /^(?:gpt(?:-|$)|o[1-9](?:-|$)|codex(?:-|$))/.test(normalized)
 }
 
@@ -63,7 +67,7 @@ function modelAdapterProfile(model, test = null) {
     .toLowerCase()
   const testedWireApi = ['responses', 'chat'].includes(test?.wireApi) ? test.wireApi : ''
 
-  if (/^(gpt(?:-|$)|o[1-9](?:-|$)|codex(?:-|$))/.test(normalized)) {
+  if (isChatGptModel(normalized)) {
     const reasoningEfforts = GPT_REASONING_LEVELS[normalized] || ['low', 'medium', 'high']
     const wireApi = testedWireApi || 'responses'
     const supportsFast = wireApi === 'responses' && GPT_FAST_MODELS.has(normalized)
@@ -88,27 +92,6 @@ function modelAdapterProfile(model, test = null) {
     }
   }
 
-  if (/^grok(?:-|$)/.test(normalized)) {
-    const wireApi = testedWireApi || 'chat'
-
-    return {
-      status: 'supported',
-      available: true,
-      adapter: wireApi === 'responses' ? 'grok-responses' : 'grok-chat',
-      wireApi,
-      reasoningEfforts: ['low', 'medium', 'high'],
-      defaultReasoningEffort: 'high',
-      supportsReasoningSummaries: false,
-      supportsVerbosity: false,
-      speedModes: ['standard'],
-      serviceTiers: [],
-      toolTransport: test?.toolTransport || 'native',
-      agentRuntime: 'codex-native',
-      upstreamModel: String(model || ''),
-      reason: ''
-    }
-  }
-
   return {
     status: 'unsupported',
     available: false,
@@ -123,7 +106,7 @@ function modelAdapterProfile(model, test = null) {
     toolTransport: '',
     agentRuntime: 'codex-native',
     upstreamModel: String(model || ''),
-    reason: '适配未完成，暂不可用'
+    reason: '仅支持 ChatGPT/OpenAI 模型；该模型暂不可用'
   }
 }
 
@@ -166,7 +149,7 @@ function preferredSupportedModel(models, preferred = '') {
 
   if (requested && available.includes(requested) && modelAdapterProfile(requested).available) return requested
 
-  return available.find(model => modelAdapterProfile(model).available) || available[0] || ''
+  return available.find(model => modelAdapterProfile(model).available) || ''
 }
 
 function aggregateModelTests(models, modelTests) {

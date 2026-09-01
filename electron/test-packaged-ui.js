@@ -674,7 +674,11 @@ async function main() {
     const deletionSmoke = await cdp.evaluate(`(async () => {
       const result = await window.codexManager.deleteConversationData({
         scope: 'active',
-        projectPath: ${JSON.stringify(deletionProjectPath)}
+        projectPath: ${JSON.stringify(deletionProjectPath)},
+        // This smoke intentionally exercises the destructive path.  The
+        // renderer's default "删除筛选内容" action is records-only and must
+        // never remove a project folder unless this flag is explicit.
+        removeProjectFolders: true
       })
 
       return {
@@ -682,6 +686,7 @@ async function main() {
         skippedSessionCount: result.skippedSessionCount,
         deletedProjectCount: result.deletedProjectCount,
         skippedProjectCount: result.skippedProjectCount,
+        removeProjectFolders: result.removeProjectFolders,
         configurationError: result.configurationError,
         indexDeleteOk: result.indexDelete?.ok,
         indexRefreshOk: result.indexRefresh?.ok
@@ -841,6 +846,7 @@ async function main() {
       result.deletionSmoke?.skippedSessionCount === 0,
       result.deletionSmoke?.deletedProjectCount === 1,
       result.deletionSmoke?.skippedProjectCount === 0,
+      result.deletionSmoke?.removeProjectFolders === true,
       !result.deletionSmoke?.configurationError,
       result.deletionFilesRemoved === true,
       result.deletionLog?.deletedSessionCount === 1,

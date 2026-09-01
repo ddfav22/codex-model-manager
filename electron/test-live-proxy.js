@@ -30,7 +30,10 @@ async function main() {
     configuredChannels.find(provider => provider.active)?.id ||
     configuredChannels[0]?.id ||
     ''
-  const model = process.env.CODEX_MM_LIVE_MODEL || 'grok-4.5'
+  // Keep the opt-in live smoke test aligned with the ChatGPT/OpenAI-only
+  // adapter. Callers may still override this with an explicitly advertised
+  // OpenAI model through CODEX_MM_LIVE_MODEL.
+  const model = process.env.CODEX_MM_LIVE_MODEL || 'gpt-5.6'
   const toolTest = process.env.CODEX_MM_LIVE_TOOL_TEST === '1'
   const expectedText = process.env.CODEX_MM_LIVE_EXPECT || 'PROXY_OK'
   const prompt =

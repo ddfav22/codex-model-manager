@@ -2,11 +2,20 @@ const { randomUUID } = require('crypto')
 const { materializeNativeImageGenerationCall, nativeImageGenerationBase64 } = require('./newApiImageGeneration')
 
 function clonedResponse(upstream, body) {
-  return new Response(body, {
+  const cloned = new Response(body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: upstream.headers
   })
+
+  // Response metadata added by the bounded upstream retry wrapper is not
+  // part of the Fetch Response constructor. Preserve it when the body is
+  // wrapped for native image materialisation so diagnostics still report
+  // retry counts and failure classification after the transform.
+  if (upstream.codexRetryDiagnostic) cloned.codexRetryDiagnostic = upstream.codexRetryDiagnostic
+  if (upstream.codexChatCompatibility) cloned.codexChatCompatibility = upstream.codexChatCompatibility
+
+  return cloned
 }
 
 function sseBoundary(value) {

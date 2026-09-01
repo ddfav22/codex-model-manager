@@ -59,7 +59,7 @@ async function main() {
     stream: true,
     reasoning: { effort: 'low' }
   })
-  assert.deepStrictEqual(responsesProbeRuntimeOptions('grok-4.5'), {
+  assert.deepStrictEqual(responsesProbeRuntimeOptions('legacy-provider-model'), {
     max_output_tokens: DEFAULT_RESPONSES_PROBE_MAX_OUTPUT_TOKENS,
     stream: true
   })
@@ -888,16 +888,18 @@ async function main() {
     })}\n`,
     'utf8'
   )
-  manager._internal.writeChannelModelCatalog(emptyCatalogPath, ['grok-4.5'], [nativeCatalogFixturePath])
+  manager._internal.writeChannelModelCatalog(emptyCatalogPath, ['gpt-compat-chat'], [nativeCatalogFixturePath], {
+    modelTests: { 'gpt-compat-chat': { wireApi: 'chat' } }
+  })
   const emptyCatalogModel = JSON.parse(fs.readFileSync(emptyCatalogPath, 'utf8')).models[0]
 
   assert.strictEqual(emptyCatalogModel.slug, 'gpt-5.6-sol')
-  assert.strictEqual(emptyCatalogModel.display_name, 'grok-4.5')
+  assert.strictEqual(emptyCatalogModel.display_name, 'gpt-compat-chat')
   assert.strictEqual(emptyCatalogModel.minimal_client_version, '0.0.1')
-  assert.match(emptyCatalogModel.description, /grok-chat/)
+  assert.match(emptyCatalogModel.description, /gpt-chat/)
   assert.match(emptyCatalogModel.base_instructions, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
-  assert.match(emptyCatalogModel.base_instructions, /agent based on Grok 4\.5/)
-  assert.match(emptyCatalogModel.base_instructions, /selected_upstream_model_id="grok-4\.5"/)
+  assert.match(emptyCatalogModel.base_instructions, /agent based on GPT compat chat/)
+  assert.match(emptyCatalogModel.base_instructions, /selected_upstream_model_id="gpt-compat-chat"/)
   assert.match(emptyCatalogModel.base_instructions, /does not prescribe a canned identity answer/)
   assert.doesNotMatch(emptyCatalogModel.base_instructions, /based on GPT-5/)
   assert.match(emptyCatalogModel.model_messages?.instructions_template, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
@@ -905,7 +907,7 @@ async function main() {
   assert.strictEqual(emptyCatalogModel.apply_patch_tool_type, 'freeform')
   assert.strictEqual(emptyCatalogModel.shell_type, 'shell_command')
   assert.strictEqual(emptyCatalogModel.tool_mode, 'code_mode')
-  assert.strictEqual(emptyCatalogModel.default_reasoning_level, 'high')
+  assert.strictEqual(emptyCatalogModel.default_reasoning_level, 'medium')
   assert.deepStrictEqual(
     emptyCatalogModel.supported_reasoning_levels.map(item => item.effort),
     ['low', 'medium', 'high']
@@ -959,15 +961,15 @@ async function main() {
   assert.strictEqual(appliedCatalogModel.shell_type, 'disabled')
   assert.strictEqual(appliedCatalogModel.tool_mode, 'code_mode_only')
 
-  manager._internal.writeChannelModelCatalog(modelsCachePath, ['gpt-5-mini', 'grok-4.5'])
+  manager._internal.writeChannelModelCatalog(modelsCachePath, ['gpt-5-mini', 'legacy-provider-model'])
   const expandedCatalog = JSON.parse(fs.readFileSync(modelsCachePath, 'utf8'))
 
   assert.deepStrictEqual(
     expandedCatalog.models.filter(model => model.visibility === 'list').map(model => model.slug),
-    ['gpt-5.6-sol', 'gpt-5.6-terra']
+    ['gpt-5.6-sol']
   )
   assert.ok(expandedCatalog.models.some(model => model.slug === 'gpt-5-mini' && model.visibility === 'hide'))
-  assert.ok(expandedCatalog.models.some(model => model.slug === 'grok-4.5' && model.visibility === 'hide'))
+  assert.ok(!expandedCatalog.models.some(model => model.manager_actual_model === 'legacy-provider-model'))
   assert.ok(expandedCatalog.models.some(model => model.slug === 'codex-auto-review' && model.visibility === 'hide'))
 
   const activeConfig = fs.readFileSync(options.configPath, 'utf8')
@@ -1127,49 +1129,42 @@ async function main() {
   const initialRestored = manager.restoreInitialBackup(options)
   assert.strictEqual(initialRestored.status.currentProvider, 'builtin-relay')
   assert.match(fs.readFileSync(options.configPath, 'utf8'), /model_provider = "builtin-relay"/)
-  assert.strictEqual(JSON.parse(fs.readFileSync(authPath, 'utf8')).auth_mode, 'chatgpt')
-  assert.deepStrictEqual(
-    JSON.parse(fs.readFileSync(modelsCachePath, 'utf8'))
-      .models.filter(model => model.visibility === 'list')
-      .map(model => model.slug),
-    ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']
-  )
+  assert.strictEqual(fs.existsSync(authPath), false)
+  assert.strictEqual(fs.existsSync(modelsCachePath), false)
 
   assert.throws(() => manager.removeRelay('builtin-relay', options), /来自 Codex 配置/)
 
-  const removed = manager.removeRelay('acme-relay', options)
-  assert.strictEqual(
-    removed.providers.some(provider => provider.id === 'acme-relay'),
-    false
-  )
-  assert.doesNotMatch(fs.readFileSync(options.configPath, 'utf8'), /\[model_providers\.acme-relay\]/)
+  // Initial restore clears manager-owned channel state; a removed relay can no
+  // longer be selected or deleted as if it were still registered.
+  assert.throws(() => manager.removeRelay('acme-relay', options), /来自 Codex 配置/)
 
   const multi = manager.saveRelay(
     {
       name: 'Multi Relay',
       baseUrl: 'https://multi.example.com/v1',
       apiKey: 'AIza-test-key',
-      model: 'claude-sonnet-5',
-      models: ['claude-sonnet-5', 'grok-4.5', 'gemini-3.5-flash'],
+      model: 'gpt-compat-chat',
+      models: ['claude-sonnet-5', 'gpt-compat-chat', 'gemini-3.5-flash'],
       wireApi: 'chat'
     },
     options
   )
 
-  assert.deepStrictEqual(multi.channel.models, ['claude-sonnet-5', 'grok-4.5', 'gemini-3.5-flash'])
+  assert.deepStrictEqual(multi.channel.models, ['claude-sonnet-5', 'gpt-compat-chat', 'gemini-3.5-flash'])
   assert.strictEqual(multi.channel.testStatus, null)
   assert.deepStrictEqual(
     manager._internal.modelWireApiMap({
       keySource: 'newapi',
       wireApi: 'chat',
-      models: ['gpt-dynamic-responses', 'grok-dynamic-chat', 'provider-specific-model'],
+      models: ['gpt-dynamic-responses', 'gpt-dynamic-chat', 'provider-specific-model'],
       modelTests: {
-        'gpt-dynamic-responses': { wireApi: 'responses' }
+        'gpt-dynamic-responses': { wireApi: 'responses' },
+        'gpt-dynamic-chat': { wireApi: 'chat' }
       }
     }),
     {
       'gpt-dynamic-responses': 'responses',
-      'grok-dynamic-chat': 'chat'
+      'gpt-dynamic-chat': 'chat'
     }
   )
 
@@ -1185,7 +1180,7 @@ async function main() {
     const requestedUrl = String(_url)
     const hasToolResult = Array.isArray(body.messages) && body.messages.some(message => message.role === 'tool')
 
-    if (requestedModel === 'grok-no-channel') {
+    if (requestedModel === 'gpt-no-channel') {
       testedModels.push(`${requestedModel}:${requestedUrl.endsWith('/responses') ? 'responses' : 'chat'}`)
 
       return {
@@ -1193,7 +1188,7 @@ async function main() {
         status: 503,
         text: async () =>
           JSON.stringify({
-            error: { message: 'No available channel for model grok-no-channel under group default' }
+            error: { message: 'No available channel for model gpt-no-channel under group default' }
           })
       }
     }
@@ -1417,7 +1412,7 @@ async function main() {
       }
     }
 
-    if (requestedModel === 'grok-auto-tool-broken' && body.tools && body.tool_choice === 'auto') {
+    if (requestedModel === 'gpt-auto-tool-broken' && body.tools && body.tool_choice === 'auto') {
       return {
         ok: true,
         status: 200,
@@ -1467,11 +1462,11 @@ async function main() {
       }
     }
 
-    if (requestedModel === 'grok-stream-broken' && body.stream) {
+    if (requestedModel === 'gpt-stream-broken' && body.stream) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ message: 'not an SSE stream' }) }
     }
 
-    if (requestedModel === 'grok-chat-broken' && !body.stream) {
+    if (requestedModel === 'gpt-chat-broken' && !body.stream) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ message: 'not a chat completion' }) }
     }
 
@@ -1508,8 +1503,8 @@ async function main() {
         name: 'Broken Stream',
         baseUrl: 'https://multi.example.com/v1',
         apiKey: 'AIza-test-key',
-        model: 'grok-stream-broken',
-        models: ['grok-stream-broken'],
+        model: 'gpt-stream-broken',
+        models: ['gpt-stream-broken'],
         wireApi: 'chat'
       },
       options
@@ -1525,8 +1520,8 @@ async function main() {
         name: 'Stream Only',
         baseUrl: 'https://multi.example.com/v1',
         apiKey: 'AIza-test-key',
-        model: 'grok-chat-broken',
-        models: ['grok-chat-broken'],
+        model: 'gpt-chat-broken',
+        models: ['gpt-chat-broken'],
         wireApi: 'chat'
       },
       options
@@ -1542,8 +1537,8 @@ async function main() {
         name: 'Unavailable NewAPI Route',
         baseUrl: 'https://multi.example.com/v1',
         apiKey: 'AIza-test-key',
-        model: 'grok-no-channel',
-        models: ['grok-no-channel'],
+        model: 'gpt-no-channel',
+        models: ['gpt-no-channel'],
         wireApi: 'chat'
       },
       options
@@ -1644,8 +1639,8 @@ async function main() {
         name: 'Three Model Key',
         baseUrl: 'https://multi.example.com/v1',
         apiKey: 'AIza-three-model-test',
-        model: 'grok-4.5',
-        models: ['gpt-5.5', 'gpt-5.6-sol', 'grok-4.5'],
+        model: 'gpt-compat-chat',
+        models: ['gpt-5.5', 'gpt-5.6-sol', 'gpt-compat-chat'],
         wireApi: 'chat'
       },
       options
@@ -1660,11 +1655,15 @@ async function main() {
     assert.strictEqual(testedThreeModels.test.ok, true)
     assert.deepStrictEqual(
       testedThreeModels.tests.map(test => test.model),
-      ['gpt-5.5', 'gpt-5.6-sol', 'grok-4.5']
+      ['gpt-5.5', 'gpt-5.6-sol', 'gpt-compat-chat']
     )
-    assert.deepStrictEqual(Object.keys(testedThreeProvider.modelTests), ['gpt-5.5', 'gpt-5.6-sol', 'grok-4.5'])
+    assert.deepStrictEqual(Object.keys(testedThreeProvider.modelTests), [
+      'gpt-5.5',
+      'gpt-5.6-sol',
+      'gpt-compat-chat'
+    ])
     assert.ok(Object.values(testedThreeProvider.modelTests).every(test => test.ok === true))
-    const appliedThreeModels = manager.applyRelay(keyWithThreeModels.channel.id, 'grok-4.5', {
+    const appliedThreeModels = manager.applyRelay(keyWithThreeModels.channel.id, 'gpt-compat-chat', {
       ...options,
       skipChannelTest: false
     })
@@ -1674,11 +1673,11 @@ async function main() {
     )
 
     assert.strictEqual(appliedThreeModels.modelCatalog.models.length, 3)
-    assert.deepStrictEqual(threeModelRuntime.models, ['gpt-5.5', 'gpt-5.6-sol', 'grok-4.5'])
+    assert.deepStrictEqual(threeModelRuntime.models, ['gpt-5.5', 'gpt-5.6-sol', 'gpt-compat-chat'])
     assert.strictEqual(Object.keys(threeModelRuntime.modelAliases).length, 3)
     assert.deepStrictEqual(
       threeModelCatalog.map(model => model.display_name),
-      ['gpt-5.5', 'gpt-5.6-sol', 'grok-4.5']
+      ['gpt-5.5', 'gpt-5.6-sol', 'gpt-compat-chat']
     )
     testedModels.length = 0
 
@@ -1688,7 +1687,13 @@ async function main() {
     assert.strictEqual(tested.test.chatOk, true)
     assert.strictEqual(tested.test.streamOk, true)
     assert.strictEqual(tested.test.agentToolOk, true)
-    assert.deepStrictEqual(testedModels, ['grok-4.5:chat', 'grok-4.5:stream', 'grok-4.5:tool', 'grok-4.5:tool-result'])
+    assert.deepStrictEqual(testedModels, [
+      'gpt-compat-chat:responses',
+      'gpt-compat-chat:chat',
+      'gpt-compat-chat:stream',
+      'gpt-compat-chat:tool',
+      'gpt-compat-chat:tool-result'
+    ])
     assert.strictEqual(tested.tests.length, 1)
     assert.strictEqual(
       tested.status.providers.find(provider => provider.id === 'multi-relay').modelTests['claude-sonnet-5'],
@@ -1698,16 +1703,22 @@ async function main() {
       tested.status.providers.find(provider => provider.id === 'multi-relay').modelTests['gemini-3.5-flash'],
       undefined
     )
-    assert.ok(tested.status.providers.find(provider => provider.id === 'multi-relay').modelTests['grok-4.5'].ok)
+    assert.ok(
+      tested.status.providers.find(provider => provider.id === 'multi-relay').modelTests['gpt-compat-chat'].ok
+    )
     assert.strictEqual(
-      tested.status.providers.find(provider => provider.id === 'multi-relay').modelTests['grok-4.5'].actualModel,
-      'grok-4.5-build'
+      tested.status.providers.find(provider => provider.id === 'multi-relay').modelTests['gpt-compat-chat']
+        .actualModel,
+      'gpt-compat-chat-build'
     )
 
-    const appliedMulti = manager.applyRelay('multi-relay', 'grok-4.5', { ...options, skipChannelTest: false })
+    const appliedMulti = manager.applyRelay('multi-relay', 'gpt-compat-chat', {
+      ...options,
+      skipChannelTest: false
+    })
 
     assert.strictEqual(appliedMulti.status.currentProvider, 'multi-relay')
-    assert.strictEqual(appliedMulti.status.currentModel, 'grok-4.5')
+    assert.strictEqual(appliedMulti.status.currentModel, 'gpt-compat-chat')
     assert.match(fs.readFileSync(options.configPath, 'utf8'), /model = "gpt-5\.6-sol"/)
     const multiConfig = manager._internal.parseConfig(fs.readFileSync(options.configPath, 'utf8'))
 
@@ -1729,33 +1740,33 @@ async function main() {
     assert.strictEqual(multiRuntime.id, 'multi-relay')
     assert.strictEqual(multiRuntime.baseUrl, 'https://multi.example.com/v1')
     assert.strictEqual(multiRuntime.apiKey, 'AIza-test-key')
-    assert.deepStrictEqual(multiRuntime.models, ['grok-4.5'])
-    assert.deepStrictEqual(multiRuntime.allModels, ['claude-sonnet-5', 'grok-4.5', 'gemini-3.5-flash'])
-    assert.deepStrictEqual(multiRuntime.modelAliases, { 'gpt-5.6-sol': 'grok-4.5' })
-    assert.strictEqual(multiRuntime.modelCapabilities['claude-sonnet-5'].available, false)
-    assert.strictEqual(multiRuntime.modelCapabilities['grok-4.5'].available, true)
-    assert.deepStrictEqual(multiRuntime.modelWireApis, { 'grok-4.5': 'chat' })
+    assert.deepStrictEqual(multiRuntime.models, ['gpt-compat-chat'])
+    assert.deepStrictEqual(multiRuntime.allModels, ['gpt-compat-chat'])
+    assert.deepStrictEqual(multiRuntime.modelAliases, { 'gpt-5.6-sol': 'gpt-compat-chat' })
+    assert.strictEqual(multiRuntime.modelCapabilities['claude-sonnet-5'], undefined)
+    assert.strictEqual(multiRuntime.modelCapabilities['gpt-compat-chat'].available, true)
+    assert.deepStrictEqual(multiRuntime.modelWireApis, { 'gpt-compat-chat': 'chat' })
     assert.deepStrictEqual(
       JSON.parse(fs.readFileSync(modelsCachePath, 'utf8'))
         .models.filter(model => model.visibility === 'list')
         .map(model => model.slug),
       ['gpt-5.6-sol']
     )
-    const generatedGrokModel = JSON.parse(fs.readFileSync(modelsCachePath, 'utf8')).models.find(
-      model => model.manager_actual_model === 'grok-4.5' && model.visibility === 'list'
+    const generatedChatGptModel = JSON.parse(fs.readFileSync(modelsCachePath, 'utf8')).models.find(
+      model => model.manager_actual_model === 'gpt-compat-chat' && model.visibility === 'list'
     )
 
-    assert.strictEqual(generatedGrokModel.display_name, 'grok-4.5')
-    assert.match(generatedGrokModel.description, /grok-chat/)
-    assert.match(generatedGrokModel.base_instructions, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
-    assert.match(generatedGrokModel.base_instructions, /agent based on Grok 4\.5/)
-    assert.match(generatedGrokModel.base_instructions, /respond in your own words/)
-    assert.doesNotMatch(generatedGrokModel.base_instructions, /based on GPT-5/)
-    assert.match(generatedGrokModel.model_messages?.instructions_template, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
-    assert.strictEqual(generatedGrokModel.shell_type, 'disabled')
-    assert.strictEqual(generatedGrokModel.tool_mode, 'code_mode_only')
+    assert.strictEqual(generatedChatGptModel.display_name, 'gpt-compat-chat')
+    assert.match(generatedChatGptModel.description, /gpt-chat/)
+    assert.match(generatedChatGptModel.base_instructions, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
+    assert.match(generatedChatGptModel.base_instructions, /agent based on GPT compat chat/)
+    assert.match(generatedChatGptModel.base_instructions, /respond in your own words/)
+    assert.doesNotMatch(generatedChatGptModel.base_instructions, /based on GPT-5\./)
+    assert.match(generatedChatGptModel.model_messages?.instructions_template, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
+    assert.strictEqual(generatedChatGptModel.shell_type, 'shell_command')
+    assert.strictEqual(generatedChatGptModel.tool_mode, 'code_mode')
     assert.deepStrictEqual(
-      generatedGrokModel.supported_reasoning_levels.map(item => item.effort),
+      generatedChatGptModel.supported_reasoning_levels.map(item => item.effort),
       ['low', 'medium', 'high']
     )
   } finally {
@@ -1772,7 +1783,7 @@ async function main() {
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ object: 'list', data: [{ id: 'grok-4.5' }, { id: 'grok-4.5-fast' }] })
+      text: async () => JSON.stringify({ object: 'list', data: [{ id: 'gpt-compat-chat' }, { id: 'gpt-compat-chat-fast' }] })
     }
   }
 
@@ -1782,8 +1793,8 @@ async function main() {
 
     assert.strictEqual(refreshedManual.refreshedKeys, false)
     assert.strictEqual(refreshedManual.modelCount, 2)
-    assert.deepStrictEqual(refreshedProvider.models, ['grok-4.5', 'grok-4.5-fast'])
-    assert.strictEqual(refreshedProvider.model, 'grok-4.5')
+    assert.deepStrictEqual(refreshedProvider.models, ['gpt-compat-chat', 'gpt-compat-chat-fast'])
+    assert.strictEqual(refreshedProvider.model, 'gpt-compat-chat')
     assert.strictEqual(refreshedProvider.testStatus, null)
   } finally {
     global.fetch = originalFetchForManualRefresh
@@ -1823,15 +1834,15 @@ async function main() {
       name: 'Fresh Client Relay',
       baseUrl: 'https://fresh.example.com/v1',
       apiKey: 'sk-fresh-client',
-      model: 'grok-4.5',
-      models: ['grok-4.5'],
+      model: 'gpt-compat-chat',
+      models: ['gpt-compat-chat'],
       wireApi: 'chat'
     },
     neverLoggedInOptions
   )
 
   process.env[neverLoggedInRelay.channel.envKey] = 'sk-fresh-client'
-  manager.applyRelay(neverLoggedInRelay.channel.id, 'grok-4.5', neverLoggedInOptions)
+  manager.applyRelay(neverLoggedInRelay.channel.id, 'gpt-compat-chat', neverLoggedInOptions)
   assert.strictEqual(fs.existsSync(neverLoggedInOptions.authPath), false)
   assert.ok(fs.existsSync(neverLoggedInOptions.modelsCachePath))
 
@@ -1853,7 +1864,7 @@ async function main() {
     `${JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-fresh-client' }, null, 2)}\n`,
     'utf8'
   )
-  manager.applyRelay(neverLoggedInRelay.channel.id, 'grok-4.5', neverLoggedInOptions)
+  manager.applyRelay(neverLoggedInRelay.channel.id, 'gpt-compat-chat', neverLoggedInOptions)
   assert.strictEqual(fs.existsSync(neverLoggedInOptions.authPath), false)
 
   fs.writeFileSync(
@@ -1861,7 +1872,7 @@ async function main() {
     `${JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'test-api-key-user-owned-unrelated' }, null, 2)}\n`,
     'utf8'
   )
-  manager.applyRelay(neverLoggedInRelay.channel.id, 'grok-4.5', neverLoggedInOptions)
+  manager.applyRelay(neverLoggedInRelay.channel.id, 'gpt-compat-chat', neverLoggedInOptions)
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(neverLoggedInOptions.authPath, 'utf8')), {
     auth_mode: 'apikey',
     OPENAI_API_KEY: 'test-api-key-user-owned-unrelated'
@@ -1988,7 +1999,7 @@ async function main() {
   assert.strictEqual(deletedConversationData.deletedProjectCount, 1)
   assert.strictEqual(fs.existsSync(deleteSessionPath), false)
   assert.strictEqual(fs.existsSync(backfillSessionPath), true)
-  assert.strictEqual(fs.existsSync(deleteProjectDir), false)
+  assert.strictEqual(fs.existsSync(deleteProjectDir), true)
   assert.strictEqual(
     deletedConversationData.status.projects.some(
       project => project.path.toLowerCase() === backfillProjectDir.toLowerCase()
@@ -2042,7 +2053,7 @@ async function main() {
   assert.strictEqual(busyDeletedConversationData.indexDelete.deletedCount, 1)
   assert.deepStrictEqual(busyDeletedConversationData.indexRefresh, { ok: true, skipped: false })
   assert.strictEqual(fs.existsSync(backfillSessionPath), false)
-  assert.strictEqual(fs.existsSync(backfillProjectDir), false)
+  assert.strictEqual(fs.existsSync(backfillProjectDir), true)
 
   const skippedProjectDir = path.join(deleteDataRoot, 'project-keep-on-delete-error')
   const skippedSessionPath = path.join(deleteSessionDir, 'skipped-session.jsonl')
@@ -2376,8 +2387,8 @@ async function main() {
   const newApiRequests = []
   const newApiWorkKeyModels = [
     'gpt-5.6',
-    'grok-imagine-image-quality',
-    'grok-4.5',
+    'gpt-image-1',
+    'gpt-5.5',
     'claude-sonnet-5',
     'gemini-3.5-flash',
     'deepseek-r1',
@@ -2403,7 +2414,7 @@ async function main() {
       return {
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({ success: true, data: { keys: { 7: 'sk-newapi-full', 8: 'fixture-grok' } } })
+        text: async () => JSON.stringify({ success: true, data: { keys: { 7: 'sk-newapi-full', 8: 'sk-fixture-provider' } } })
       }
     }
 
@@ -2429,8 +2440,8 @@ async function main() {
                 },
                 {
                   id: 8,
-                  name: 'Grok Key',
-                  key: 'sk********grok',
+                  name: 'Provider Key',
+                  key: 'sk********prov',
                   status: 1,
                   group: 'paid',
                   remain_quota: 2000,
@@ -2446,8 +2457,8 @@ async function main() {
 
     if (String(url).endsWith('/v1/models')) {
       const models =
-        init.headers?.authorization === 'Bearer sk-fixture-grok'
-          ? [{ id: 'grok-4.5' }]
+        init.headers?.authorization === 'Bearer sk-fixture-provider'
+          ? [{ id: 'gpt-5.5' }]
           : newApiWorkKeyModels.map(id => ({ id }))
 
       return {
@@ -2475,9 +2486,11 @@ async function main() {
     assert.strictEqual(synced.relayBaseUrl, 'https://api.custom.example.com/v1')
     assert.strictEqual(synced.tokens.length, 2)
     assert.strictEqual(synced.tokens[0].apiKey, 'sk-newapi-full')
-    assert.strictEqual(synced.tokens[1].apiKey, 'sk-fixture-grok')
-    assert.deepStrictEqual(synced.tokens[0].models, newApiWorkKeyModels)
-    assert.deepStrictEqual(synced.tokens[1].models, ['grok-4.5'])
+    assert.strictEqual(synced.tokens[1].apiKey, 'sk-fixture-provider')
+    assert.deepStrictEqual(synced.tokens[0].models, ['gpt-5.6', 'gpt-5.5'])
+    assert.deepStrictEqual(synced.tokens[0].imageModels, ['gpt-image-1'])
+    assert.deepStrictEqual(synced.tokens[1].models, ['gpt-5.5'])
+    assert.deepStrictEqual(synced.tokens[1].imageModels, [])
     assert.ok(!synced.tokens[1].models.includes('gpt-fake-token-limit'))
     const onlineProviders = manager.readStatus(options).providers.filter(provider => provider.keySource === 'newapi')
 
@@ -2488,31 +2501,32 @@ async function main() {
     assert.strictEqual(process.env[onlineProviders[0].envKey], 'sk-newapi-full')
     const selectedOnlineKey = await manager.selectNewApiKey(onlineProviders[0].id, 8, options)
 
-    assert.deepStrictEqual(selectedOnlineKey.models, ['grok-4.5'])
+    assert.deepStrictEqual(selectedOnlineKey.models, ['gpt-5.5'])
     assert.strictEqual(
       selectedOnlineKey.status.providers.find(provider => provider.id === onlineProviders[0].id).newApi.selectedTokenId,
       8
     )
     assert.strictEqual(process.env[onlineProviders[0].envKey], 'sk-newapi-full')
-    manager.applyRelay(onlineProviders[0].id, 'grok-4.5', options)
-    assert.strictEqual(process.env[onlineProviders[0].envKey], 'sk-fixture-grok')
+    manager.applyRelay(onlineProviders[0].id, 'gpt-5.5', options)
+    assert.strictEqual(process.env[onlineProviders[0].envKey], 'sk-fixture-provider')
     const runtimeWithDedicatedImageKey = manager.getRelayRuntime(onlineProviders[0].id, options)
 
-    assert.strictEqual(runtimeWithDedicatedImageKey.apiKey, 'sk-fixture-grok')
+    assert.strictEqual(runtimeWithDedicatedImageKey.apiKey, 'sk-fixture-provider')
     assert.strictEqual(runtimeWithDedicatedImageKey.imageGeneration.apiKey, 'sk-newapi-full')
-    assert.strictEqual(runtimeWithDedicatedImageKey.imageGeneration.defaultModel, 'grok-imagine-image-quality')
+    assert.strictEqual(runtimeWithDedicatedImageKey.imageGeneration.defaultModel, 'gpt-image-1')
     const switchedBackToWorkKey = await manager.selectNewApiKey(onlineProviders[0].id, 7, options)
 
-    assert.deepStrictEqual(switchedBackToWorkKey.models, newApiWorkKeyModels)
+    assert.deepStrictEqual(switchedBackToWorkKey.models, ['gpt-5.6', 'gpt-5.5'])
+    assert.deepStrictEqual(switchedBackToWorkKey.channel.imageModels, ['gpt-image-1'])
     assert.strictEqual(
       switchedBackToWorkKey.status.providers.find(provider => provider.id === onlineProviders[0].id).newApi.keys.length,
       2
     )
-    const switchedAgainToGrokKey = await manager.selectNewApiKey(onlineProviders[0].id, 8, options)
+    const switchedAgainToProviderKey = await manager.selectNewApiKey(onlineProviders[0].id, 8, options)
 
-    assert.deepStrictEqual(switchedAgainToGrokKey.models, ['grok-4.5'])
+    assert.deepStrictEqual(switchedAgainToProviderKey.models, ['gpt-5.5'])
     assert.strictEqual(
-      switchedAgainToGrokKey.status.providers.find(provider => provider.id === onlineProviders[0].id).newApi
+      switchedAgainToProviderKey.status.providers.find(provider => provider.id === onlineProviders[0].id).newApi
         .selectedTokenId,
       8
     )
@@ -2578,7 +2592,7 @@ async function main() {
                   status: 1,
                   group: 'default',
                   model_limits_enabled: true,
-                  model_limits: 'gpt-5.6,grok-4.5'
+                  model_limits: 'gpt-5.6,legacy-provider-model'
                 }
               ]
             }
@@ -2590,7 +2604,7 @@ async function main() {
       return {
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({ object: 'list', data: [{ id: 'gpt-5.6' }, { id: 'grok-4.5' }] })
+        text: async () => JSON.stringify({ object: 'list', data: [{ id: 'gpt-5.6' }, { id: 'legacy-provider-model' }] })
       }
     }
 
@@ -2605,7 +2619,7 @@ async function main() {
 
     assert.strictEqual(synced.baseUrl, 'https://cookie-newapi.example.com')
     assert.strictEqual(synced.tokens[0].apiKey, 'sk-cookie-full')
-    assert.deepStrictEqual(synced.tokens[0].models, ['gpt-5.6', 'grok-4.5'])
+    assert.deepStrictEqual(synced.tokens[0].models, ['gpt-5.6'])
     assert.ok(cookieNewApiRequests.some(request => request.init.headers?.cookie === 'new-api-session=session-123'))
     assert.ok(
       cookieNewApiRequests.some(
@@ -2650,12 +2664,12 @@ async function main() {
   )
   assert.throws(() => manager.exportSession(imported.target, imported.target, options), /不能覆盖原始文件/)
 
-  const deletedSession = manager.deleteSession('test-session', options)
+  const deletedSession = await manager.deleteSession('test-session', options)
   assert.strictEqual(deletedSession.deletedPath, sessionPath)
   assert.strictEqual(fs.existsSync(sessionPath), false)
   assert.strictEqual(fs.existsSync(path.join(options.stateDir, 'trash')), false)
 
-  const deletedArchivedSession = manager.deleteSession('archived-test-session', options)
+  const deletedArchivedSession = await manager.deleteSession('archived-test-session', options)
 
   assert.strictEqual(deletedArchivedSession.deletedPath, archivedSessionPath)
   assert.strictEqual(fs.existsSync(archivedSessionPath), false)

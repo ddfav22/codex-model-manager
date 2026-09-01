@@ -93,9 +93,9 @@ const {
 const { version: APP_VERSION } = require('../package.json')
 
 const PROMPT_TOOL_RECOVERY_ATTEMPT_TIMEOUT_MS = 60_000
-// A malformed/plan-only Grok response must never keep a Codex request open
-// indefinitely.  Keep the existing per-attempt timeout, but put a hard cap on
-// the whole emulation loop as well.  A value of zero here used to mean
+// A malformed/plan-only response must never keep a Codex request open
+// indefinitely. Keep the existing per-attempt timeout, but put a hard cap on
+// the whole compatibility loop as well. A value of zero here used to mean
 // "unlimited" and caused repeated 429/503 responses to be replayed forever.
 const PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 60_000
 const PROMPT_TOOL_RECOVERY_MAX_ATTEMPTS = 5
@@ -109,6 +109,10 @@ const PROMPT_TOOL_RECOVERY_MAX_IDENTICAL_RESPONSES = 5
 const UPSTREAM_CAPACITY_MAX_RETRIES = 2
 const UPSTREAM_CAPACITY_RETRY_BASE_MS = 750
 const UPSTREAM_CAPACITY_RETRY_MAX_MS = 5000
+// Generic 5xx responses are often transient. Keep replay bounded so a
+// request cannot turn into an unbounded hidden loop (or duplicate work).
+const UPSTREAM_SERVER_MAX_RETRIES = 1
+const UPSTREAM_SERVER_RETRY_BASE_MS = 1000
 const UPSTREAM_TRANSIENT_MAX_RETRIES = 1
 const UPSTREAM_TRANSIENT_RETRY_BASE_MS = 1000
 const UPSTREAM_FAILURE_CLASSIFICATION_BYTES = 64 * 1024
@@ -165,6 +169,17 @@ function retryAfterMilliseconds(response) {
   return Math.min(Math.max(0, date - Date.now()), UPSTREAM_CAPACITY_RETRY_MAX_MS)
 }
 
+function upstreamRetryBudget(failureKind, options = {}) {
+  if (failureKind === 'upstream_capacity') {
+    return Math.max(0, Number(options.maxRetries ?? UPSTREAM_CAPACITY_MAX_RETRIES))
+  }
+  if (failureKind === 'upstream_server_error') {
+    return Math.max(0, Number(options.serverMaxRetries ?? UPSTREAM_SERVER_MAX_RETRIES))
+  }
+
+  return -1
+}
+
 function waitForRetry(delayMs, signal) {
   if (!delayMs) return Promise.resolve()
 
@@ -206,6 +221,8 @@ async function fetchWithCapacityRetry(
   {
     signal,
     maxRetries = UPSTREAM_CAPACITY_MAX_RETRIES,
+    serverMaxRetries = UPSTREAM_SERVER_MAX_RETRIES,
+    serverRetryBaseMs = UPSTREAM_SERVER_RETRY_BASE_MS,
     transientMaxRetries = UPSTREAM_TRANSIENT_MAX_RETRIES,
     transientRetryBaseMs = UPSTREAM_TRANSIENT_RETRY_BASE_MS
   } = {}
@@ -213,6 +230,7 @@ async function fetchWithCapacityRetry(
   let retryCount = 0
   let retryDelayMs = 0
   let transientRetryCount = 0
+  const retriesByFailureKind = new Map()
 
   while (true) {
     let response
@@ -254,17 +272,25 @@ async function fetchWithCapacityRetry(
     }
     const failureKind = upstreamFailureKind(response.status, errorText)
 
-    if (failureKind !== 'upstream_capacity' || retryCount >= maxRetries) {
+    const retryBudget = upstreamRetryBudget(failureKind, { maxRetries, serverMaxRetries })
+    const failureKindRetryCount = Number(retriesByFailureKind.get(failureKind) || 0)
+
+    if (retryBudget < 0 || failureKindRetryCount >= retryBudget) {
       response.codexRetryDiagnostic = { retryCount, retryDelayMs, transientRetryCount, failureKind }
       return response
     }
 
     const headerDelay = retryAfterMilliseconds(response)
+    const retryBaseMs =
+      failureKind === 'upstream_server_error'
+        ? Math.max(0, Number(serverRetryBaseMs) || 0)
+        : UPSTREAM_CAPACITY_RETRY_BASE_MS
     const delayMs =
       headerDelay === null
-        ? Math.min(UPSTREAM_CAPACITY_RETRY_BASE_MS * 2 ** retryCount, UPSTREAM_CAPACITY_RETRY_MAX_MS)
+        ? Math.min(retryBaseMs * 2 ** failureKindRetryCount, UPSTREAM_CAPACITY_RETRY_MAX_MS)
         : headerDelay
 
+    retriesByFailureKind.set(failureKind, failureKindRetryCount + 1)
     retryCount += 1
     retryDelayMs += delayMs
     await response.body?.cancel?.()
@@ -319,6 +345,14 @@ async function readChatAssistantWithTransientRetry(upstream, retryUpstream, opti
 function upstreamDiagnostic(diagnostic, upstream, errorText = '') {
   const retry = upstream?.codexRetryDiagnostic || {}
   const chatCompatibility = upstream?.codexChatCompatibility || {}
+  const requestId = String(
+    upstream?.headers?.get?.('x-request-id') ||
+      upstream?.headers?.get?.('x-oneapi-request-id') ||
+      upstream?.headers?.get?.('x-newapi-request-id') ||
+      ''
+  )
+    .replace(/[^a-zA-Z0-9._:/-]/g, '')
+    .slice(0, 160)
 
   return {
     ...diagnostic,
@@ -326,6 +360,7 @@ function upstreamDiagnostic(diagnostic, upstream, errorText = '') {
     upstreamFailureKind: retry.failureKind || (upstream?.ok ? '' : upstreamFailureKind(upstream?.status, errorText)),
     upstreamRetryCount: Number(retry.retryCount || 0),
     upstreamRetryDelayMs: Number(retry.retryDelayMs || 0),
+    ...(requestId ? { upstreamRequestId: requestId } : {}),
     chatCompatibilityRetryCount: Array.isArray(chatCompatibility.removedParameters)
       ? chatCompatibility.removedParameters.length
       : 0,
@@ -339,6 +374,18 @@ function upstreamDiagnostic(diagnostic, upstream, errorText = '') {
 function userFacingUpstreamFailure(kind, retryCount) {
   if (kind === 'upstream_capacity') {
     return `模型渠道当前负载较高，已尝试 ${retryCount} 次仍未恢复；请检查渠道状态后手动重新提交，或切换其他模型/渠道。`
+  }
+  if (kind === 'upstream_server_error') {
+    return `上游模型服务返回 5xx，${retryCount ? `已重试 ${retryCount} 次仍未恢复；` : ''}当前请求未完成；请稍后重试或切换其他模型/渠道。`
+  }
+  if (kind === 'upstream_rate_limit') {
+    return '上游模型渠道触发限流，当前请求未完成；请稍后重试或切换其他模型/渠道。'
+  }
+  if (kind === 'upstream_timeout') {
+    return '上游模型渠道响应超时，当前请求未完成；请检查网络后重试或切换其他模型/渠道。'
+  }
+  if (kind === 'upstream_request_rejected') {
+    return '上游模型渠道拒绝了当前请求，请检查模型名称、渠道配置和权限后重试。'
   }
   if (kind === 'context_too_large') {
     return '本轮对话上下文过大，模型渠道无法接收；请让 Codex 压缩上下文，或新建任务后重新提交。'
@@ -1287,7 +1334,7 @@ function parseEmulatedToolCall(content, allowed) {
         argumentFragments: [args]
       }
     } catch {
-      // Try the next common Grok-compatible tool envelope.
+      // Try the next common provider-compatible tool envelope.
     }
   }
 
@@ -2964,16 +3011,20 @@ async function requestCompactionSummary(channel, rawBody, capability, preferredW
 
   delete summaryBody.previous_response_id
   const sendResponses = () =>
-    fetch(upstreamResponsesUrl(channel.baseUrl), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${channel.apiKey}`,
-        'content-type': 'application/json',
-        accept: 'text/event-stream'
-      },
-      body: JSON.stringify(summaryBody),
-      signal: upstreamSignal
-    })
+    fetchWithCapacityRetry(
+      () =>
+        fetch(upstreamResponsesUrl(channel.baseUrl), {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${channel.apiKey}`,
+            'content-type': 'application/json',
+            accept: 'text/event-stream'
+          },
+          body: JSON.stringify(summaryBody),
+          signal: upstreamSignal
+        }),
+      { signal: upstreamSignal }
+    )
   const sendChat = () => {
     const converted = responsesRequestToChat(summaryBody, capability).request
     const payload = { ...converted, stream: true }
@@ -2982,16 +3033,20 @@ async function requestCompactionSummary(channel, rawBody, capability, preferredW
     delete payload.tool_choice
     delete payload.parallel_tool_calls
 
-    return fetch(upstreamChatUrl(channel.baseUrl), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${channel.apiKey}`,
-        'content-type': 'application/json',
-        accept: 'text/event-stream'
-      },
-      body: JSON.stringify(payload),
-      signal: upstreamSignal
-    })
+    return fetchWithCapacityRetry(
+      () =>
+        fetch(upstreamChatUrl(channel.baseUrl), {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${channel.apiKey}`,
+            'content-type': 'application/json',
+            accept: 'text/event-stream'
+          },
+          body: JSON.stringify(payload),
+          signal: upstreamSignal
+        }),
+      { signal: upstreamSignal }
+    )
   }
   let wireApi = preferredWireApi
   let upstream = wireApi === 'responses' ? await sendResponses() : await sendChat()
@@ -3006,15 +3061,26 @@ async function requestCompactionSummary(channel, rawBody, capability, preferredW
       wireApi = 'responses'
       upstream = await sendResponses()
     } else {
-      return { ok: false, status: upstream.status, errorBody, wireApi }
+      return {
+        ok: false,
+        status: upstream.status,
+        errorBody,
+        wireApi,
+        upstream,
+        failureKind: upstreamFailureKind(upstream.status, errorBody)
+      }
     }
   }
   if (!upstream.ok) {
+    const finalErrorBody = await readResponseTextLimited(upstream)
+
     return {
       ok: false,
       status: upstream.status,
-      errorBody: await readResponseTextLimited(upstream),
-      wireApi
+      errorBody: finalErrorBody,
+      wireApi,
+      upstream,
+      failureKind: upstreamFailureKind(upstream.status, finalErrorBody)
     }
   }
 
@@ -3023,7 +3089,7 @@ async function requestCompactionSummary(channel, rawBody, capability, preferredW
       ? await readResponsesAssistant(upstream)
       : await readChatAssistantWithTransientRetry(upstream, sendChat, {
           signal: upstreamSignal,
-          allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+          allowCumulativeSnapshots: false
         })
 
   return {
@@ -3050,10 +3116,38 @@ async function handleCompactionRequest(
   const result = await requestCompactionSummary(channel, rawBody, capability, preferredWireApi, upstreamSignal)
 
   if (!result.ok) {
-    response.writeHead(result.status || 502, { 'content-type': 'application/json; charset=utf-8' })
-    response.end(
-      result.errorBody || JSON.stringify({ error: { type: 'compaction_failed', message: '远程会话压缩失败' } })
-    )
+    const failureKind = result.failureKind || upstreamFailureKind(result.status, result.errorBody)
+    const retryCount = Number(result.upstream?.codexRetryDiagnostic?.retryCount || 0)
+    const diagnostic = {
+      capturedAt: new Date().toISOString(),
+      channelId: String(channel.id || ''),
+      operation: 'compaction',
+      compactionVersion: compactV1 ? 'v1' : 'v2',
+      requestedModel: responseModel,
+      model: rawBody.model,
+      wireApi: result.wireApi,
+      durationMs: Date.now() - startedAt,
+      ...upstreamDiagnostic(
+        {},
+        result.upstream,
+        result.errorBody
+      ),
+      outcome: 'upstream_error'
+    }
+
+    try {
+      onDiagnostic?.(diagnostic)
+    } catch {
+      // Diagnostics must never interrupt compaction failure handling.
+    }
+
+    const userMessage = userFacingUpstreamFailure(failureKind, retryCount)
+    const message = userMessage || '远程会话压缩失败；请稍后重试或切换其他模型/渠道。'
+
+    response.writeHead(result.status >= 400 && result.status < 600 ? result.status : 502, {
+      'content-type': 'application/json; charset=utf-8'
+    })
+    response.end(JSON.stringify({ error: { type: failureKind || 'compaction_failed', message } }))
     return
   }
   if (typeof onWireApiResolved === 'function') {
@@ -3128,7 +3222,6 @@ function inferredWireApiForModel(model) {
 
   if (!normalized) return ''
   if (/^(gpt(?:-|$)|o[1-9](?:-|$)|codex(?:-|$))/.test(normalized)) return 'responses'
-  if (/^grok(?:-|$)/.test(normalized)) return 'chat'
 
   return ''
 }
@@ -3444,16 +3537,6 @@ function explicitSkillRequest(value) {
   )
 }
 
-function shouldForceGrokAgentLoopEmulation(capability, body, converted) {
-  if (capability?.adapter !== 'grok-chat') return false
-  if (!Array.isArray(converted?.request?.tools) || !converted.request.tools.length) return false
-
-  // Keep ordinary native Grok tool probing/backward compatibility unchanged;
-  // the extra emulation boundary is required when Codex has injected a Skill
-  // contract, where a one-call native probe cannot prove a multi-step loop.
-  return requestHasActiveSkillContext(body)
-}
-
 async function pipeFetchBody(upstream, response, headers = {}) {
   const contentType = String(headers['content-type'] || upstream.headers.get('content-type') || '').toLowerCase()
   if (contentType.includes('text/event-stream') && !response.headersSent) response.writeHead(upstream.status, headers)
@@ -3732,9 +3815,8 @@ async function handleResponsesRequest(
         ),
       payload
     )
-  const forceGrokAgentLoopEmulation = shouldForceGrokAgentLoopEmulation(capability, body, converted)
   const forcePromptToolEmulation =
-    (capability.toolTransport === 'prompt-emulated' || forceGrokAgentLoopEmulation) && forwardedNames.length > 0
+    capability.toolTransport === 'prompt-emulated' && forwardedNames.length > 0
   let emulatedStreamState = null
   let upstream = forcePromptToolEmulation
     ? new Response(JSON.stringify({ error: { message: 'tool calls are not supported by the selected adapter' } }), {
@@ -3788,7 +3870,7 @@ async function handleResponsesRequest(
       : 'For image generation, use exec with the nested image_gen__imagegen tool and generatedImage(result); reading an image skill is not completion. '
     emulatedStreamState = converted.request.stream
       ? createStreamState(body, converted.toolNames, response, {
-          allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+          allowCumulativeSnapshots: false
         })
       : null
     let stopHeartbeat = () => {}
@@ -3897,7 +3979,7 @@ async function handleResponsesRequest(
                       {
                         signal: recoverySignal,
                         onContentDelta: retryContext.onContentDelta,
-                        allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+                        allowCumulativeSnapshots: false
                       }
                     )
                   }
@@ -3922,7 +4004,7 @@ async function handleResponsesRequest(
                         {
                           signal: recoverySignal,
                           onContentDelta: retryContext.onContentDelta,
-                          allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+                          allowCumulativeSnapshots: false
                         }
                       )
                     }
@@ -3945,7 +4027,7 @@ async function handleResponsesRequest(
           body.input,
           {
             signal: upstreamSignal,
-            allowCumulativeSnapshots: capability.adapter === 'grok-chat',
+            allowCumulativeSnapshots: false,
             retryInitialUpstream: () => sendUpstream(emulation.payload, upstreamSignal),
             maximumRecoveryMs: PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
             onProgressStart: emulatedStreamState
@@ -4000,7 +4082,6 @@ async function handleResponsesRequest(
             ...diagnostic,
             toolTransport: 'prompt-emulated',
             forcedByCompatibilityTest: forcePromptToolEmulation,
-            forcedBySkillCompatibility: forceGrokAgentLoopEmulation,
             nativeToolFailureKind,
             outcome: 'upstream_accepted',
             emulation: upstream.codexToolEmulation || null
@@ -4070,11 +4151,11 @@ async function handleResponsesRequest(
   }
   if (converted.request.stream) {
     await pipeChatStreamToResponses(upstream, body, converted.toolNames, response, emulatedStreamState, {
-      allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+      allowCumulativeSnapshots: false
     })
   } else {
     await sendNonStreamingResponse(upstream, body, converted.toolNames, response, {
-      allowCumulativeSnapshots: capability.adapter === 'grok-chat'
+      allowCumulativeSnapshots: false
     })
   }
 }
@@ -4295,6 +4376,8 @@ module.exports = {
   PROMPT_TOOL_RECOVERY_MAX_TOKENS,
   PROMPT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS,
   UPSTREAM_CAPACITY_MAX_RETRIES,
+  UPSTREAM_SERVER_MAX_RETRIES,
+  UPSTREAM_SERVER_RETRY_BASE_MS,
   adaptResponsesRequest,
   coalesceAssistantMessages,
   createProtocolProxy,
@@ -4318,9 +4401,9 @@ module.exports = {
   recoveryFailureStopsLoop,
   recoveryFailureMessage,
   runWithAbortTimeout,
-  shouldForceGrokAgentLoopEmulation,
   startResponsesStreamHeartbeat,
   upstreamFailureKind,
+  upstreamRetryBudget,
   upstreamRejectsNativeTools,
   upstreamModelsUrl,
   wireApiForModel,

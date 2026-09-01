@@ -1,13 +1,13 @@
 const TOOL_HTML_PATTERN = /(?:globalThis\s*\.\s*tools|\btools\s*\.\s*[a-zA-Z_]|\bshell_command\b|<codex_tool_call\b)/i
 
-// Grok/NewAPI sometimes serializes the tool protocol as ordinary assistant
-// text.  Keep the tag list deliberately narrow: generic HTML/XML must remain
+// Compatible relays sometimes serialize the tool protocol as ordinary
+// assistant text. Keep the tag list deliberately narrow: generic HTML/XML must remain
 // visible, while the known call/result envelopes are removed before they are
 // rendered by Codex.  The matching code below also accepts HTML entities and
 // JSON-style unicode escapes because relays commonly escape the angle
 // brackets before forwarding a delta.
 const TOOL_CONTROL_TAG_NAME_PATTERN =
-  '(?:codex_(?:tool_call|no_tool)|(?:grok|newapi|mcp)[_:.-](?:tool|function)(?:[_:.-](?:call|result|output))?|(?:custom_)?(?:tool|function)_(?:call|call_output|result|output))'
+  '(?:codex_(?:tool_call|no_tool)|(?:newapi|mcp)[_:.-](?:tool|function)(?:[_:.-](?:call|result|output))?|(?:custom_)?(?:tool|function)_(?:call|call_output|result|output))'
 const TOOL_CONTROL_TAG_NAME_RE = new RegExp(`^${TOOL_CONTROL_TAG_NAME_PATTERN}$`, 'i')
 const TOOL_CONTROL_OPEN_RE = new RegExp(
   `(?:<|&lt;|&#0*60;|&#x0*3c;|\\\\+u003c|\\\\+x3c)(${TOOL_CONTROL_TAG_NAME_PATTERN})(?:\\s[^\\r\\n<>]*?)?(?:>|&gt;|&#0*62;|&#x0*3e;|\\\\+u003e|\\\\+x3e)`,
@@ -27,9 +27,9 @@ const TOOL_CONTROL_TAG_PREFIXES = Object.freeze([
 const TOOL_CONTROL_MAX_BUFFER = 512 * 1024
 const TOOL_CONTROL_MAX_TAG_PREFIX = 192
 
-// Grok/NewAPI may echo an empty adapter envelope as ordinary assistant text.
+// A compatible relay may echo an empty adapter envelope as ordinary assistant text.
 // Keep this allowlist narrow so user-authored XML is not removed accidentally.
-const INTERNAL_EMPTY_TAG_NAME = /^(?:codex|tool|function|grok|newapi)(?:[_:-].*)?$/i
+const INTERNAL_EMPTY_TAG_NAME = /^(?:codex|tool|function|newapi)(?:[_:-].*)?$/i
 
 function stripEmptyXmlMarkdownFence(content) {
   return String(content || '').replace(/(^|\r?\n)```xml[ \t]*\r?\n[\s\uFEFF]*?```(?=$|\r?\n)/gi, '$1')
@@ -82,7 +82,7 @@ function controlTagShouldStrip(name, opening, body, options = {}) {
   const normalizedName = String(name || '').toLowerCase()
   const normalizedOpening = decodeControlMarkup(opening)
   const normalizedBody = decodeControlMarkup(body).trim()
-  const strongPrefix = /^(?:codex|grok|newapi|mcp)[_:.-]/i.test(normalizedName)
+  const strongPrefix = /^(?:codex|newapi|mcp)[_:.-]/i.test(normalizedName)
   const outputTag = /(?:_output|_result)$/i.test(normalizedName)
   const callTag = /_call$/i.test(normalizedName)
   const lineStart = options.lineStart === true
@@ -268,7 +268,7 @@ function createToolControlStreamSanitizer() {
       const selfClosing = /(?:\/\s*(?:>|&gt;|&#0*62;|&#x0*3e;|\\+u003e|\\+x3e))$/i.test(opening[0])
       const inspect =
         TOOL_CONTROL_TAG_NAME_RE.test(name) ||
-        /^(?:codex|grok|newapi|mcp)[_:.-]/i.test(name) ||
+        /^(?:codex|newapi|mcp)[_:.-]/i.test(name) ||
         controlTagHasProtocolMarker(opening[0], '') ||
         lineStart
 
@@ -394,7 +394,7 @@ function stripEmptyInternalXml(content) {
       return INTERNAL_EMPTY_TAG_NAME.test(tagName) ? '' : match
     })
     .replace(
-      /<(?:codex(?:[_:-][\w:.-]*)?|tool(?:[_:-][\w:.-]*)?|function(?:[_:-][\w:.-]*)?|grok(?:[_:-][\w:.-]*)?|newapi(?:[_:-][\w:.-]*)?)\b[^>]*\/>/gi,
+      /<(?:codex(?:[_:-][\w:.-]*)?|tool(?:[_:-][\w:.-]*)?|function(?:[_:-][\w:.-]*)?|newapi(?:[_:-][\w:.-]*)?)\b[^>]*\/>/gi,
       ''
     )
 }

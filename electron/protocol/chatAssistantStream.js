@@ -36,8 +36,8 @@ function looksLikeRepeatedMarkupFence(value) {
 }
 
 /**
- * NewAPI-compatible Grok channels are seen in the wild sending a complete
- * assistant snapshot in `delta.content` for every SSE event.  Codex expects
+ * Some compatible channels send a complete assistant snapshot in
+ * `delta.content` for every SSE event. Codex expects
  * deltas, so blindly appending those snapshots renders `html````html...` and
  * duplicates tool envelopes.  This small, provider-safe normalizer starts in
  * incremental mode and switches to snapshot mode only after an incoming value

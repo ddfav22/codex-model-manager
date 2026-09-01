@@ -25,6 +25,7 @@ const {
 const {
   GLOBAL_STATE_FILENAME,
   localProjectRoots,
+  pruneDesktopProjectState,
   readJsonObject,
   syncDesktopProjectsFromSessions
 } = require('./features/codexDesktopProjects')
@@ -1238,10 +1239,17 @@ function normalizeRelayInput(input) {
     .trim()
     .replace(/\/+$/, '')
   const apiKey = String(input.apiKey || '').trim()
-  const models = uniqueModelList(input)
-  const model = String(input.model || models[0] || 'gpt-5.6').trim()
   const wireApi = input.wireApi === 'responses' ? 'responses' : 'chat'
   const keySource = input.keySource === 'newapi' ? 'newapi' : 'manual'
+  const advertisedModels = uniqueModelList(input)
+  const models = keySource === 'newapi' ? filterChatGptModels(advertisedModels) : advertisedModels
+  const requestedModel = String(input.model || '').trim()
+  const model =
+    keySource === 'newapi'
+      ? models.includes(requestedModel)
+        ? requestedModel
+        : models[0] || ''
+      : requestedModel || models[0] || 'gpt-5.6'
   const newApi =
     keySource === 'newapi' && input.newApi && typeof input.newApi === 'object'
       ? {
@@ -1939,7 +1947,8 @@ async function syncNewApi(input, options = {}) {
     const apiKey = keys[idKey] || ''
     const limitModels = tokenLimitModels(token)
     const keyModels = await listNewApiKeyModels(relayBaseUrl, apiKey, login.auth?.userHeader)
-    const models = uniqueModelList({ models: keyModels })
+    const models = filterChatGptModels(keyModels)
+    const imageModels = preferredImageGenerationModels(keyModels)
 
     return {
       id,
@@ -1952,7 +1961,8 @@ async function syncNewApi(input, options = {}) {
       unlimitedQuota: Boolean(token?.unlimited_quota ?? token?.UnlimitedQuota),
       modelLimitsEnabled: tokenLimitEnabled(token),
       modelLimits: limitModels,
-      models
+      models,
+      imageModels
     }
   })
 
@@ -2019,6 +2029,7 @@ async function syncNewApi(input, options = {}) {
       remainQuota: token.remainQuota,
       unlimitedQuota: token.unlimitedQuota,
       models: token.models,
+      imageModels: token.imageModels,
       envKey: tokenEnvKey
     }
   })
@@ -2031,6 +2042,7 @@ async function syncNewApi(input, options = {}) {
     baseUrl: relayBaseUrl,
     model: preferredSupportedModel(selectedToken.models, existing?.model),
     models: selectedToken.models,
+    imageModels: selectedToken.imageModels,
     wireApi: 'chat',
     envKey,
     managed: true,
@@ -2075,7 +2087,8 @@ async function refreshNewApiChannel(id, options = {}) {
 
     if (!apiKey) throw new Error('没有找到该渠道保存的完整 API Key，请先编辑并保存 Key。')
 
-    const models = await listNewApiKeyModels(channel.baseUrl, apiKey)
+    const allModels = await listNewApiKeyModels(channel.baseUrl, apiKey)
+    const models = filterChatGptModels(allModels)
 
     if (!models.length) throw new Error('当前 Key 的 /v1/models 接口没有返回可用模型。')
 
@@ -2083,6 +2096,7 @@ async function refreshNewApiChannel(id, options = {}) {
       ...channel,
       model: preferredSupportedModel(models, channel.model),
       models,
+      imageModels: preferredImageGenerationModels(allModels),
       modelTests: {},
       testStatus: null,
       updatedAt: new Date().toISOString()
@@ -2150,7 +2164,8 @@ async function selectNewApiKey(id, tokenId, options = {}) {
 
   if (!apiKey) throw new Error('所选 Key 的完整密钥不存在，请重新登录并同步该在线平台')
 
-  const models = await listNewApiKeyModels(channel.baseUrl, apiKey, channel.newApi?.userHeader)
+  const allModels = await listNewApiKeyModels(channel.baseUrl, apiKey, channel.newApi?.userHeader)
+  const models = filterChatGptModels(allModels)
 
   if (!models.length) throw new Error('该 Key 的 /v1/models 接口没有返回可用模型')
 
@@ -2158,13 +2173,18 @@ async function selectNewApiKey(id, tokenId, options = {}) {
     ...channel,
     model: preferredSupportedModel(models),
     models,
+    imageModels: preferredImageGenerationModels(allModels),
     newApi: {
       ...channel.newApi,
       selectedTokenId: selected.id,
       tokenId: selected.id,
       tokenName: selected.name,
       tokenKeyMask: selected.keyMask,
-      keys: keys.map(item => (String(item.id) === String(selected.id) ? { ...item, models } : item))
+      keys: keys.map(item =>
+        String(item.id) === String(selected.id)
+          ? { ...item, models, imageModels: preferredImageGenerationModels(allModels) }
+          : item
+      )
     },
     modelTests: {},
     testStatus: null,
@@ -2206,7 +2226,8 @@ function newApiImageGenerationRuntime(channel) {
     const apiKey = item?.envKey ? readUserEnvVar(item.envKey) : ''
 
     if (!apiKey) continue
-    for (const defaultModel of preferredImageGenerationModels(item?.models)) {
+    const advertisedImageModels = Array.isArray(item?.imageModels) ? item.imageModels : item?.models
+    for (const defaultModel of preferredImageGenerationModels(advertisedImageModels)) {
       candidates.push({ apiKey, baseUrl: channel.baseUrl, defaultModel })
     }
   }
@@ -2804,12 +2825,18 @@ function readUserEnvVar(name) {
 }
 
 function backupConfig(configPath, text, suffix = 'change') {
-  if (!text.trim()) return null
+  const configExists = fs.existsSync(configPath)
+
+  // An empty but existing config.toml is still meaningful: preserving its
+  // existence lets a failed repair/restore roll back exactly.  Only skip a
+  // snapshot when both the file and its supplied content are absent.
+  if (!configExists && !String(text || '').trim()) return null
 
   // Keep one recoverable rolling snapshot instead of creating a timestamped
   // file for every button click.  The initial snapshot is stored separately
   // under the manager state directory and is never overwritten.
   const backupPath = `${configPath}.bak-codex-manager`
+  ensureDir(path.dirname(backupPath))
   let existing = ''
   try {
     existing = fs.readFileSync(backupPath, 'utf8')
@@ -2817,21 +2844,34 @@ function backupConfig(configPath, text, suffix = 'change') {
     // The rolling snapshot does not exist yet.
   }
 
-  if (existing !== text) fs.writeFileSync(backupPath, text, 'utf8')
+  const nextText = String(text || '')
+  if (existing !== nextText || !fs.existsSync(backupPath)) fs.writeFileSync(backupPath, nextText, 'utf8')
 
   return backupPath
 }
 
 function backupAuth(authPath, suffix = 'auth-change') {
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[-:TZ.]/g, '')
-    .slice(0, 14)
-  const backupPath = `${authPath}.bak-codex-manager-${suffix}-${stamp}`
-
   if (!fs.existsSync(authPath)) return { existed: false, backupPath: '' }
 
-  fs.copyFileSync(authPath, backupPath)
+  // Keep one rolling, state-safe snapshot per source file.  The old
+  // implementation included the operation suffix in the filename, so every
+  // repair/restore invocation accumulated another copy (and callers could
+  // accidentally roll back to a stale operation-specific file).  Suffix is
+  // intentionally accepted for API compatibility but no longer affects the
+  // path; the latest distinct bytes replace the single snapshot.
+  const backupPath = `${authPath}.bak-codex-manager`
+  ensureDir(path.dirname(backupPath))
+
+  let current = ''
+  let existing = ''
+  try {
+    current = fs.readFileSync(authPath, 'utf8')
+    existing = fs.readFileSync(backupPath, 'utf8')
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+
+  if (current !== existing || !fs.existsSync(backupPath)) fs.copyFileSync(authPath, backupPath)
 
   return { existed: true, backupPath }
 }
@@ -2858,15 +2898,35 @@ function restoreAuthFromBackup(backupPath, authPath) {
 }
 
 function backupFile(filePath, suffix) {
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[-:TZ.]/g, '')
-    .slice(0, 14)
-  const backupPath = `${filePath}.bak-codex-manager-${suffix}-${stamp}`
-
   if (!fs.existsSync(filePath)) return { existed: false, backupPath: '' }
 
-  fs.copyFileSync(filePath, backupPath)
+  // config.toml uses the same single rolling snapshot as backupConfig, even
+  // when callers use the generic file helper (for example repair).  This
+  // prevents one extra timestamped config backup per repair invocation.
+  if (path.basename(filePath).toLowerCase() === 'config.toml') {
+    const backupPath = backupConfig(filePath, readText(filePath), suffix)
+    return { existed: true, backupPath: backupPath || '' }
+  }
+
+  // As with auth.json, use one deterministic rolling snapshot rather than a
+  // suffix/timestamp-specific file for every operation.  Existing suffixed
+  // snapshots are left untouched for non-destructive backward compatibility;
+  // new writes use this stable path and are content-deduplicated.
+  const backupPath = `${filePath}.bak-codex-manager`
+  ensureDir(path.dirname(backupPath))
+
+  let current = ''
+  let existing = ''
+  try {
+    current = fs.readFileSync(filePath)
+    existing = fs.readFileSync(backupPath)
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+
+  if (!Buffer.isBuffer(existing) || !existing.equals(current) || !fs.existsSync(backupPath)) {
+    fs.copyFileSync(filePath, backupPath)
+  }
 
   return { existed: true, backupPath }
 }
@@ -3162,7 +3222,10 @@ function writeModelAliases(filePath, channelId, aliases) {
 }
 
 function writeChannelModelCatalog(modelsCachePath, models, templateCatalogPaths = [], options = {}) {
-  const availableModels = uniqueModelList({ models })
+  // NewAPI channels are intentionally ChatGPT/OpenAI-only.  Keep provider
+  // catalog entries for legacy diagnostics, but never expose or alias a
+  // non-ChatGPT model into Codex's selectable catalog.
+  const availableModels = filterChatGptModels(models)
 
   if (!availableModels.length) throw new Error('该渠道没有可写入 ChatGPT 的模型')
 
@@ -3425,77 +3488,387 @@ function reconcileAuthForCustomProvider(paths, managerApiKeys = []) {
 }
 
 function readInitialBackup(paths) {
-  const meta = parseJsonFile(paths.initialBackupMetaPath, null)
+  let meta
 
-  if (!meta) return { exists: false, path: '', createdAt: '' }
+  try {
+    meta = parseJsonFile(paths.initialBackupMetaPath, null)
+  } catch (error) {
+    return {
+      exists: false,
+      valid: false,
+      metadataExists: true,
+      path: '',
+      configExists: false,
+      authCaptured: false,
+      authExists: false,
+      authPath: '',
+      modelsCacheCaptured: false,
+      modelsCacheExists: false,
+      modelsCachePath: '',
+      createdAt: '',
+      error: `首次备份元数据损坏：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  if (!meta || typeof meta !== 'object') {
+    return {
+      exists: false,
+      valid: false,
+      metadataExists: false,
+      path: '',
+      configExists: false,
+      authCaptured: false,
+      authExists: false,
+      authPath: '',
+      modelsCacheCaptured: false,
+      modelsCacheExists: false,
+      modelsCachePath: '',
+      createdAt: '',
+      error: ''
+    }
+  }
+
+  const configExists = meta.configExists !== false
+  const configPath = String(meta.path || '')
+  const authCaptured = meta.authCaptured !== false
+  const authPath = String(meta.authPath || '')
+  const modelsCacheCaptured = meta.modelsCacheCaptured !== false
+  const modelsCachePath = String(meta.modelsCachePath || '')
+  const isRegularFile = filePath => {
+    if (!filePath) return false
+
+    try {
+      return fs.statSync(filePath).isFile()
+    } catch {
+      return false
+    }
+  }
+  const authExists = Boolean(meta.authExists ?? isRegularFile(authPath))
+  const modelsCacheExists = Boolean(meta.modelsCacheExists ?? isRegularFile(modelsCachePath))
+  const configPayloadExists = !configExists || isRegularFile(configPath)
+  const authPayloadExists = !authExists || isRegularFile(authPath)
+  const modelsCachePayloadExists = !modelsCacheExists || isRegularFile(modelsCachePath)
+  const valid =
+    configPayloadExists &&
+    authCaptured &&
+    authPayloadExists &&
+    modelsCacheCaptured &&
+    modelsCachePayloadExists
+  const problems = []
+
+  if (!configPayloadExists) problems.push('config 快照文件缺失')
+  if (!authCaptured) problems.push('auth 快照尚未捕获')
+  else if (!authPayloadExists) problems.push('auth 快照文件缺失')
+  if (!modelsCacheCaptured) problems.push('models_cache 快照尚未捕获')
+  else if (!modelsCachePayloadExists) problems.push('models_cache 快照文件缺失')
 
   return {
-    exists: fs.existsSync(meta.path),
-    path: meta.path,
-    configExists: meta.configExists !== false,
-    authCaptured: meta.authCaptured !== false,
-    authExists: Boolean(meta.authExists ?? (meta.authPath && fs.existsSync(meta.authPath))),
-    authPath: meta.authPath || '',
-    modelsCacheCaptured: meta.modelsCacheCaptured !== false,
-    modelsCacheExists: Boolean(meta.modelsCacheExists ?? (meta.modelsCachePath && fs.existsSync(meta.modelsCachePath))),
-    modelsCachePath: meta.modelsCachePath || '',
-    createdAt: meta.createdAt || ''
+    exists: configPayloadExists,
+    valid,
+    metadataExists: true,
+    path: configPath,
+    configExists,
+    authCaptured,
+    authExists,
+    authPath,
+    modelsCacheCaptured,
+    modelsCacheExists,
+    modelsCachePath,
+    createdAt: meta.createdAt || '',
+    error: problems.length ? `首次备份不可恢复：${problems.join('、')}。请重新创建首次快照。` : ''
   }
 }
 
 function ensureInitialBackup(paths, configText) {
   const existing = readInitialBackup(paths)
 
-  if (existing.exists && existing.authCaptured && existing.modelsCacheCaptured) return existing
+  // Once metadata exists, the initial snapshot is immutable.  Never replace a
+  // missing/corrupt payload with the current (possibly already managed)
+  // configuration: doing so would silently redefine “initial” and make the
+  // restore button appear to work while restoring the wrong state.
+  if (existing.metadataExists) return existing
 
   ensureDir(paths.stateDir)
 
   const createdAt = new Date().toISOString()
-  const backupPath = path.join(paths.stateDir, `initial-config-${createdAt.replace(/[-:TZ.]/g, '').slice(0, 14)}.toml`)
+  const backupPath = path.join(paths.stateDir, 'initial-config.toml')
   const configExists = fs.existsSync(paths.configPath)
   const authExists = fs.existsSync(paths.authPath)
   const modelsCacheExists = fs.existsSync(paths.modelsCachePath)
-  const authBackupPath = authExists
-    ? path.join(paths.stateDir, `initial-auth-${createdAt.replace(/[-:TZ.]/g, '').slice(0, 14)}.json`)
-    : ''
-  const modelsCacheBackupPath = modelsCacheExists
-    ? path.join(paths.stateDir, `initial-models-cache-${createdAt.replace(/[-:TZ.]/g, '').slice(0, 14)}.json`)
-    : ''
+  const capturedConfigText = configExists ? readText(paths.configPath, String(configText || '')) : ''
+  const authBackupPath = authExists ? path.join(paths.stateDir, 'initial-auth.json') : ''
+  const modelsCacheBackupPath = modelsCacheExists ? path.join(paths.stateDir, 'initial-models-cache.json') : ''
   const meta = {
-    path: existing.path || backupPath,
-    configExists: existing.exists ? existing.configExists : configExists,
+    path: backupPath,
+    configExists,
     authCaptured: true,
-    authExists: existing.exists ? existing.authExists : authExists,
-    authPath: existing.authPath || authBackupPath,
+    authExists,
+    authPath: authBackupPath,
     modelsCacheCaptured: true,
-    modelsCacheExists: existing.exists ? existing.modelsCacheExists : modelsCacheExists,
-    modelsCachePath: existing.modelsCachePath || modelsCacheBackupPath,
-    createdAt: existing.createdAt || createdAt
+    modelsCacheExists,
+    modelsCachePath: modelsCacheBackupPath,
+    createdAt
   }
 
-  // A stale metadata file must not make restore a no-op.  Recreate the
-  // referenced snapshot whenever its payload was removed or moved.
-  if (!fs.existsSync(meta.path)) {
+  const createdFiles = []
+
+  try {
     ensureDir(path.dirname(meta.path))
-    fs.writeFileSync(meta.path, configText, 'utf8')
+    fs.writeFileSync(meta.path, configExists ? capturedConfigText : '', 'utf8')
+    createdFiles.push(meta.path)
+    if (authBackupPath) {
+      fs.copyFileSync(paths.authPath, authBackupPath)
+      createdFiles.push(authBackupPath)
+    }
+    if (modelsCacheBackupPath) {
+      fs.copyFileSync(paths.modelsCachePath, modelsCacheBackupPath)
+      createdFiles.push(modelsCacheBackupPath)
+    }
+    ensureDir(path.dirname(paths.initialBackupMetaPath))
+    fs.writeFileSync(paths.initialBackupMetaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+  } catch (error) {
+    for (const filePath of createdFiles) fs.rmSync(filePath, { force: true })
+    throw error
   }
-  if ((!existing.path || !existing.authCaptured) && authBackupPath) fs.copyFileSync(paths.authPath, authBackupPath)
-  if ((!existing.path || !existing.modelsCacheCaptured) && modelsCacheBackupPath) {
-    fs.copyFileSync(paths.modelsCachePath, modelsCacheBackupPath)
-  }
-  fs.writeFileSync(paths.initialBackupMetaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
 
-  return {
-    exists: true,
-    path: meta.path,
-    configExists: meta.configExists,
-    authCaptured: true,
-    authExists: meta.authExists,
-    authPath: meta.authPath,
-    modelsCacheCaptured: true,
-    modelsCacheExists: meta.modelsCacheExists,
-    modelsCachePath: meta.modelsCachePath,
-    createdAt: meta.createdAt
+  return readInitialBackup(paths)
+}
+
+function managedEnvironmentKeys(paths) {
+  const keys = new Set(
+    Object.keys(process.env).filter(name => {
+      const normalized = String(name || '')
+
+      return /^CODEX_MM_[A-Z0-9_]+_API_KEY$/i.test(normalized) || normalized.toUpperCase() === 'CODEX_MM_PROXY_BASE_URL'
+    })
+  )
+
+  let channels = []
+
+  try {
+    channels = parseJsonFile(paths.channelsPath, [])
+  } catch {
+    channels = []
+  }
+
+  for (const channel of Array.isArray(channels) ? channels : []) {
+    const envKey = String(channel?.envKey || '').trim()
+
+    if (envKey) keys.add(envKey)
+
+    for (const token of Array.isArray(channel?.newApi?.keys) ? channel.newApi.keys : []) {
+      const tokenEnvKey = String(token?.envKey || '').trim()
+
+      if (tokenEnvKey) keys.add(tokenEnvKey)
+    }
+  }
+
+  return [...keys].filter(name => {
+    const normalized = String(name || '')
+
+    return /^CODEX_MM_[A-Z0-9_]+_API_KEY$/i.test(normalized) || normalized.toUpperCase() === 'CODEX_MM_PROXY_BASE_URL'
+  })
+}
+
+function clearManagedEnvironment(paths, options = {}, namesOverride = null) {
+  const names = Array.isArray(namesOverride) ? namesOverride : managedEnvironmentKeys(paths)
+  const errors = []
+
+  for (const name of names) {
+    delete process.env[name]
+
+    if (options.skipEnvWrite || process.platform !== 'win32') continue
+
+    try {
+      const command = `[Environment]::SetEnvironmentVariable(${JSON.stringify(name)}, $null, 'User')`
+
+      execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+        stdio: 'pipe'
+      })
+    } catch (error) {
+      errors.push({ name, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  return { names, errors }
+}
+
+function codexStateIndexPaths(paths) {
+  const candidates = []
+  const seen = new Set()
+
+  for (const root of [paths.codexHome, path.join(paths.codexHome, 'sqlite')]) {
+    if (!root || !fs.existsSync(root)) continue
+
+    let entries
+
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      if (!/^state(?:_\d+)?\.sqlite(?:-(?:wal|shm))?$/i.test(entry.name)) continue
+
+      const filePath = path.join(root, entry.name)
+      const key = path.resolve(filePath).toLowerCase()
+
+      if (seen.has(key)) continue
+      seen.add(key)
+      candidates.push(filePath)
+    }
+  }
+
+  return candidates
+}
+
+// If the app-server cannot process thread/delete (for example, an older
+// client binary is unavailable), stale SQLite state can make a deleted JSONL
+// reappear after the next launch.  Removing only the disposable state index
+// files lets Codex rebuild it from the remaining sessions.  Each file is
+// copied to the same rolling backup used by other generated state first, and
+// a partial failure attempts to restore every removed file.
+function pruneCodexStateIndex(paths, options = {}) {
+  const targets = codexStateIndexPaths(paths)
+  const snapshots = []
+  const removed = []
+
+  if (!targets.length) return { ok: true, skipped: true, reason: 'no-state-index', removed: [], backups: [] }
+
+  try {
+    for (const filePath of targets) {
+      const snapshot = backupFile(filePath, options.backupSuffix || 'state-index-prune')
+
+      if (snapshot?.existed && snapshot.backupPath) snapshots.push({ filePath, backupPath: snapshot.backupPath })
+    }
+
+    for (const filePath of targets) {
+      if (!fs.existsSync(filePath)) continue
+
+      fs.rmSync(filePath, { force: true, maxRetries: 3, retryDelay: 100 })
+      removed.push(filePath)
+    }
+
+    return {
+      ok: true,
+      skipped: false,
+      removed,
+      backups: snapshots.map(snapshot => snapshot.backupPath)
+    }
+  } catch (error) {
+    for (const snapshot of snapshots) {
+      try {
+        if (fs.existsSync(snapshot.backupPath)) {
+          ensureDir(path.dirname(snapshot.filePath))
+          fs.copyFileSync(snapshot.backupPath, snapshot.filePath)
+        }
+      } catch {
+        // Preserve the original error and report the failed rollback below.
+      }
+    }
+
+    return {
+      ok: false,
+      skipped: false,
+      removed,
+      backups: snapshots.map(snapshot => snapshot.backupPath),
+      error: error instanceof Error ? error.message : String(error)
+    }
+  }
+}
+
+function freshCodexStatePaths(paths, options = {}) {
+  const targets = [
+    paths.authPath,
+    paths.modelsCachePath,
+    paths.channelsPath,
+    paths.newApiPath,
+    paths.modelAliasesPath,
+    paths.nativeModelsPath,
+    paths.globalStatePath,
+    ...codexStateIndexPaths(paths)
+  ]
+
+  if (options.clearSessions === true) {
+    targets.push(...walkFiles(paths.sessionsPath, filePath => filePath.toLowerCase().endsWith('.jsonl')))
+    targets.push(...walkFiles(paths.archivedSessionsPath, filePath => filePath.toLowerCase().endsWith('.jsonl')))
+  }
+
+  return [...new Set(targets.filter(Boolean).map(filePath => path.resolve(filePath)))]
+}
+
+function captureFileStates(filePaths) {
+  return filePaths.map(filePath => {
+    if (!fs.existsSync(filePath)) return { filePath, exists: false, data: null }
+
+    const stat = fs.statSync(filePath)
+
+    if (!stat.isFile()) return { filePath, exists: true, data: null, directory: true }
+
+    return { filePath, exists: true, data: fs.readFileSync(filePath) }
+  })
+}
+
+function restoreCapturedFileStates(snapshots) {
+  for (const snapshot of snapshots) {
+    if (snapshot.exists && snapshot.data) {
+      ensureDir(path.dirname(snapshot.filePath))
+      fs.writeFileSync(snapshot.filePath, snapshot.data)
+    } else if (!snapshot.exists) {
+      fs.rmSync(snapshot.filePath, { force: true })
+    }
+  }
+}
+
+function resetFreshCodexState(paths, options = {}) {
+  const targets = freshCodexStatePaths(paths, options)
+  const snapshots = captureFileStates(targets)
+  const envNames = managedEnvironmentKeys(paths)
+  const envSnapshot = Object.fromEntries(envNames.map(name => [name, process.env[name]]))
+  const removedFiles = []
+
+  try {
+    for (const filePath of targets) {
+      if (!fs.existsSync(filePath)) continue
+
+      const stat = fs.statSync(filePath)
+
+      if (!stat.isFile()) continue
+      fs.rmSync(filePath, { force: true })
+      removedFiles.push(filePath)
+    }
+
+    const environment = clearManagedEnvironment(paths, options, envNames)
+
+    if (environment.errors.length && options.failOnEnvironmentError !== false) {
+      const error = new Error(`无法清除全部管理器环境变量：${environment.errors.map(item => item.name).join('、')}`)
+
+      error.environmentErrors = environment.errors
+      throw error
+    }
+
+    return {
+      removedFiles,
+      removedSessionCount: options.clearSessions === true
+        ? removedFiles.filter(filePath => filePath.toLowerCase().endsWith('.jsonl')).length
+        : 0,
+      clearedEnvironmentNames: environment.names,
+      environmentErrors: environment.errors
+    }
+  } catch (error) {
+    restoreCapturedFileStates(snapshots)
+    for (const name of envNames) {
+      const previous = envSnapshot[name]
+
+      if (previous === undefined) delete process.env[name]
+      else process.env[name] = previous
+    }
+    throw error
   }
 }
 
@@ -4435,9 +4808,15 @@ function getRelayRuntime(id, options = {}) {
 
   if (!apiKey) throw new Error('没有找到该渠道的 API Key')
   const aliasState = readModelAliases(paths.modelAliasesPath)
-  const aliases = aliasState.channelId === channel.id ? aliasState.aliases : {}
-  const capabilities = modelCapabilityMap(channel)
+  const rawAliases = aliasState.channelId === channel.id ? aliasState.aliases : {}
+  const aliases = Object.fromEntries(
+    Object.entries(rawAliases).filter(([, actualModel]) => isChatGptModel(actualModel))
+  )
+  const capabilities = Object.fromEntries(
+    Object.entries(modelCapabilityMap(channel)).filter(([model]) => isChatGptModel(model))
+  )
   const supportedModels = supportedModelsForProvider(channel)
+  const chatGptModels = filterChatGptModels(modelListFromProvider(channel))
   const modelCatalogSlugs = new Set(Object.keys(aliases))
   const modelCatalog = readCatalogModels(paths.modelsCachePath).filter(
     entry => modelCatalogSlugs.has(String(entry?.slug || '')) && entry?.visibility !== 'hide'
@@ -4448,14 +4827,17 @@ function getRelayRuntime(id, options = {}) {
     baseUrl: channel.baseUrl,
     apiKey,
     models: supportedModels,
-    allModels: modelListFromProvider(channel),
+    allModels: chatGptModels,
     modelAliases: aliases,
     modelCapabilities: capabilities,
     modelCatalog,
     imageGeneration: newApiImageGenerationRuntime(channel),
     wireApi: channel.wireApi || 'chat',
     modelWireApis: modelWireApiMap(channel),
-    modelTests: channel.modelTests && typeof channel.modelTests === 'object' ? channel.modelTests : {}
+    modelTests:
+      channel.modelTests && typeof channel.modelTests === 'object'
+        ? Object.fromEntries(Object.entries(channel.modelTests).filter(([model]) => isChatGptModel(model)))
+        : {}
   }
 }
 
@@ -4490,34 +4872,77 @@ function getRelayApiKey(id, options = {}) {
   return { apiKey, maskedApiKey: maskKey(apiKey) }
 }
 
+function stopCodexClientsForMutation(options = {}, operation = '状态恢复') {
+  if (options.stopClientsOnBusy !== true) return { ok: true, skipped: true }
+
+  // Codex Desktop is currently a Windows client.  On other hosts there is no
+  // supported process discovery command; do not turn an otherwise safe local
+  // fixture/reset into a false failure unless the caller supplied its own
+  // stopper.
+  if (process.platform !== 'win32' && typeof options.stopCodexClients !== 'function') {
+    return { ok: true, skipped: true, reason: 'unsupported-platform' }
+  }
+
+  // Keep the reset transaction deterministic: mutating auth/config/index files
+  // while the desktop client is alive can leave SQLite WAL handles open and
+  // let the client recreate deleted rows on its next start.  The IPC layer
+  // opts into this guard for the explicit user-confirmed reset.  Tests and
+  // embedders can inject a synchronous stopper; otherwise use the Windows
+  // process helper (which safely reports failure on unsupported platforms).
+  const stopClients = options.stopCodexClients || stopRunningCodexClients
+  const result = stopClients(options.stopOptions || { timeoutSeconds: 20 })
+
+  if (result?.ok === true) return result
+
+  const remaining =
+    Array.isArray(result?.remaining) && result.remaining.length
+      ? `仍在运行：${result.remaining.join('、')}`
+      : result?.error || 'Windows 拒绝结束旧实例'
+
+  throw new Error(`当前 ChatGPT/Codex 尚未完全关闭，已取消${operation}。${remaining}`)
+}
+
+function stopCodexClientsForReset(options = {}) {
+  return stopCodexClientsForMutation(options, '初始状态恢复')
+}
+
 function restoreInitialBackup(options = {}) {
   const paths = getPaths(options)
   const initialBackup = readInitialBackup(paths)
 
-  if (!initialBackup.exists) {
+  if (!initialBackup.metadataExists) {
     throw new Error('没有可用的首次备份')
   }
 
-  const current = readText(paths.configPath)
+  if (!initialBackup.valid) {
+    throw new Error(initialBackup.error || '首次备份不可恢复，请重新创建首次快照。')
+  }
+
+  // Stop the official client before touching its auth/index files when the
+  // caller explicitly requests the guarded reset.  A failed stop leaves every
+  // file untouched and surfaces a clear actionable error to the UI.
+  const stopResult = stopCodexClientsForReset(options)
+
+  const currentConfigExists = fs.existsSync(paths.configPath)
+  const current = currentConfigExists ? readText(paths.configPath) : ''
   backupConfig(paths.configPath, current, 'before-initial-restore')
   const authSnapshot = backupAuth(paths.authPath, 'before-initial-restore')
   const modelsCacheSnapshot = backupFile(paths.modelsCachePath, 'before-initial-restore')
+  let freshReset
 
   try {
-    // A first-run restore must be an actual Codex restore: put config.toml
-    // back exactly as it was captured, including the original provider and
-    // project tables.  Project/session data lives outside config.toml and is
-    // therefore not deleted by this operation.
+    // A first-run restore must be an actual Codex reset: put config.toml back
+    // exactly as it was captured, then clear the current login and all
+    // manager/index state.  The immutable initial auth snapshot is retained
+    // for audit/rollback but is intentionally never copied back into auth.json.
     const nextConfig = initialBackup.configExists ? readText(initialBackup.path) : ''
 
-    if (nextConfig.trim()) writeText(paths.configPath, nextConfig)
+    if (initialBackup.configExists) writeText(paths.configPath, nextConfig)
     else fs.rmSync(paths.configPath, { force: true })
-    if (initialBackup.authExists) restoreAuthFromBackup(initialBackup.authPath, paths.authPath)
-    else fs.rmSync(paths.authPath, { force: true })
-    if (initialBackup.modelsCacheExists) restoreAuthFromBackup(initialBackup.modelsCachePath, paths.modelsCachePath)
-    else fs.rmSync(paths.modelsCachePath, { force: true })
+    freshReset = { ...resetFreshCodexState(paths, options), stoppedProcessCount: Number(stopResult?.stopped) || 0 }
   } catch (error) {
-    writeText(paths.configPath, current)
+    if (currentConfigExists) writeText(paths.configPath, current)
+    else fs.rmSync(paths.configPath, { force: true })
     restoreAuthSnapshot(authSnapshot, paths.authPath)
     restoreFileSnapshot(modelsCacheSnapshot, paths.modelsCachePath)
     throw error
@@ -4526,7 +4951,7 @@ function restoreInitialBackup(options = {}) {
   const restart =
     options.restartCodex === true ? restartCodex({ dryRun: options.dryRunRestart }) : manualCodexRestartResult()
 
-  return { status: readStatus(options), restart }
+  return { status: readStatus(options), restart, freshReset, stopResult }
 }
 
 function removeRelay(id, options = {}) {
@@ -4573,7 +4998,7 @@ function findSessionByIdOrPath(paths, idOrPath) {
     .sort((a, b) => (priority[a.location] ?? 9) - (priority[b.location] ?? 9))[0]
 }
 
-function deleteSession(idOrPath, options = {}) {
+async function deleteSession(idOrPath, options = {}) {
   const paths = getPaths(options)
   const session = findSessionByIdOrPath(paths, idOrPath)
 
@@ -4581,9 +5006,68 @@ function deleteSession(idOrPath, options = {}) {
   if (!session.path.toLowerCase().endsWith('.jsonl')) throw new Error('只允许删除对话 JSONL 文件')
   if (!fs.statSync(session.path).isFile()) throw new Error('对话路径不是文件')
 
+  const indexOptions = {
+    ...options,
+    refreshConversationIndex: options.refreshConversationIndex !== false
+  }
+  // The single-session IPC action opts into stopClientsOnBusy.  Honor it
+  // before issuing thread/delete or touching the JSONL so a failed stop leaves
+  // the user's conversation and index completely unchanged.
+  const stopResult = stopCodexClientsForMutation(options, '删除对话')
+  const indexDelete = await deleteThreadsFromCodexIndex([session], paths, indexOptions)
   fs.rmSync(session.path)
+  let stateIndexPrune = { ok: true, skipped: true, reason: 'index-delete-succeeded', removed: [], backups: [] }
 
-  return { status: readStatus(options), deletedPath: session.path }
+  if (indexDelete.ok !== true && indexOptions.refreshConversationIndex && options.pruneStateIndexOnFailure !== false) {
+    stateIndexPrune = pruneCodexStateIndex(paths, { backupSuffix: 'delete-session-index-prune' })
+  }
+  const remainingSessions = listSessions(paths)
+  const sessionRoot = String(session.cwd || '').toLowerCase()
+  const remainingRoot = sessionProjectPaths(remainingSessions).some(root => {
+    const normalized = root.toLowerCase()
+
+    return normalized === sessionRoot || normalized.startsWith(`${sessionRoot}${path.sep}`)
+  })
+  let configurationError = ''
+  let projectRecordRemoved = false
+
+  if (!remainingRoot && session.cwd) {
+    try {
+      const currentConfig = readText(paths.configPath)
+      const nextConfig = removeProjectBlock(currentConfig, session.cwd)
+
+      if (nextConfig !== currentConfig) {
+        parseConfig(nextConfig)
+        backupConfig(paths.configPath, currentConfig, 'delete-session')
+        writeText(paths.configPath, nextConfig)
+        projectRecordRemoved = true
+      }
+    } catch (error) {
+      configurationError = error instanceof Error ? error.message : String(error)
+    }
+  }
+  const globalStatePrune = pruneDesktopProjectState(paths.globalStatePath, {
+    deletedThreadIds: [session.id],
+    deletedProjectPaths: remainingRoot ? [] : [session.cwd],
+    backupDir: path.join(paths.stateDir, 'backups')
+  })
+  const indexRefresh = await refreshConversationIndexAfterDelete(
+    paths,
+    { scope: session.location === 'archived' ? 'archived' : 'active' },
+    indexOptions
+  )
+
+  return {
+    status: readStatus(options),
+    deletedPath: session.path,
+    stopResult,
+    indexDelete,
+    indexRefresh,
+    stateIndexPrune,
+    globalStatePrune,
+    projectRecordRemoved,
+    configurationError
+  }
 }
 
 function importSession(sourcePath, options = {}) {
@@ -4747,7 +5231,12 @@ function deleteProject(projectPath, options = {}) {
   parseConfig(next)
   writeText(paths.configPath, next)
 
-  return readStatus(options)
+  const globalStatePrune = pruneDesktopProjectState(paths.globalStatePath, {
+    deletedProjectPaths: [projectPath],
+    backupDir: path.join(paths.stateDir, 'backups')
+  })
+
+  return { ...readStatus(options), globalStatePrune }
 }
 
 function matchesConversationFilters(item, filters = {}) {
@@ -4912,6 +5401,7 @@ async function refreshConversationIndexAfterDelete(paths, filters, options = {})
 
 async function deleteConversationData(filters = {}, options = {}) {
   const paths = getPaths(options)
+  const removeProjectFolders = filters.removeProjectFolders === true || options.removeProjectFolders === true
   const status = readStatus(options)
   const sessions = status.sessions.filter(session => matchesConversationFilters(session, filters))
   const projects = status.projects.filter(project =>
@@ -4920,6 +5410,9 @@ async function deleteConversationData(filters = {}, options = {}) {
   const projectPaths = new Set(projects.map(project => project.path.toLowerCase()))
 
   for (const projectPath of sessionProjectPaths(sessions)) projectPaths.add(projectPath)
+  const preStopResult = options.stopBeforeMutation === true
+    ? stopCodexClientsForMutation(options, '批量删除对话')
+    : null
   const indexDelete = await deleteThreadsFromCodexIndex(sessions, paths, options)
 
   const deletedSessions = []
@@ -4929,7 +5422,7 @@ async function deleteConversationData(filters = {}, options = {}) {
   const skippedProjects = []
   const removeSessionFile =
     options.removeSessionFile || (targetPath => fs.rmSync(targetPath, { force: true, maxRetries: 3, retryDelay: 200 }))
-  let stopResult = null
+  let stopResult = preStopResult
 
   for (const session of sessions) {
     if (!session.path.toLowerCase().endsWith('.jsonl')) continue
@@ -4946,7 +5439,7 @@ async function deleteConversationData(filters = {}, options = {}) {
       let finalError = initialError
 
       if (occupiedFileError(initialError) && options.stopClientsOnBusy === true) {
-        if (!stopResult) {
+        if (!stopResult || stopResult.skipped) {
           const stopClients = options.stopCodexClients || stopRunningCodexClients
 
           stopResult = stopClients({ timeoutSeconds: 20 })
@@ -4992,13 +5485,19 @@ async function deleteConversationData(filters = {}, options = {}) {
     next = removeProjectBlock(next, projectPath)
     changedConfig = true
 
+    if (!removeProjectFolders) {
+      // Removing a project record is useful when cleaning conversation
+      // history, but deleting the user's working tree must always be an
+      // explicit second choice in the UI/API.
+      deletedProjects.push(projectPath)
+      continue
+    }
+
     try {
       rejectUnsafeProjectDeletePath(projectPath, paths)
 
-      if (fs.existsSync(projectPath)) {
-        fs.rmSync(projectPath, { recursive: true, force: true })
-        deletedProjects.push(projectPath)
-      }
+      if (fs.existsSync(projectPath)) fs.rmSync(projectPath, { recursive: true, force: true })
+      deletedProjects.push(projectPath)
     } catch (error) {
       skippedProjects.push({
         path: projectPath,
@@ -5016,6 +5515,40 @@ async function deleteConversationData(filters = {}, options = {}) {
       configurationError = error instanceof Error ? error.message : String(error)
     }
   }
+  const remainingSessions = listSessions(paths)
+  const remainingRoots = sessionProjectPaths(remainingSessions)
+  const deletedProjectRoots = deletedProjects.filter(projectPath => {
+    const normalized = String(projectPath || '').toLowerCase()
+
+    return !remainingRoots.some(root => {
+      const remaining = root.toLowerCase()
+
+      return remaining === normalized || remaining.startsWith(`${normalized}${path.sep}`)
+    })
+  })
+  const globalStatePrune = pruneDesktopProjectState(paths.globalStatePath, {
+    deletedThreadIds: deletedSessions.map(sessionPath => {
+      const session = sessions.find(item => item.path === sessionPath)
+
+      return session?.id || ''
+    }),
+    deletedProjectPaths: deletedProjectRoots,
+    backupDir: path.join(paths.stateDir, 'backups')
+  })
+  let stateIndexPrune = {
+    ok: true,
+    skipped: true,
+    reason: indexDelete.ok === true ? 'index-delete-succeeded' : 'not-requested',
+    removed: [],
+    backups: []
+  }
+
+  if (indexDelete.ok !== true && options.refreshConversationIndex === true && options.pruneStateIndexOnFailure !== false) {
+    // This fallback only touches Codex's disposable SQLite index.  Session
+    // JSONL files (including any skipped/locked records) remain untouched and
+    // are rescanned on the next client start.
+    stateIndexPrune = pruneCodexStateIndex(paths, { backupSuffix: 'delete-conversation-index-prune' })
+  }
   const indexRefresh = await refreshConversationIndexAfterDelete(paths, filters, options)
 
   return {
@@ -5028,6 +5561,10 @@ async function deleteConversationData(filters = {}, options = {}) {
     skippedSessions,
     deletedProjects,
     skippedProjects,
+    removeProjectFolders,
+    stopResult,
+    globalStatePrune,
+    stateIndexPrune,
     stoppedProcessCount: Number(stopResult?.stopped) || 0,
     configurationError,
     indexDelete,
@@ -6895,6 +7432,10 @@ module.exports = {
     writeApiKeyAuth,
     writeChannelModelCatalog,
     backupConfig,
+    backupAuth,
+    backupFile,
+    codexStateIndexPaths,
+    pruneCodexStateIndex,
     ensureInitialBackup
   }
 }
