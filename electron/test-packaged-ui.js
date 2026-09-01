@@ -599,7 +599,10 @@ async function main() {
       const importOpened = clickControl('导入')
 
       await wait(100)
-      const importDialog = document.querySelector('[role="dialog"]')
+      const importDialog =
+        Array.from(document.querySelectorAll('[role="dialog"]')).find(dialog =>
+          String(dialog.textContent || '').includes('导入会话或项目')
+        ) || document.querySelector('[role="dialog"]')
       const importText = String(importDialog?.textContent || '')
       const importButtons = importDialog
         ? Array.from(importDialog.querySelectorAll('button')).map(element => ({
