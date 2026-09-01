@@ -69,18 +69,26 @@ function localProjectRoots(state) {
   return roots
 }
 
-function backupStateFile(filePath, backupDir, now) {
+function backupStateFile(filePath, backupDir) {
   if (!fs.existsSync(filePath)) return ''
 
   const targetDir = backupDir || path.dirname(filePath)
-  const stamp = new Date(now)
-    .toISOString()
-    .replace(/[-:TZ.]/g, '')
-    .slice(0, 14)
-  const backupPath = path.join(targetDir, `${GLOBAL_STATE_FILENAME}.projects-${stamp}.bak`)
+  // Keep one recoverable snapshot for project-index maintenance.  A stable
+  // name prevents every delete/sync operation from filling the Codex folder
+  // with timestamped copies while still allowing rollback of the last edit.
+  const backupPath = path.join(targetDir, `${GLOBAL_STATE_FILENAME}.projects.bak`)
 
   fs.mkdirSync(targetDir, { recursive: true })
-  fs.copyFileSync(filePath, backupPath)
+  const current = fs.readFileSync(filePath)
+  let previous = null
+
+  try {
+    previous = fs.readFileSync(backupPath)
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+
+  if (!previous || !previous.equals(current)) fs.copyFileSync(filePath, backupPath)
 
   return backupPath
 }
@@ -248,11 +256,114 @@ function syncDesktopProjectsFromSessions(globalStatePath, sessions, options = {}
   }
 }
 
+function pruneDesktopProjectState(globalStatePath, options = {}) {
+  if (!globalStatePath || !fs.existsSync(globalStatePath)) {
+    return { changed: false, removedThreadCount: 0, removedProjectCount: 0, backupPath: '' }
+  }
+
+  const state = readJsonObject(globalStatePath)
+  const deletedThreadIds = new Set(
+    (Array.isArray(options.deletedThreadIds) ? options.deletedThreadIds : []).map(value => String(value || '').trim())
+  )
+  const deletedRoots = (Array.isArray(options.deletedProjectPaths) ? options.deletedProjectPaths : [])
+    .map(rootKey)
+    .filter(Boolean)
+  const rootMatches = value => {
+    const key = rootKey(value)
+
+    return Boolean(key && deletedRoots.some(root => key === root || key.startsWith(`${root}${path.sep}`)))
+  }
+  const localProjects =
+    state['local-projects'] && typeof state['local-projects'] === 'object' && !Array.isArray(state['local-projects'])
+      ? state['local-projects']
+      : {}
+  const removedProjectIds = new Set()
+  const nextProjects = {}
+
+  for (const [projectId, project] of Object.entries(localProjects)) {
+    const roots = Array.isArray(project?.rootPaths) ? project.rootPaths : []
+    const remove =
+      deletedThreadIds.has(String(projectId)) ||
+      roots.some(rootMatches) ||
+      deletedRoots.includes(rootKey(project?.cwd))
+
+    if (remove) removedProjectIds.add(String(projectId))
+    else nextProjects[projectId] = project
+  }
+
+  const assignments =
+    state['thread-project-assignments'] &&
+    typeof state['thread-project-assignments'] === 'object' &&
+    !Array.isArray(state['thread-project-assignments'])
+      ? state['thread-project-assignments']
+      : {}
+  const nextAssignments = {}
+
+  for (const [threadId, assignment] of Object.entries(assignments)) {
+    const remove =
+      deletedThreadIds.has(String(threadId)) ||
+      removedProjectIds.has(String(assignment?.projectId || '')) ||
+      rootMatches(assignment?.cwd)
+
+    if (!remove) nextAssignments[threadId] = assignment
+  }
+
+  const projectlessBefore = Array.isArray(state['projectless-thread-ids'])
+    ? state['projectless-thread-ids'].map(String)
+    : []
+  const projectlessAfter = projectlessBefore.filter(threadId => !deletedThreadIds.has(threadId))
+  const hintsBefore =
+    state['thread-workspace-root-hints'] &&
+    typeof state['thread-workspace-root-hints'] === 'object' &&
+    !Array.isArray(state['thread-workspace-root-hints'])
+      ? state['thread-workspace-root-hints']
+      : {}
+  const hintsAfter = Object.fromEntries(
+    Object.entries(hintsBefore).filter(
+      ([threadId, rootPath]) => !deletedThreadIds.has(String(threadId)) && !rootMatches(rootPath)
+    )
+  )
+  const projectOrderBefore = Array.isArray(state['project-order']) ? state['project-order'].map(String) : []
+  const projectOrderAfter = projectOrderBefore.filter(projectId => !removedProjectIds.has(projectId))
+  const pinnedBefore = Array.isArray(state['pinned-project-ids']) ? state['pinned-project-ids'].map(String) : []
+  const pinnedAfter = pinnedBefore.filter(projectId => !removedProjectIds.has(projectId))
+  const changed =
+    Object.keys(nextProjects).length !== Object.keys(localProjects).length ||
+    Object.keys(nextAssignments).length !== Object.keys(assignments).length ||
+    JSON.stringify(projectlessAfter) !== JSON.stringify(projectlessBefore) ||
+    JSON.stringify(hintsAfter) !== JSON.stringify(hintsBefore) ||
+    JSON.stringify(projectOrderAfter) !== JSON.stringify(projectOrderBefore) ||
+    JSON.stringify(pinnedAfter) !== JSON.stringify(pinnedBefore)
+
+  if (!changed) return { changed: false, removedThreadCount: 0, removedProjectCount: 0, backupPath: '' }
+
+  const next = {
+    ...state,
+    'local-projects': nextProjects,
+    'project-order': projectOrderAfter,
+    'pinned-project-ids': pinnedAfter,
+    'thread-project-assignments': nextAssignments,
+    'projectless-thread-ids': projectlessAfter,
+    'thread-workspace-root-hints': hintsAfter
+  }
+  const backupPath = backupStateFile(globalStatePath, options.backupDir)
+
+  writeVerifiedJson(globalStatePath, next, backupPath)
+
+  return {
+    changed: true,
+    removedThreadCount: deletedThreadIds.size,
+    removedProjectCount: removedProjectIds.size,
+    backupPath
+  }
+}
+
 module.exports = {
   GLOBAL_STATE_FILENAME,
   readJsonObject,
   rootKey,
   localProjectRoots,
+  pruneDesktopProjectState,
   syncDesktopProjectsFromSessions,
   validSessionProjects
 }

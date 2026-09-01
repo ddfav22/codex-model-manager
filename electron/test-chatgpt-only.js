@@ -33,9 +33,26 @@ assert.strictEqual(fs.readFileSync(configPath, 'utf8'), initialConfig)
 assert.match(fs.readFileSync(configPath, 'utf8'), /projects\./)
 
 const adapters = require('./features/modelAdapters')
+const protocolProxy = require('./protocolProxy')
 assert.strictEqual(adapters.isChatGptModel('gpt-5.6'), true)
 assert.strictEqual(adapters.isChatGptModel('o4-mini'), true)
+assert.strictEqual(adapters.isChatGptModel('gpt-image-1'), false)
+assert.strictEqual(adapters.isChatGptModel('dall-e-3'), false)
 assert.strictEqual(adapters.isChatGptModel('grok-4.5'), false)
 assert.deepStrictEqual(adapters.filterChatGptModels(['grok-4.5', 'gpt-5.6', 'claude-sonnet-5']), ['gpt-5.6'])
+assert.strictEqual(adapters.preferredSupportedModel(['grok-4.5', 'claude-sonnet-5']), '')
+const normalizedNewApi = manager._internal.normalizeRelayInput({
+  name: 'NewAPI',
+  baseUrl: 'https://example.test/v1',
+  apiKey: 'test-key',
+  keySource: 'newapi',
+  model: 'grok-4.5',
+  models: ['grok-4.5', 'gpt-5.6', 'dall-e-3', 'gpt-image-1']
+})
+assert.deepStrictEqual(normalizedNewApi.models, ['gpt-5.6'])
+assert.strictEqual(normalizedNewApi.model, 'gpt-5.6')
+assert.strictEqual(protocolProxy.inferredWireApiForModel('gpt-5.6'), 'responses')
+assert.strictEqual(protocolProxy.inferredWireApiForModel('grok-4.5'), '')
+assert.strictEqual('shouldForceGrokAgentLoopEmulation' in protocolProxy, false)
 
 console.log('chatgpt-only/restore/rolling-backup tests passed')

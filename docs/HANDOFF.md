@@ -1,6 +1,8 @@
 # 维护交接
 
-## Grok 中使用 Codex Skill
+> 当前运行时（1.2.106）已移除 Grok 适配，仅支持 ChatGPT/OpenAI 模型与 NewAPI 的 OpenAI 兼容接口。下文早期的 Grok 段落是历史记录，不代表现行代码路径；修改时以当前源码、测试和本节约束为准。
+
+## 历史：Grok 中使用 Codex Skill（已停用）
 
 当用户明确提及/执行 Skill，或请求中已经出现 Skill 读取/结果时，Grok Chat 适配层会启用有界的 prompt 工具桥：上游只负责规划和返回标准工具调用，Codex 仍负责权限确认、工具执行和结果回传。通用的 Skill 目录说明本身不会触发额外请求，避免普通问答被重复探测。
 
@@ -18,7 +20,7 @@ Codex 的 `developer` input 可能包含常驻 Skill 目录，不能单独作为
 4. 发布产物必须是纯净版，不得包含 `data`、API Key、Cookie、登录态、日志或缓存。
 5. 模型是否可用必须来自当前 Key 的实际目录与完整协议测试，不能写死模型数量。
 6. 未知 Provider 或未验证协议必须显示“适配未完成，暂不可用”，不能猜测接口。
-7. GPT 原生 Responses 路径不应为了兼容 Grok 而降级；Grok 的兼容逻辑限定在模型适配层。
+7. GPT 原生 Responses/Chat Completions 路径保持透明；不为已移除的第三方模型猜测接口或注入适配提示。
 8. `config.toml` 的 `[projects]` 只表示目录信任，不等于 Codex 桌面端 Projects；Local Project 和任务归属需要合并到 `.codex-global-state.json`。
 
 ## 模块边界
@@ -40,14 +42,14 @@ IPC / lifecycle (electron/runtime, electron/main.js)
 ## Agent Loop 数据流
 
 1. Codex 向本地随机端口和随机能力路径发送 Responses 请求。
-2. 代理根据实际模型能力选择原生 Responses 或 Chat Completions 适配。
+2. 代理根据当前 ChatGPT/OpenAI 模型能力选择原生 Responses 或 Chat Completions 传输。
 3. GPT 原生路径尽可能透传合法 Responses 事件。
-4. Grok Chat 路径把 Codex 工具声明编译成上游可理解的格式，再把工具调用还原为标准 Responses 项。
+4. Chat Completions 路径把合法的上游工具事件转换为标准 Responses 项；不接受未知 Provider 的猜测式转换。
 5. Codex 执行工具并把 `custom_tool_call_output`/`function_call_output` 发回代理。
 6. 上游输出计划型中间消息时，代理在完整响应仍用于判型的同时，把安全正文前缀作为 `phase=commentary` 的 delta 立即交给 Codex；工具 JSON 保持缓冲且不进入可见消息。
 7. 代理保持 `call_id`，继续请求当前上游，直到得到最终结果、一个明确问题、有效工具调用、用户取消，或命中重复/连接失败熔断；正常计划续接没有固定轮数。
 
-Grok prompt-emulated 路径会把历史工具调用和结果编码为 `codex_internal_tool_history` 私有信封，并把续接指令编码为 `codex_internal_adapter`。这些内容只供上游保持执行连续性，绝不能进入用户可见正文。可见文本必须先调用 `stripInternalToolTranscript`，然后才能做工具 JSON 解析和输出；否则上游复述的历史 JSON 可能被误判为新的工具调用并造成重复执行。标准 `custom_tool_call` / `function_call` Responses 事件仍必须保留，不能为了隐藏开发标签而破坏 Agent Loop。
+历史版本曾有 prompt-emulated 私有信封；该路径已从当前运行时删除。当前可见内容只允许来自上游合法事件、标准工具结果和最终消息，任何未知控制标记都必须在协议边界收口。
 
 不得向用户展示或伪造隐藏推理链。可见内容只能来自上游主动输出的进度、标准工具事件、工具结果和最终消息。
 

@@ -96,6 +96,10 @@ function toUserFacingErrorMessage(error) {
       text: '请求过于频繁或可用额度不足。请稍后重试，或更换可用渠道。'
     },
     {
+      pattern: /upstream[_ -]?server[_ -]?error|upstream model service returned 5xx/i,
+      text: '上游模型服务返回 5xx，当前请求未完成。请稍后重试，或切换其他模型或渠道。'
+    },
+    {
       pattern: /\b(?:502|503|504)\b|service unavailable|bad gateway|gateway timeout/i,
       text: '上游服务暂时不可用。请稍后重试，或切换其他模型或渠道。'
     },

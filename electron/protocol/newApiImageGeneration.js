@@ -5,7 +5,13 @@ const path = require('path')
 const { randomUUID } = require('crypto')
 const { readResponseTextLimited } = require('./upstreamRequest')
 
-const DEFAULT_IMAGE_MODEL = 'grok-imagine-image-quality'
+// The manager deliberately exposes only OpenAI image model families.  NewAPI
+// may advertise other providers, but those IDs are kept out of the image
+// runtime instead of being translated through a provider-specific contract.
+// NewAPI's documented OpenAI image route recommends gpt-image-2.  Keep the
+// default aligned with that contract; a synchronised channel may still select
+// another validated OpenAI image model advertised by /v1/models.
+const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
 const IMAGE_TOOL_NAME = 'generate_image'
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const MAX_IMAGE_ERROR_BYTES = 64 * 1024
@@ -15,16 +21,13 @@ const IMAGE_DOWNLOAD_TIMEOUT_MS = 60_000
 const IMAGE_GENERATION_MAX_RETRIES = 1
 const IMAGE_GENERATION_MAX_RETRY_DELAY_MS = 5_000
 const SUPPORTED_MCP_PROTOCOLS = new Set(['2025-06-18', '2025-03-26', '2024-11-05'])
-const GROK_CLI_IMAGE_ASPECT_RATIOS = new Set(['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '2:1', '1:2', 'auto'])
-const IMAGE_ASPECT_RATIOS = new Set([...GROK_CLI_IMAGE_ASPECT_RATIOS, '9:19.5', '19.5:9', '9:20', '20:9'])
 const PREFERRED_IMAGE_MODELS = [
-  'grok-imagine-image-quality',
-  'grok-imagine-image-2.0',
-  'grok-imagine-image',
   'gpt-image-2',
   'gpt-image-1.5',
   'gpt-image-1',
-  'dall-e-3'
+  'chatgpt-image-1',
+  'dall-e-3',
+  'dall-e-2'
 ]
 
 class ImageGenerationValidationError extends Error {
@@ -52,14 +55,9 @@ function upstreamImagesUrl(baseUrl) {
 }
 
 function isImageGenerationModel(value) {
-  const model = String(value || '').trim()
+  const model = imageModelLeaf(value)
 
-  return Boolean(
-    model &&
-    (/(?:^|[-_.:/])(?:image|imagine|imagen|flux|sdxl)(?:$|[-_.:/])/i.test(model) ||
-      /^dall-e(?:$|-)/i.test(model) ||
-      /^gpt-image(?:$|-)/i.test(model))
-  )
+  return /^(?:gpt-image|chatgpt-image|dall-e)(?:$|-)/i.test(model)
 }
 
 function imageModelLeaf(value) {
@@ -114,8 +112,6 @@ class ImageGenerationUpstreamError extends Error {
 function imageModelFamily(value) {
   const leaf = imageModelLeaf(value)
 
-  if (leaf === DEFAULT_IMAGE_MODEL) return 'grok-quality'
-  if (/^grok-imagine(?:-image)?(?:$|-)/.test(leaf)) return 'grok-imagine'
   if (/^(?:gpt-image|chatgpt-image)(?:$|-)/.test(leaf)) return 'gpt-image'
   if (/^dall-e(?:$|-)/.test(leaf)) return 'dall-e'
 
@@ -153,9 +149,17 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
     throw new ImageGenerationValidationError('generate_image 使用当前渠道已验证的图片模型，不接受 model 覆盖')
   }
   const model = requestedModel || options.defaultModel || DEFAULT_IMAGE_MODEL
+  const modelFamily = imageModelFamily(model)
+
+  if (!modelFamily || !isImageGenerationModel(model)) {
+    throw new ImageGenerationValidationError('仅支持 ChatGPT/OpenAI 图片模型（gpt-image-* 或 dall-e-*）')
+  }
+  if (argumentsValue.aspect_ratio !== undefined || argumentsValue.resolution !== undefined) {
+    throw new ImageGenerationValidationError('OpenAI 图片模型不支持 aspect_ratio 或 resolution，请改用 size')
+  }
   const size = boundedString(argumentsValue.size, 'size', {
     maximum: 32,
-    pattern: /^(?:auto|\d{2,5}x\d{2,5}|\d{1,2}:\d{1,2}(?:_[a-zA-Z0-9]+)?)$/i
+    pattern: /^(?:auto|\d{2,5}x\d{2,5})$/i
   })
   const quality = boundedString(argumentsValue.quality, 'quality', {
     maximum: 24,
@@ -178,16 +182,6 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
     pattern: /^(?:url|b64_json)$/
   })
   let responseFormat = explicitResponseFormat || defaultResponseFormat
-  const aspectRatio = boundedString(argumentsValue.aspect_ratio, 'aspect_ratio', {
-    maximum: 8
-  })
-  if (aspectRatio && !IMAGE_ASPECT_RATIOS.has(aspectRatio)) {
-    throw new ImageGenerationValidationError('aspect_ratio 格式无效')
-  }
-  const resolution = boundedString(argumentsValue.resolution, 'resolution', {
-    maximum: 2,
-    pattern: /^(?:1k|2k)$/i
-  }).toLowerCase()
   const outputCompressionValue = argumentsValue.output_compression
   let outputCompression = null
 
@@ -202,63 +196,12 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
   if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 4) {
     throw new ImageGenerationValidationError('n 必须是 1 到 4 之间的整数')
   }
-  const modelFamily = imageModelFamily(model)
-  const grokCliImage = modelFamily === 'grok-quality'
-  const grokImagineImage = modelFamily === 'grok-imagine'
-  const grokImagine2 = /^grok-imagine-image-2\.0(?:$|-)/.test(imageModelLeaf(model))
   const gptImage = modelFamily === 'gpt-image'
   const dallEImage = modelFamily === 'dall-e'
   const normalizedOutputFormat = outputFormat.toLowerCase() === 'jpg' ? 'jpeg' : outputFormat.toLowerCase()
 
-  if (grokCliImage) {
-    if (requestedCount !== 1) {
-      throw new ImageGenerationValidationError(`${DEFAULT_IMAGE_MODEL} 当前只支持 n=1`)
-    }
-    if (resolution && resolution !== '1k') {
-      throw new ImageGenerationValidationError(`${DEFAULT_IMAGE_MODEL} 当前只支持 resolution=1k`)
-    }
-    if (responseFormat && responseFormat !== 'b64_json') {
-      throw new ImageGenerationValidationError(`${DEFAULT_IMAGE_MODEL} 当前只支持 response_format=b64_json`)
-    }
-    if (aspectRatio && !GROK_CLI_IMAGE_ASPECT_RATIOS.has(aspectRatio)) {
-      throw new ImageGenerationValidationError(`${DEFAULT_IMAGE_MODEL} 不支持 aspect_ratio=${aspectRatio}`)
-    }
+  if (gptImage) {
     const unsupported = [
-      size ? 'size' : '',
-      quality ? 'quality' : '',
-      style ? 'style' : '',
-      outputFormat ? 'output_format' : '',
-      outputCompression !== null ? 'output_compression' : ''
-    ].filter(Boolean)
-
-    if (unsupported.length) {
-      throw new ImageGenerationValidationError(
-        `${DEFAULT_IMAGE_MODEL} 不使用 ${unsupported.join('、')}；请改用 aspect_ratio 和 resolution`
-      )
-    }
-  } else if (grokImagineImage) {
-    const unsupported = [
-      size ? 'size' : '',
-      style ? 'style' : '',
-      outputFormat ? 'output_format' : '',
-      outputCompression !== null ? 'output_compression' : ''
-    ].filter(Boolean)
-
-    if (unsupported.length) {
-      throw new ImageGenerationValidationError(
-        `${model} 不使用 ${unsupported.join('、')}；请改用 aspect_ratio、resolution、quality 和 response_format`
-      )
-    }
-    if (quality && !grokImagine2) {
-      throw new ImageGenerationValidationError(`${model} 不使用 quality；仅 grok-imagine-image-2.0 支持 low 或 medium`)
-    }
-    if (quality && !/^(?:low|medium)$/i.test(quality)) {
-      throw new ImageGenerationValidationError(`${model} 的 quality 只支持 low 或 medium`)
-    }
-  } else if (gptImage) {
-    const unsupported = [
-      aspectRatio ? 'aspect_ratio' : '',
-      resolution ? 'resolution' : '',
       explicitResponseFormat ? 'response_format' : '',
       style ? 'style' : ''
     ].filter(Boolean)
@@ -274,8 +217,6 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
     responseFormat = ''
   } else if (dallEImage) {
     const unsupported = [
-      aspectRatio ? 'aspect_ratio' : '',
-      resolution ? 'resolution' : '',
       outputFormat ? 'output_format' : '',
       outputCompression !== null ? 'output_compression' : ''
     ].filter(Boolean)
@@ -285,8 +226,7 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
     }
   }
 
-  const effectiveResolution = resolution || (grokCliImage ? '1k' : '')
-  const effectiveResponseFormat = responseFormat || (grokCliImage ? 'b64_json' : '')
+  const effectiveResponseFormat = responseFormat || ''
 
   return {
     model,
@@ -297,8 +237,6 @@ function imageGenerationPayload(argumentsValue = {}, options = {}) {
     ...(style ? { style } : {}),
     ...(outputFormat ? { output_format: normalizedOutputFormat } : {}),
     ...(outputCompression !== null ? { output_compression: outputCompression } : {}),
-    ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
-    ...(effectiveResolution ? { resolution: effectiveResolution } : {}),
     ...(effectiveResponseFormat ? { response_format: effectiveResponseFormat } : {})
   }
 }
@@ -1051,40 +989,17 @@ async function generateNewApiImage(channel, argumentsValue, options = {}) {
 function imageToolDefinition(options = {}) {
   const defaultModel = String(options.defaultModel || DEFAULT_IMAGE_MODEL).trim() || DEFAULT_IMAGE_MODEL
   const family = imageModelFamily(defaultModel)
-  const grokDefault = family === 'grok-quality' || family === 'grok-imagine'
-  const qualityDefault = family === 'grok-quality'
-  const grokImagine2 = /^grok-imagine-image-2\.0(?:$|-)/.test(imageModelLeaf(defaultModel))
   const properties = {
     prompt: { type: 'string', minLength: 1, maxLength: MAX_IMAGE_PROMPT_LENGTH },
     n: {
       type: 'integer',
       minimum: 1,
-      maximum: qualityDefault ? 1 : 4,
-      description: qualityDefault
-        ? `${defaultModel} currently supports only one image per call.`
-        : 'Number of images, limited by the selected NewAPI image model.'
+      maximum: 4,
+      description: 'Number of images, limited by the selected NewAPI image model.'
     }
   }
 
-  if (grokDefault) {
-    properties.aspect_ratio = {
-      type: 'string',
-      enum: [...(qualityDefault ? GROK_CLI_IMAGE_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS)],
-      description: 'Grok Imagine aspect ratio.'
-    }
-    properties.resolution = {
-      type: 'string',
-      enum: qualityDefault ? ['1k'] : ['1k', '2k'],
-      description: qualityDefault ? `${defaultModel} currently supports resolution 1k.` : 'Grok Imagine resolution.'
-    }
-    if (grokImagine2) {
-      properties.quality = {
-        type: 'string',
-        enum: ['low', 'medium'],
-        description: 'grok-imagine-image-2.0 generation quality.'
-      }
-    }
-  } else if (family === 'gpt-image') {
+  if (family === 'gpt-image') {
     properties.size = { type: 'string', description: 'GPT image size, such as 1024x1024 or auto.' }
     properties.quality = { type: 'string', description: 'GPT image quality.' }
     properties.output_format = {
@@ -1102,6 +1017,11 @@ function imageToolDefinition(options = {}) {
     properties.size = { type: 'string', description: 'DALL-E image size.' }
     properties.quality = { type: 'string', description: 'DALL-E image quality.' }
     properties.style = { type: 'string', description: 'DALL-E style.' }
+    properties.response_format = {
+      type: 'string',
+      enum: ['url', 'b64_json'],
+      description: 'DALL-E response format.'
+    }
   }
 
   return {

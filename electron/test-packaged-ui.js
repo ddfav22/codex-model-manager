@@ -563,6 +563,28 @@ async function main() {
       const pathRevealWorks = String(document.body?.textContent || '').includes(${JSON.stringify(deletionProjectPath)})
       buttonsByLabel('隐藏路径')[0]?.click()
       await wait(100)
+      const safeDeleteButton = buttonsByLabel('删除筛选内容')[0]
+      safeDeleteButton?.click()
+      await wait(100)
+      const safeDeleteDialog = document.querySelector('[role="dialog"]')
+      const safeDeleteText = String(safeDeleteDialog?.textContent || '')
+      const safeDeleteConfirmation =
+        safeDeleteText.includes('不会删除磁盘上的项目文件夹') && safeDeleteText.includes('确认删除筛选内容')
+      Array.from(safeDeleteDialog?.querySelectorAll('button') || [])
+        .find(element => String(element.textContent || '').trim() === '取消')
+        ?.click()
+      await wait(100)
+      const folderDeleteButton = buttonsByLabel('清理项目文件夹')[0]
+      folderDeleteButton?.click()
+      await wait(100)
+      const folderDeleteDialog = document.querySelector('[role="dialog"]')
+      const folderDeleteText = String(folderDeleteDialog?.textContent || '')
+      const folderDeleteConfirmation =
+        folderDeleteText.includes('确认删除对话并清理项目文件夹') && folderDeleteText.includes('项目文件夹及其内容')
+      Array.from(folderDeleteDialog?.querySelectorAll('button') || [])
+        .find(element => String(element.textContent || '').trim() === '取消')
+        ?.click()
+      await wait(100)
       const readableTextFound = Array.from(document.querySelectorAll('p')).some(element => {
         const style = getComputedStyle(element)
         const fontSize = Number.parseFloat(style.fontSize || '0')
@@ -577,8 +599,17 @@ async function main() {
       const importOpened = clickControl('导入')
 
       await wait(100)
-      const importDialog = document.querySelector('[role="dialog"]')
+      const importDialog =
+        Array.from(document.querySelectorAll('[role="dialog"]')).find(dialog =>
+          String(dialog.textContent || '').includes('导入会话或项目')
+        ) || document.querySelector('[role="dialog"]')
       const importText = String(importDialog?.textContent || '')
+      const importButtons = importDialog
+        ? Array.from(importDialog.querySelectorAll('button')).map(element => ({
+            text: String(element.textContent || '').trim(),
+            ariaLabel: String(element.getAttribute('aria-label') || '').trim()
+          }))
+        : []
       clickControl('取消')
       await wait(100)
       const exportOpened = clickControl('导出')
@@ -607,6 +638,10 @@ async function main() {
         pathControlCount: pathButtons.length,
         pathInitiallyHidden,
         pathRevealWorks,
+        safeDeleteButtonFound: Boolean(safeDeleteButton),
+        safeDeleteConfirmation,
+        folderDeleteButtonFound: Boolean(folderDeleteButton),
+        folderDeleteConfirmation,
         readableTextFound,
         topImportCount,
         topExportCount,
@@ -614,8 +649,12 @@ async function main() {
         legacyImportProjectCount,
         importOpened,
         importDialogFound: Boolean(importDialog),
-        importSessionChoice: importText.includes('导入会话文件（.jsonl）'),
-        importProjectChoice: importText.includes('导入项目文件夹'),
+        importSessionChoice:
+          importText.includes('导入会话文件（.jsonl）') ||
+          importButtons.some(item => /导入会话文件/.test(item.text) || /导入会话文件/.test(item.ariaLabel)),
+        importProjectChoice:
+          importText.includes('导入项目文件夹') ||
+          importButtons.some(item => /导入项目文件夹/.test(item.text) || /导入项目文件夹/.test(item.ariaLabel)),
         exportOpened,
         exportDialogFound: Boolean(exportDialog),
         exportSessionChoice: exportText.includes('会话'),
@@ -648,7 +687,11 @@ async function main() {
     const deletionSmoke = await cdp.evaluate(`(async () => {
       const result = await window.codexManager.deleteConversationData({
         scope: 'active',
-        projectPath: ${JSON.stringify(deletionProjectPath)}
+        projectPath: ${JSON.stringify(deletionProjectPath)},
+        // This smoke intentionally exercises the destructive path.  The
+        // renderer's default "删除筛选内容" action is records-only and must
+        // never remove a project folder unless this flag is explicit.
+        removeProjectFolders: true
       })
 
       return {
@@ -656,6 +699,7 @@ async function main() {
         skippedSessionCount: result.skippedSessionCount,
         deletedProjectCount: result.deletedProjectCount,
         skippedProjectCount: result.skippedProjectCount,
+        removeProjectFolders: result.removeProjectFolders,
         configurationError: result.configurationError,
         indexDeleteOk: result.indexDelete?.ok,
         indexRefreshOk: result.indexRefresh?.ok
@@ -784,6 +828,10 @@ async function main() {
       result.conversationTransferUi?.pathControlCount >= 2,
       result.conversationTransferUi?.pathInitiallyHidden === true,
       result.conversationTransferUi?.pathRevealWorks === true,
+      result.conversationTransferUi?.safeDeleteButtonFound === true,
+      result.conversationTransferUi?.safeDeleteConfirmation === true,
+      result.conversationTransferUi?.folderDeleteButtonFound === true,
+      result.conversationTransferUi?.folderDeleteConfirmation === true,
       result.conversationTransferUi?.readableTextFound === true,
       result.conversationTransferUi?.topImportCount === 1,
       result.conversationTransferUi?.topExportCount === 1,
@@ -811,6 +859,7 @@ async function main() {
       result.deletionSmoke?.skippedSessionCount === 0,
       result.deletionSmoke?.deletedProjectCount === 1,
       result.deletionSmoke?.skippedProjectCount === 0,
+      result.deletionSmoke?.removeProjectFolders === true,
       !result.deletionSmoke?.configurationError,
       result.deletionFilesRemoved === true,
       result.deletionLog?.deletedSessionCount === 1,

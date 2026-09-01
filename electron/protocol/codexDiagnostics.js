@@ -100,7 +100,7 @@ function diagnosticMessage(diagnostic) {
     case 'upstream_rate_limit':
       return '模型渠道请求过多，当前请求未完成。'
     case 'upstream_server_error':
-      return '模型渠道服务异常，当前请求未完成。'
+      return '上游模型服务返回 5xx，当前请求未完成；切换器已安全收口，请稍后重试或切换渠道。'
     case 'upstream_request_rejected':
       return '模型渠道拒绝了当前请求，请检查渠道和模型配置。'
     case 'context_too_large':
@@ -133,7 +133,9 @@ function publicDiagnosticSummary(diagnostic) {
     codexThreadId: codexId(diagnostic.codexThreadId),
     codexTurnId: codexId(diagnostic.codexTurnId),
     upstreamStatus: Number(diagnostic.upstreamStatus || 0),
-    upstreamRetryCount: Number(diagnostic.upstreamRetryCount || 0)
+    upstreamRetryCount: Number(diagnostic.upstreamRetryCount || 0),
+    upstreamRetryDelayMs: Number(diagnostic.upstreamRetryDelayMs || 0),
+    upstreamRequestId: String(diagnostic.upstreamRequestId || '').slice(0, 160)
   }
 }
 

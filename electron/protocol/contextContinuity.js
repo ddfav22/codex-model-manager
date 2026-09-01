@@ -309,7 +309,7 @@ function recoveryConversationContext(messages, options = {}) {
 
   // A Skill result is often an otherwise ordinary tool/user message that is
   // older than the generic tail. Keep the latest two Skill-bearing records so
-  // a bounded Grok recovery still has the procedure it was asked to follow.
+  // a bounded recovery still has the procedure it was asked to follow.
   let skillMessages = 0
   for (let index = source.length - 1; index >= 0 && skillMessages < 2; index -= 1) {
     if (!isSkillContextMessage(source[index])) continue

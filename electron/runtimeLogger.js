@@ -11,7 +11,7 @@ let activeLogPath = ''
 function redactString(value) {
   return String(value)
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(?:sk|sess|paidgrok)[-_][A-Za-z0-9._~+/=-]{8,}/gi, '[REDACTED]')
+    .replace(/\b(?:sk|sess)[-_][A-Za-z0-9._~+/=-]{8,}/gi, '[REDACTED]')
     .slice(0, MAX_DETAIL_LENGTH)
 }
 

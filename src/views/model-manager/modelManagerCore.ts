@@ -62,8 +62,7 @@ export const manualModelSuggestions = [
   'gpt-5.3-codex',
   'gpt-5.2',
   'o3',
-  'o4-mini',
-  'gpt-image-1'
+  'o4-mini'
 ]
 
 export const menuItems: Array<{ id: Section; label: string; icon: string }> = [

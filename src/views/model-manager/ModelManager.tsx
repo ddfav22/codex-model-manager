@@ -76,6 +76,8 @@ import { PackageRow } from './components/PackageRow'
 import { PathDisclosure } from './components/PathDisclosure'
 import { UpdateButton } from './components/UpdateButton'
 
+type ConversationDeleteMode = 'records' | 'records-and-project-folders'
+
 const ModelManager = () => {
   const [status, setStatus] = useState<CodexStatus>()
   const [section, setSection] = useState<Section>('channels')
@@ -142,6 +144,7 @@ const ModelManager = () => {
   const issues = status?.diagnostics.issues || []
   const editingProvider = form.id ? status?.providers.find(provider => provider.id === form.id) : undefined
   const displayedApiKey = form.apiKey || (apiKeyVisible ? savedApiKey : '')
+  const initialBackupReady = Boolean(status?.initialBackup.exists && status.initialBackup.valid !== false)
 
   const sessionCounts = useMemo(
     () => ({
@@ -189,6 +192,24 @@ const ModelManager = () => {
     })
   }, [conversationProject, conversationQuery, status])
 
+  const relatedProjectPathCount = useMemo(() => {
+    const paths = new Set<string>()
+
+    filteredProjects.forEach(project => {
+      const normalized = project.path.trim().toLowerCase()
+
+      if (normalized) paths.add(normalized)
+    })
+
+    filteredSessions.forEach(session => {
+      const normalized = session.cwd.trim().toLowerCase()
+
+      if (normalized) paths.add(normalized)
+    })
+
+    return paths.size
+  }, [filteredProjects, filteredSessions])
+
   const taskRecoverySession = useMemo(() => {
     const taskId = taskRecoveryId.trim().toLowerCase()
 
@@ -209,6 +230,25 @@ const ModelManager = () => {
     if (!bridge) return
 
     setStatus(await bridge.getStatus(forceCodexTargetScan))
+  }
+
+  // A file mutation can finish before the renderer's previous status snapshot
+  // has settled.  Refresh defensively after conversation/project changes so a
+  // deleted row cannot reappear merely because the UI retained stale state.
+  const refreshAfterConversationMutation = async (fallbackStatus: CodexStatus) => {
+    setStatus(fallbackStatus)
+
+    if (!getBridge()) return false
+
+    try {
+      await refresh(false)
+
+      return true
+    } catch {
+      // The mutation itself already succeeded; keep its status visible and let
+      // the caller report any index/restart warning separately.
+      return false
+    }
   }
 
   const inspectToolRuntime = async () => {
@@ -803,15 +843,33 @@ const ModelManager = () => {
   const restoreInitialBackup = () =>
     setConfirmDialog({
       title: '恢复初始 Codex 状态',
-      body: '将恢复本工具第一次运行时捕获的 Provider、API 登录状态、config.toml 和模型目录。\n\n如果当时是全新、未登录的 ChatGPT.exe，恢复后也会回到未登录状态。sessions、archived_sessions 和本地项目文件夹不会删除；config.toml 会按首次快照原样恢复。',
+      body: '将把 config.toml 按本工具首次快照原样恢复，并清除当前由本工具创建的登录、NewAPI 渠道、模型目录、别名和客户端项目索引状态。首次快照中的 API 登录不会复制回当前 auth.json。\n\n默认保留 sessions、archived_sessions 和本地项目文件夹；恢复后需要重新登录或重新配置渠道，并手动重启 Codex。此操作会改变当前配置，请先确认。',
       confirmText: '恢复初始状态',
       action: async () => {
         const result = await requireBridge().restoreInitialBackup()
 
-        setStatus(result.status)
+        const listRefreshed = await refreshAfterConversationMutation(result.status)
+        const reset = result.freshReset
+        const environmentErrors = reset?.environmentErrors || []
+
+        const restartText =
+          result.restart?.ok === false
+            ? `自动重启未完成：${result.restart.error ? cleanErrorMessage(result.restart.error) : '请手动重启 Codex'}`
+            : '请手动重启 Codex 使配置生效'
+
+        const details = [
+          reset ? `已清除 ${reset.removedFiles.length} 个本工具状态文件` : '',
+          reset?.clearedEnvironmentNames.length
+            ? `已清除 ${reset.clearedEnvironmentNames.length} 个本工具环境变量`
+            : '',
+          environmentErrors.length ? `${environmentErrors.length} 个环境变量未能从系统移除` : ''
+        ].filter(Boolean)
+
         setMessage({
-          type: 'success',
-          text: '已恢复初始 Codex 状态。程序不会自动打开 Codex，请手动关闭并重新打开 Codex。'
+          type: environmentErrors.length || result.restart?.ok === false || !listRefreshed ? 'warning' : 'success',
+          text: `初始 config.toml 已原样恢复；${details.join('，') || '已清除本工具状态'}。${restartText}${
+            listRefreshed ? '' : '；管理器列表刷新失败，请点击“重新扫描”'
+          }。`
         })
       }
     })
@@ -859,38 +917,76 @@ const ModelManager = () => {
   const deleteSession = (session: CodexSession) =>
     setConfirmDialog({
       title: '永久删除对话',
-      body: `将永久删除“${session.title}”的本地对话记录。\n\n如果文件正被 Codex 使用，程序会提示你先关闭相关程序后重试。\n\n此操作不可恢复。`,
+      body: `将永久删除“${session.title || '未命名对话'}”的本地对话记录，并尝试同步 Codex 客户端索引。\n\n不会删除关联项目文件夹或项目内其他文件。如果文件正被 Codex 使用，程序会提示你先关闭相关程序后重试。\n\n此操作不可恢复。`,
       confirmText: '永久删除',
       action: async () => {
         const result = await requireBridge().deleteSession(session.path)
 
-        setStatus(result.status)
-        setMessage({ type: 'success', text: '对话文件已永久删除。' })
+        const listRefreshed = await refreshAfterConversationMutation(result.status)
+
+        const indexWarnings = [
+          result.indexDelete?.ok === false ? '客户端索引未同步' : '',
+          result.indexRefresh?.ok === false ? '索引刷新失败' : '',
+          result.stateIndexPrune?.ok === false ? '索引重建回退也失败' : '',
+          result.configurationError ? '项目配置记录未能同步' : '',
+          !listRefreshed ? '管理器列表刷新失败' : ''
+        ].filter(Boolean)
+
+        const pruneText = result.globalStatePrune?.changed
+          ? `已清理 ${result.globalStatePrune.removedThreadCount} 条客户端任务状态`
+          : ''
+
+        const projectText = result.configurationError
+          ? '关联项目记录同步失败'
+          : result.projectRecordRemoved
+            ? '关联项目记录已移除（磁盘项目文件夹保留）'
+            : '关联项目记录已保留'
+
+        const indexText = indexWarnings.length
+          ? `${indexWarnings.join('、')}，请点击“修复客户端索引”后重启 Codex`
+          : result.indexDelete
+            ? `客户端索引已同步${pruneText ? `，${pruneText}` : ''}`
+            : `列表已刷新${pruneText ? `，${pruneText}` : ''}；如果 Codex 仍显示该对话，请点击“修复客户端索引”后重启`
+
+        setMessage({
+          type: indexWarnings.length ? 'warning' : result.indexDelete ? 'success' : 'info',
+          text: `对话文件已永久删除；${projectText}；${indexText}${
+            result.configurationError ? `；${cleanErrorMessage(result.configurationError)}` : ''
+          }${listRefreshed ? '' : '；管理器列表刷新失败，请点击“重新扫描”'}。`
+        })
       }
     })
 
-  const deleteFilteredConversationData = () => {
+  const deleteFilteredConversationData = (mode: ConversationDeleteMode = 'records') => {
+    const removeProjectFolders = mode === 'records-and-project-folders'
+
     const filters: ConversationDeleteFilters = {
       scope: conversationScope,
       query: conversationQuery,
-      projectPath: conversationProject
+      projectPath: conversationProject,
+      removeProjectFolders
     }
 
-    const projectText = conversationProject
-      ? `当前项目：${conversationProject}`
+    const scopeText = conversationScope === 'archived' ? '已归档对话' : '未归档对话'
+
+    const filterText = conversationProject
+      ? `项目“${conversationProject}”`
       : conversationQuery
-        ? `当前搜索：${conversationQuery}`
-        : conversationScope === 'archived'
-          ? '当前范围：全部已归档对话'
-          : '当前范围：全部未归档对话'
+        ? `搜索“${conversationQuery}”`
+        : `全部${scopeText}`
+
+    const projectPathText = `${relatedProjectPathCount} 个关联项目路径`
 
     setConfirmDialog({
-      title: '一键删除对话和项目文件夹',
+      title: removeProjectFolders ? '确认删除对话并清理项目文件夹' : '确认删除筛选内容',
       body:
-        `${projectText}\n\n` +
-        `将永久删除当前筛选范围内的 ${filteredSessions.length} 个对话文件，并删除相关项目文件夹/项目记录（当前列表 ${filteredProjects.length} 个项目）。\n\n` +
-        '项目文件夹会从磁盘删除；受保护目录会被自动跳过。如果对话文件正被 Codex 占用，程序会关闭 Codex 后重试。此操作不可恢复。',
-      confirmText: '永久删除',
+        `删除范围：${filterText}\n` +
+        `对话：${filteredSessions.length} 个 · 项目记录：${filteredProjects.length} 个 · ${projectPathText}\n\n` +
+        (removeProjectFolders
+          ? '将永久删除匹配的对话文件、项目记录，并尝试删除关联项目文件夹及其内容。受保护目录或被占用的路径会自动跳过。'
+          : '将永久删除匹配的对话文件，并从 Codex 项目列表移除匹配的项目记录。不会删除磁盘上的项目文件夹或其中的其他文件。') +
+        '\n\n如果对话文件正被 Codex 使用，程序会尝试关闭相关客户端后重试。此操作不可恢复。',
+      confirmText: removeProjectFolders ? '删除并清理文件夹' : '永久删除筛选内容',
       action: async () => {
         const result = await requireBridge().deleteConversationData(filters)
 
@@ -898,20 +994,44 @@ const ModelManager = () => {
           result.skippedSessionCount > 0 ||
           result.skippedProjectCount > 0 ||
           Boolean(result.configurationError) ||
-          result.indexRefresh?.ok === false
+          result.indexDelete?.ok === false ||
+          result.indexRefresh?.ok === false ||
+          result.stateIndexPrune?.ok === false
 
         const warningParts = [
           result.skippedSessionCount ? `${result.skippedSessionCount} 个对话因占用或权限问题未删除` : '',
           result.skippedProjectCount ? `${result.skippedProjectCount} 个项目因路径保护或占用被跳过` : '',
           result.configurationError ? '项目配置更新失败' : '',
+          result.indexDelete?.ok === false ? '客户端索引未能删除对应任务' : '',
           result.indexRefresh?.ok === false ? 'Codex 对话索引未能自动刷新，请手动重启 Codex' : '',
+          result.stateIndexPrune?.ok === false ? '索引重建回退也失败' : '',
           result.stoppedProcessCount ? `为释放占用已关闭 ${result.stoppedProcessCount} 个 Codex 进程` : ''
         ].filter(Boolean)
 
-        setStatus(result.status)
+        const listRefreshed = await refreshAfterConversationMutation(result.status)
+
+        const deletedTargetText = removeProjectFolders
+          ? `${result.deletedProjectCount} 个项目文件夹`
+          : `${result.deletedProjectCount} 个项目记录（磁盘文件夹已保留）`
+
+        const pruneText = result.globalStatePrune?.changed
+          ? `客户端项目状态已清理 ${result.globalStatePrune.removedThreadCount} 条`
+          : ''
+
+        const indexText =
+          result.indexDelete?.ok === true
+            ? `客户端索引已同步${pruneText ? `，${pruneText}` : ''}`
+            : result.indexDelete?.ok === false
+              ? result.stateIndexPrune?.ok === true && !result.stateIndexPrune.skipped
+                ? '客户端索引未同步，已移除本地索引缓存；请重启 Codex 让其重建'
+                : '客户端索引未同步，请点击“修复客户端索引”后重启 Codex'
+              : `已刷新本地列表${pruneText ? `，${pruneText}` : ''}；如 Codex 仍显示旧任务，请点击“修复客户端索引”后重启`
+
+        const refreshText = listRefreshed ? '' : '；管理器列表刷新失败，请点击“重新扫描”'
+
         setMessage({
-          type: hasWarnings ? 'warning' : 'success',
-          text: `已删除 ${result.deletedSessionCount} 个对话、${result.deletedProjectCount} 个项目文件夹${
+          type: hasWarnings || !listRefreshed ? 'warning' : 'success',
+          text: `已删除 ${result.deletedSessionCount} 个对话、${deletedTargetText}；${indexText}${refreshText}${
             warningParts.length ? `；${warningParts.join('；')}。` : '。'
           }`
         })
@@ -967,8 +1087,15 @@ const ModelManager = () => {
       body: `${project.name}\n只会从 Codex 项目列表删除，不会删除磁盘上的项目文件。`,
       confirmText: '删除',
       action: async () => {
-        setStatus(await requireBridge().deleteProject(project.path))
-        setMessage({ type: 'success', text: '项目已从配置中删除。' })
+        const nextStatus = await requireBridge().deleteProject(project.path)
+
+        await refreshAfterConversationMutation(nextStatus)
+
+        const pruneText = nextStatus.globalStatePrune?.changed
+          ? `已清理 ${nextStatus.globalStatePrune.removedProjectCount} 条客户端项目状态`
+          : '客户端项目状态无需清理'
+
+        setMessage({ type: 'success', text: `项目已从配置中删除，磁盘文件夹保留；${pruneText}。` })
       }
     })
 
@@ -1263,9 +1390,20 @@ const ModelManager = () => {
               color='error'
               disabled={busy || (!filteredSessions.length && !filteredProjects.length)}
               startIcon={<i className='ri-delete-bin-2-line' />}
-              onClick={deleteFilteredConversationData}
+              aria-label='删除筛选对话和项目记录'
+              onClick={() => deleteFilteredConversationData('records')}
             >
-              一键删除
+              删除筛选内容
+            </Button>
+            <Button
+              variant='outlined'
+              color='warning'
+              disabled={busy || !relatedProjectPathCount}
+              startIcon={<i className='ri-delete-bin-2-line' />}
+              aria-label='删除筛选内容并清理项目文件夹'
+              onClick={() => deleteFilteredConversationData('records-and-project-folders')}
+            >
+              清理项目文件夹
             </Button>
             <Button
               variant='contained'
@@ -1300,6 +1438,7 @@ const ModelManager = () => {
             select
             size='small'
             label='项目'
+            inputProps={{ 'aria-label': '按项目筛选对话和项目记录' }}
             value={conversationProject}
             onChange={event => setConversationProject(event.target.value)}
             sx={{ minInlineSize: { lg: 230 } }}
@@ -1315,6 +1454,7 @@ const ModelManager = () => {
             fullWidth
             size='small'
             label='搜索对话或项目'
+            inputProps={{ 'aria-label': '搜索对话或项目名称、任务 ID 或路径' }}
             value={conversationQuery}
             onChange={event => setConversationQuery(event.target.value)}
             InputProps={{
@@ -1340,6 +1480,29 @@ const ModelManager = () => {
             </Button>
           )}
         </Stack>
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          spacing={1}
+          alignItems={{ xs: 'flex-start', sm: 'center' }}
+          sx={{ mt: 2 }}
+          aria-label='当前筛选结果统计'
+        >
+          <Chip
+            size='small'
+            color={filteredSessions.length ? 'primary' : 'default'}
+            variant='tonal'
+            label={`对话 ${filteredSessions.length}`}
+          />
+          <Chip
+            size='small'
+            color={filteredProjects.length ? 'primary' : 'default'}
+            variant='tonal'
+            label={`项目记录 ${filteredProjects.length}`}
+          />
+          <Typography variant='caption' color='text.secondary'>
+            默认删除不会动磁盘项目；只有点击“清理项目文件夹”才会尝试删除项目目录。
+          </Typography>
+        </Stack>
       </Box>
       <Box sx={listSurfaceSx}>
         <Box
@@ -1353,10 +1516,18 @@ const ModelManager = () => {
             gap: 2
           }}
         >
-          <Typography variant='subtitle1'>{conversationScope === 'archived' ? '已归档对话' : '未归档对话'}</Typography>
-          <Typography variant='caption' color='text.secondary'>
-            显示 {filteredSessions.length} 个
-          </Typography>
+          <Stack direction='row' spacing={1.5} alignItems='center' minWidth={0}>
+            <i
+              className={
+                conversationScope === 'archived' ? 'ri-archive-line text-primary' : 'ri-chat-history-line text-primary'
+              }
+              aria-hidden='true'
+            />
+            <Typography variant='subtitle1'>
+              {conversationScope === 'archived' ? '已归档对话' : '未归档对话'}
+            </Typography>
+          </Stack>
+          <Chip size='small' variant='tonal' label={`显示 ${filteredSessions.length} 个`} />
         </Box>
         <Divider />
         {!filteredSessions.length ? (
@@ -1398,12 +1569,18 @@ const ModelManager = () => {
             gap: 2
           }}
         >
-          <Typography variant='subtitle1'>项目文件</Typography>
-          <Typography variant='caption' color='text.secondary'>
-            显示 {filteredProjects.length} 个
-          </Typography>
+          <Stack direction='row' spacing={1.5} alignItems='center' minWidth={0}>
+            <i className='ri-folder-3-line text-primary' aria-hidden='true' />
+            <Typography variant='subtitle1'>项目记录</Typography>
+          </Stack>
+          <Chip size='small' variant='tonal' label={`显示 ${filteredProjects.length} 个`} />
         </Box>
         <Divider />
+        {filteredProjects.some(project => !project.exists) && (
+          <Alert severity='warning' variant='outlined' sx={{ m: 2 }}>
+            列表中包含失效项目记录。单独移除记录不会删除磁盘文件夹；清理项目文件夹时，失效路径会再次经过安全校验。
+          </Alert>
+        )}
         {!filteredProjects.length ? (
           <EmptyState
             icon='ri-folder-settings-line'
@@ -1549,9 +1726,9 @@ const ModelManager = () => {
 
   const helpText: Record<Section, string> = {
     channels:
-      '本地渠道和在线渠道分区显示。在线渠道启用后仍可更换 Key；模型以该 Key 的 /v1/models 实际结果为准。“检测全部”会逐个验证当前 Key 的已适配模型；通过普通聊天、流式响应、工具调用和工具结果续答的模型会一起进入 Codex 内部切换列表。当前已适配 GPT 与 Grok；未知接口会显示“适配未完成，暂不可用”。Codex 内部下拉框使用原生模型槽位别名映射到实际模型，并按模型分别适配推理强度、推理摘要和速度服务等级。',
+      '本地渠道和在线渠道分区显示。在线渠道启用后仍可更换 Key；模型以该 Key 的 /v1/models 实际结果为准。“检测全部”会逐个验证当前 Key 的 ChatGPT/OpenAI 模型；通过普通聊天、流式响应、工具调用和工具结果续答的模型会一起进入 Codex 内部切换列表。其他模型会显示“仅支持 ChatGPT/OpenAI 模型，暂不可用”。Codex 内部下拉框使用原生模型槽位别名映射到实际模型，并按模型分别适配推理强度、推理摘要和速度服务等级。',
     conversations:
-      '未归档包含正在使用和导入的对话，已归档来自 archived_sessions。统一导入支持对话 JSONL 或项目文件夹；统一导出支持会话 JSONL 或完整项目 ZIP。可以按项目或关键词筛选；永久删除会直接删除电脑上的对话 JSONL 文件且无法恢复。项目删除只移除配置记录，不会删除整个项目文件夹。',
+      '未归档包含正在使用和导入的对话，已归档来自 archived_sessions。统一导入支持对话 JSONL 或项目文件夹；统一导出支持会话 JSONL 或完整项目 ZIP。可以按项目或关键词筛选。默认“删除筛选内容”只删除对话文件和项目记录，不会删除磁盘项目文件夹；只有明确点击“清理项目文件夹”才会尝试删除目录。删除后会刷新列表并报告客户端索引同步结果；如 Codex 仍显示旧任务，请点击“修复客户端索引”并重启。',
     skills:
       '用户 Skill 安装到当前 Codex 使用的 ~/.agents/skills，并兼容显示旧 ~/.codex/skills；导入时校验 SKILL.md 的 name 和 description。',
     agents:
@@ -1560,7 +1737,19 @@ const ModelManager = () => {
 
   return (
     <Stack spacing={4}>
-      {busy && !testingChannelId && !activationRunning && <LinearProgress />}
+      {busy && !testingChannelId && !activationRunning && (
+        <LinearProgress
+          aria-label='操作进行中'
+          sx={{
+            position: 'fixed',
+            insetBlockStart: 0,
+            insetInline: 0,
+            zIndex: theme => theme.zIndex.snackbar + 1,
+            blockSize: 3,
+            borderRadius: 0
+          }}
+        />
+      )}
 
       {activationProgress && (
         <Card
@@ -1568,6 +1757,15 @@ const ModelManager = () => {
           role='status'
           aria-live='polite'
           sx={{
+            position: 'fixed',
+            insetBlockStart: { xs: 12, sm: 20 },
+            insetInlineEnd: { xs: 12, sm: 24 },
+            inlineSize: { xs: 'calc(100vw - 24px)', sm: 430 },
+            maxInlineSize: 'calc(100vw - 24px)',
+            zIndex: theme => theme.zIndex.snackbar,
+            boxShadow: 8,
+            backdropFilter: 'blur(8px)',
+            bgcolor: 'background.paper',
             borderColor:
               activationProgress.status === 'error'
                 ? 'error.main'
@@ -1578,8 +1776,8 @@ const ModelManager = () => {
                     : 'primary.main'
           }}
         >
-          <CardContent sx={{ '&:last-child': { pb: 3 } }}>
-            <Stack spacing={2}>
+          <CardContent sx={{ p: { xs: 2, sm: 2.5 }, '&:last-child': { pb: { xs: 2, sm: 2.5 } } }}>
+            <Stack spacing={1.25}>
               <Stack direction='row' spacing={2} alignItems='center'>
                 {activationProgress.status === 'running' ? (
                   <CircularProgress size={24} />
@@ -1671,6 +1869,11 @@ const ModelManager = () => {
               {[
                 runtimeDiagnostic.model && `模型 ${runtimeDiagnostic.model}`,
                 runtimeDiagnostic.codexThreadId && `任务 ${runtimeDiagnostic.codexThreadId}`,
+                runtimeDiagnostic.upstreamStatus > 0 && `上游 HTTP ${runtimeDiagnostic.upstreamStatus}`,
+                runtimeDiagnostic.upstreamRetryCount > 0 && `已重试 ${runtimeDiagnostic.upstreamRetryCount} 次`,
+                Number(runtimeDiagnostic.upstreamRetryDelayMs || 0) > 0 &&
+                  `重试等待 ${Math.round(Number(runtimeDiagnostic.upstreamRetryDelayMs || 0) / 1000)} 秒`,
+                runtimeDiagnostic.upstreamRequestId && `请求 ID ${runtimeDiagnostic.upstreamRequestId}`,
                 runtimeDiagnostic.capturedAt && new Date(runtimeDiagnostic.capturedAt).toLocaleString()
               ]
                 .filter(Boolean)
@@ -1735,12 +1938,30 @@ const ModelManager = () => {
                   label={status?.diagnostics.codexInstalled ? 'Codex 客户端已安装' : '未发现 Codex 客户端'}
                 />
                 <Chip
-                  color={status?.initialBackup.exists ? 'success' : 'warning'}
+                  color={
+                    status?.initialBackup.valid === false
+                      ? 'error'
+                      : status?.initialBackup.exists
+                        ? 'success'
+                        : 'warning'
+                  }
                   size='small'
                   variant='tonal'
-                  label={status?.initialBackup.exists ? '已备份' : '未备份'}
+                  label={
+                    status?.initialBackup.valid === false
+                      ? '首次备份不可恢复'
+                      : status?.initialBackup.exists
+                        ? '首次备份可用'
+                        : '未创建首次备份'
+                  }
                 />
               </Stack>
+              {status?.initialBackup.valid === false && (
+                <Alert severity='error' variant='outlined' sx={{ mt: -1 }}>
+                  首次快照文件缺失或校验失败，已禁用恢复按钮，避免用当前配置覆盖“初始状态”。
+                  {status.initialBackup.error ? ` ${cleanErrorMessage(status.initialBackup.error)}` : ''}
+                </Alert>
+              )}
               <Button
                 variant='outlined'
                 color='secondary'
@@ -1783,7 +2004,7 @@ const ModelManager = () => {
               <Button
                 variant='outlined'
                 color='secondary'
-                disabled={busy || !status?.initialBackup.exists}
+                disabled={busy || !initialBackupReady}
                 startIcon={<i className='ri-history-line' />}
                 onClick={restoreInitialBackup}
               >

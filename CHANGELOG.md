@@ -2,6 +2,17 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.106 - 2026-09-01
+
+### ChatGPT-only runtime, fresh restore, and upstream diagnostics
+
+- 移除运行时 Grok/第三方模型适配；NewAPI 模型目录、手动选择、能力和协议路由现在只接受 ChatGPT/OpenAI 模型。
+- “恢复初始 Codex”改为真实的首次状态恢复：先停止受管理客户端，按不可变快照恢复配置，清理当前登录、索引和管理器状态，并保留会话记录与项目文件夹。
+- 配置写入使用固定滚动备份；会话删除默认保留项目文件夹，索引删除失败时执行安全的 SQLite 回退清理，显式的项目文件夹删除需要单独确认。
+- 上游 5xx 仅进行一次有界重试；最终失败转换为 `response.incomplete`/`upstream_server_error`，并在 UI 中显示脱敏请求 ID、重试次数和等待时间，避免泄漏上游错误正文或出现隐藏重连循环。
+- 图片生成统一使用 NewAPI 的 OpenAI 图片接口（默认 `gpt-image-2`），保留 Base64/URL 校验和本地物化。
+- 进度提示改为固定浮层，避免挤压项目和对话管理布局；新增 UI、恢复、删除、5xx 重试与 ChatGPT-only wire 回归测试。
+
 ## 1.2.105 - 2026-09-01
 
 ### ChatGPT-only NewAPI and reliable restore

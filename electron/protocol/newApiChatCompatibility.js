@@ -66,7 +66,7 @@ function mergeStreamedToolArguments(currentValue, incomingValue) {
 
   if (looksLikeJsonSnapshot) return incoming
 
-  // Some NewAPI/Grok relays resend an overlapping suffix instead of a true
+  // Some compatible relays resend an overlapping suffix instead of a true
   // delta (for example `{"input":"echo fo` followed by `fo"}`).  Appending
   // that frame literally corrupts the arguments and makes the host execute a
   // different tool call.  Only apply overlap coalescing to structured-looking
