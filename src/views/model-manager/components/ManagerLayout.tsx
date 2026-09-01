@@ -26,9 +26,11 @@ export const SectionHeader = ({
   >
     <Stack direction='row' spacing={2} alignItems='center'>
       <Typography variant='h5'>{title}</Typography>
-      {typeof count === 'number' && <Chip size='small' variant='tonal' label={count} />}
+      {typeof count === 'number' && (
+        <Chip size='small' variant='tonal' aria-label={`${title}共 ${count} 项`} label={count} />
+      )}
       <Tooltip title='查看说明'>
-        <IconButton size='small' onClick={onHelp}>
+        <IconButton size='small' aria-label={`查看${title}说明`} onClick={onHelp}>
           <i className='ri-question-line' />
         </IconButton>
       </Tooltip>
@@ -38,7 +40,7 @@ export const SectionHeader = ({
 )
 
 export const EmptyState = ({ icon, text }: { icon: string; text: string }) => (
-  <Box sx={{ py: 12, textAlign: 'center' }}>
+  <Box sx={{ py: 12, px: 3, textAlign: 'center' }} role='status' aria-live='polite'>
     <i className={`${icon} text-[44px] text-textDisabled`} />
     <Typography sx={{ mt: 2 }} color='text.secondary'>
       {text}

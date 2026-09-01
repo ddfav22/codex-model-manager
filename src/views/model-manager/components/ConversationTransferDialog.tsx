@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import Alert from '@mui/material/Alert'
 import Button from '@mui/material/Button'
+import Chip from '@mui/material/Chip'
 import Dialog from '@mui/material/Dialog'
 import DialogActions from '@mui/material/DialogActions'
 import DialogContent from '@mui/material/DialogContent'
@@ -66,10 +67,14 @@ export const ConversationTransferDialog = ({
             <Typography color='text.secondary'>
               选择要导入的内容。对话使用 Codex JSONL 文件；项目会选择一个现有文件夹并加入项目列表。
             </Typography>
+            <Alert severity='info' variant='outlined'>
+              导入后会自动刷新本地索引。重复导入前请确认目标文件或项目路径，避免产生重复记录。
+            </Alert>
             <Button
               variant='outlined'
               size='large'
               disabled={busy}
+              aria-label='导入会话文件 JSONL'
               startIcon={<i className='ri-chat-upload-line' />}
               onClick={() => onImport('session')}
               sx={{ justifyContent: 'flex-start', py: 2 }}
@@ -80,6 +85,7 @@ export const ConversationTransferDialog = ({
               variant='outlined'
               size='large'
               disabled={busy}
+              aria-label='导入项目文件夹'
               startIcon={<i className='ri-folder-add-line' />}
               onClick={() => onImport('project')}
               sx={{ justifyContent: 'flex-start', py: 2 }}
@@ -99,17 +105,26 @@ export const ConversationTransferDialog = ({
               onChange={(_event, value: ConversationTransferKind | null) => value && selectKind(value)}
               aria-label='导出内容类型'
             >
-              <ToggleButton value='session' disabled={!sessions.length}>
-                会话
+              <ToggleButton
+                value='session'
+                disabled={!sessions.length}
+                aria-label={`导出会话，共 ${sessions.length} 个`}
+              >
+                会话 <Chip size='small' sx={{ ml: 1 }} label={sessions.length} />
               </ToggleButton>
-              <ToggleButton value='project' disabled={!availableProjects.length}>
-                项目
+              <ToggleButton
+                value='project'
+                disabled={!availableProjects.length}
+                aria-label={`导出项目，共 ${availableProjects.length} 个可用项目`}
+              >
+                项目 <Chip size='small' sx={{ ml: 1 }} label={availableProjects.length} />
               </ToggleButton>
             </ToggleButtonGroup>
             <TextField
               select
               fullWidth
               label={kind === 'session' ? '选择会话' : '选择项目'}
+              inputProps={{ 'aria-label': kind === 'session' ? '选择要导出的会话' : '选择要导出的项目' }}
               value={sourcePath}
               disabled={busy || !options.length}
               onChange={event => setSourcePath(event.target.value)}
@@ -129,6 +144,13 @@ export const ConversationTransferDialog = ({
             {!options.length && (
               <Alert severity='info'>
                 {kind === 'session' ? '当前没有可导出的会话。' : '当前没有路径有效的项目。'}
+              </Alert>
+            )}
+            {sourcePath && options.length > 0 && (
+              <Alert severity='info' variant='outlined'>
+                {kind === 'session'
+                  ? '导出会话会生成可重新导入的 JSONL 文件，不会修改原始记录。'
+                  : '导出项目会生成 ZIP 压缩包，不会删除或移动原项目文件夹。'}
               </Alert>
             )}
           </Stack>
