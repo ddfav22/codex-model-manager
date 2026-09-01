@@ -25,6 +25,7 @@ assert.match(modelManager, /aria-label='当前筛选结果统计'/)
 
 assert.match(conversationRows, /aria-label='永久删除对话'/)
 assert.match(conversationRows, /aria-label='移除项目记录'/)
+assert.match(conversationRows, /aria-label='恢复未完成任务'/)
 assert.match(conversationRows, /仅移除记录/)
 assert.match(transferDialog, /重复导入前请确认目标文件或项目路径/)
 assert.match(transferDialog, /不会删除或移动原项目文件夹/)

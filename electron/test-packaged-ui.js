@@ -563,6 +563,28 @@ async function main() {
       const pathRevealWorks = String(document.body?.textContent || '').includes(${JSON.stringify(deletionProjectPath)})
       buttonsByLabel('隐藏路径')[0]?.click()
       await wait(100)
+      const safeDeleteButton = buttonsByLabel('删除筛选内容')[0]
+      safeDeleteButton?.click()
+      await wait(100)
+      const safeDeleteDialog = document.querySelector('[role="dialog"]')
+      const safeDeleteText = String(safeDeleteDialog?.textContent || '')
+      const safeDeleteConfirmation =
+        safeDeleteText.includes('不会删除磁盘上的项目文件夹') && safeDeleteText.includes('确认删除筛选内容')
+      Array.from(safeDeleteDialog?.querySelectorAll('button') || [])
+        .find(element => String(element.textContent || '').trim() === '取消')
+        ?.click()
+      await wait(100)
+      const folderDeleteButton = buttonsByLabel('清理项目文件夹')[0]
+      folderDeleteButton?.click()
+      await wait(100)
+      const folderDeleteDialog = document.querySelector('[role="dialog"]')
+      const folderDeleteText = String(folderDeleteDialog?.textContent || '')
+      const folderDeleteConfirmation =
+        folderDeleteText.includes('确认删除对话并清理项目文件夹') && folderDeleteText.includes('项目文件夹及其内容')
+      Array.from(folderDeleteDialog?.querySelectorAll('button') || [])
+        .find(element => String(element.textContent || '').trim() === '取消')
+        ?.click()
+      await wait(100)
       const readableTextFound = Array.from(document.querySelectorAll('p')).some(element => {
         const style = getComputedStyle(element)
         const fontSize = Number.parseFloat(style.fontSize || '0')
@@ -607,6 +629,10 @@ async function main() {
         pathControlCount: pathButtons.length,
         pathInitiallyHidden,
         pathRevealWorks,
+        safeDeleteButtonFound: Boolean(safeDeleteButton),
+        safeDeleteConfirmation,
+        folderDeleteButtonFound: Boolean(folderDeleteButton),
+        folderDeleteConfirmation,
         readableTextFound,
         topImportCount,
         topExportCount,
@@ -784,6 +810,10 @@ async function main() {
       result.conversationTransferUi?.pathControlCount >= 2,
       result.conversationTransferUi?.pathInitiallyHidden === true,
       result.conversationTransferUi?.pathRevealWorks === true,
+      result.conversationTransferUi?.safeDeleteButtonFound === true,
+      result.conversationTransferUi?.safeDeleteConfirmation === true,
+      result.conversationTransferUi?.folderDeleteButtonFound === true,
+      result.conversationTransferUi?.folderDeleteConfirmation === true,
       result.conversationTransferUi?.readableTextFound === true,
       result.conversationTransferUi?.topImportCount === 1,
       result.conversationTransferUi?.topExportCount === 1,

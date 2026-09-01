@@ -39,7 +39,7 @@ export const SessionRow = ({
   >
     <Stack spacing={1}>
       <Stack direction='row' spacing={1.5} alignItems='center' flexWrap='wrap' minWidth={0}>
-        <i className='ri-chat-3-line text-[20px] text-primary' aria-hidden='true' />
+        <i className='ri-chat-history-line text-[20px] text-primary' aria-hidden='true' />
         <Typography
           variant='subtitle1'
           title={session.title}
