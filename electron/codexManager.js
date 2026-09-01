@@ -31,6 +31,8 @@ const {
 const {
   REASONING_DESCRIPTIONS,
   aggregateModelTests,
+  filterChatGptModels,
+  isChatGptModel,
   modelAdapterProfile,
   modelCapabilityMap,
   modelListFromProvider,
@@ -2804,13 +2806,18 @@ function readUserEnvVar(name) {
 function backupConfig(configPath, text, suffix = 'change') {
   if (!text.trim()) return null
 
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[-:TZ.]/g, '')
-    .slice(0, 14)
-  const backupPath = `${configPath}.bak-codex-manager-${suffix}-${stamp}`
+  // Keep one recoverable rolling snapshot instead of creating a timestamped
+  // file for every button click.  The initial snapshot is stored separately
+  // under the manager state directory and is never overwritten.
+  const backupPath = `${configPath}.bak-codex-manager`
+  let existing = ''
+  try {
+    existing = fs.readFileSync(backupPath, 'utf8')
+  } catch {
+    // The rolling snapshot does not exist yet.
+  }
 
-  fs.writeFileSync(backupPath, text, 'utf8')
+  if (existing !== text) fs.writeFileSync(backupPath, text, 'utf8')
 
   return backupPath
 }
@@ -3466,7 +3473,12 @@ function ensureInitialBackup(paths, configText) {
     createdAt: existing.createdAt || createdAt
   }
 
-  if (!existing.path) fs.writeFileSync(backupPath, configText, 'utf8')
+  // A stale metadata file must not make restore a no-op.  Recreate the
+  // referenced snapshot whenever its payload was removed or moved.
+  if (!fs.existsSync(meta.path)) {
+    ensureDir(path.dirname(meta.path))
+    fs.writeFileSync(meta.path, configText, 'utf8')
+  }
   if ((!existing.path || !existing.authCaptured) && authBackupPath) fs.copyFileSync(paths.authPath, authBackupPath)
   if ((!existing.path || !existing.modelsCacheCaptured) && modelsCacheBackupPath) {
     fs.copyFileSync(paths.modelsCachePath, modelsCacheBackupPath)
@@ -4492,8 +4504,11 @@ function restoreInitialBackup(options = {}) {
   const modelsCacheSnapshot = backupFile(paths.modelsCachePath, 'before-initial-restore')
 
   try {
-    const restoredConfig = initialBackup.configExists ? readText(initialBackup.path) : ''
-    const nextConfig = preserveProjectBlocks(current, restoredConfig)
+    // A first-run restore must be an actual Codex restore: put config.toml
+    // back exactly as it was captured, including the original provider and
+    // project tables.  Project/session data lives outside config.toml and is
+    // therefore not deleted by this operation.
+    const nextConfig = initialBackup.configExists ? readText(initialBackup.path) : ''
 
     if (nextConfig.trim()) writeText(paths.configPath, nextConfig)
     else fs.rmSync(paths.configPath, { force: true })
@@ -6856,6 +6871,8 @@ module.exports = {
     reconcileAuthForCustomProvider,
     buildModelAliasAssignments,
     modelAdapterProfile,
+    filterChatGptModels,
+    isChatGptModel,
     modelDisplayName,
     modelReasoningProfile,
     modelWireApiMap,
@@ -6876,6 +6893,8 @@ module.exports = {
     removeTableBlock,
     setRootKey,
     writeApiKeyAuth,
-    writeChannelModelCatalog
+    writeChannelModelCatalog,
+    backupConfig,
+    ensureInitialBackup
   }
 }

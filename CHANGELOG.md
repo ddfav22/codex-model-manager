@@ -2,6 +2,15 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.105 - 2026-09-01
+
+### ChatGPT-only NewAPI and reliable restore
+
+- NewAPI model discovery and manual suggestions now expose only ChatGPT/OpenAI model IDs; Grok/Claude/Gemini models are not offered for new channels.
+- Initial Codex restore now writes the captured `config.toml` byte-for-byte instead of silently preserving managed project blocks, and stale backup metadata is recreated when its payload is missing.
+- Configuration mutations use one rolling `config.toml.bak-codex-manager` snapshot instead of generating a new timestamped backup on every operation.
+- Existing conversation/project management actions remain available with clearer ChatGPT-only documentation and online update metadata.
+
 ## 1.2.104 - 2026-08-21
 
 ### Grok/NewAPI image generation

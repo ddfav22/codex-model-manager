@@ -61,20 +61,9 @@ export const manualModelSuggestions = [
   'gpt-5.4-nano',
   'gpt-5.3-codex',
   'gpt-5.2',
-  'claude-fable-5',
-  'claude-sonnet-5',
-  'claude-opus-4-8',
-  'claude-haiku-4-5',
-  'claude-haiku-4-5-20251001',
-  'grok-4.5',
-  'grok-4.5-latest',
-  'gemini-3.5-flash',
-  'gemini-3.1-pro-preview',
-  'gemini-3.1-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-2.5-pro',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite'
+  'o3',
+  'o4-mini',
+  'gpt-image-1'
 ]
 
 export const menuItems: Array<{ id: Section; label: string; icon: string }> = [
@@ -152,7 +141,16 @@ export const uniqueModels = (values: Array<string | undefined>) => {
   return models
 }
 
-export const providerModels = (provider: RelayProvider) => uniqueModels([...(provider.models || []), provider.model])
+export const providerModels = (provider: RelayProvider) => {
+  const models = uniqueModels([...(provider.models || []), provider.model])
+
+  // NewAPI is ChatGPT-only in the desktop workflow.  Keep legacy models in
+  // the on-disk channel for migration/rollback, but never offer them in the
+  // model selector or activation controls.
+  if (provider.keySource !== 'newapi') return models
+
+  return models.filter(model => /^(?:gpt(?:-|$)|o[1-9](?:-|$)|codex(?:-|$))/i.test(model))
+}
 
 export const modelTest = (provider: RelayProvider, model: string) => provider.modelTests?.[model] || null
 export const modelCapability = (provider: RelayProvider, model: string) => provider.modelCapabilities?.[model] || null

@@ -1,0 +1,41 @@
+const assert = require('assert')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+
+const manager = require('./codexManager')
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-chatgpt-only-'))
+const codexHome = path.join(root, '.codex')
+const stateDir = path.join(codexHome, 'codex-model-manager')
+const configPath = path.join(codexHome, 'config.toml')
+const authPath = path.join(codexHome, 'auth.json')
+const modelsCachePath = path.join(codexHome, 'models_cache.json')
+const options = { codexHome, stateDir, configPath, authPath, modelsCachePath, skipEnvWrite: true, dryRunRestart: true }
+
+fs.mkdirSync(codexHome, { recursive: true })
+const initialConfig = '[features]\nweb_search = true\n\n[projects."C:/Users/test/project"]\ntrust_level = "trusted"\n'
+fs.writeFileSync(configPath, initialConfig, 'utf8')
+fs.writeFileSync(authPath, '{"auth_mode":"chatgpt"}\n', 'utf8')
+fs.writeFileSync(modelsCachePath, '{"models":[{"slug":"gpt-5.6","visibility":"list"}]}\n', 'utf8')
+
+const paths = manager.getPaths(options)
+manager._internal.ensureInitialBackup(paths, initialConfig)
+fs.writeFileSync(configPath, 'model_provider = "managed"\n\n[projects."C:/Users/other"]\ntrust_level = "trusted"\n', 'utf8')
+
+const rollingBackup = manager._internal.backupConfig(configPath, fs.readFileSync(configPath, 'utf8'), 'first')
+const rollingBackupAgain = manager._internal.backupConfig(configPath, fs.readFileSync(configPath, 'utf8'), 'second')
+assert.strictEqual(rollingBackupAgain, rollingBackup)
+assert.strictEqual(fs.readdirSync(codexHome).filter(name => name.includes('bak-codex-manager')).length, 1)
+
+manager.restoreInitialBackup(options)
+assert.strictEqual(fs.readFileSync(configPath, 'utf8'), initialConfig)
+assert.match(fs.readFileSync(configPath, 'utf8'), /projects\./)
+
+const adapters = require('./features/modelAdapters')
+assert.strictEqual(adapters.isChatGptModel('gpt-5.6'), true)
+assert.strictEqual(adapters.isChatGptModel('o4-mini'), true)
+assert.strictEqual(adapters.isChatGptModel('grok-4.5'), false)
+assert.deepStrictEqual(adapters.filterChatGptModels(['grok-4.5', 'gpt-5.6', 'claude-sonnet-5']), ['gpt-5.6'])
+
+console.log('chatgpt-only/restore/rolling-backup tests passed')
