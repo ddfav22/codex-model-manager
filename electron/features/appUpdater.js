@@ -136,7 +136,7 @@ function sha256File(filePath, fsModule = fs) {
 function retryableDownloadError(error) {
   const text = `${error?.name || ''} ${error?.message || ''} ${error?.code || ''}`
 
-  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK|ECONNRESET|ETIMEDOUT|EPIPE|terminated|fetch failed|aborted/i.test(
+  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK|ERR_TIMED_OUT|ECONNRESET|ETIMEDOUT|EPIPE|terminated|fetch failed|aborted/i.test(
     text
   )
 }
@@ -202,7 +202,7 @@ function createAppUpdater(options = {}) {
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
-      return await fetchFn(url, {
+      const response = await fetchFn(url, {
         ...requestOptions,
         signal: controller.signal,
         headers: {
@@ -211,8 +211,11 @@ function createAppUpdater(options = {}) {
           ...(requestOptions.headers || {})
         }
       })
-    } finally {
+      Object.defineProperty(response, '__cancelTimeout', { value: () => clearTimeout(timer) })
+      return response
+    } catch (error) {
       clearTimeout(timer)
+      throw error
     }
   }
 
@@ -382,6 +385,7 @@ function createAppUpdater(options = {}) {
           await fileHandle.sync()
         } finally {
           await fileHandle.close()
+          response?.__cancelTimeout?.()
         }
 
         if (downloadedBytes !== asset.size) {
@@ -463,6 +467,7 @@ function createAppUpdater(options = {}) {
         throw new Error(`检查更新失败（HTTP ${response?.status || 0}）。`)
       }
       const release = await response.json()
+      response?.__cancelTimeout?.()
       const latestVersionParts = normalizeVersion(release?.tag_name)
 
       if (!latestVersionParts || release?.draft === true || release?.prerelease === true) {
