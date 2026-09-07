@@ -1291,7 +1291,8 @@ function normalizeRelayInput(input) {
 async function testRelay(input, options = {}) {
   const normalized = normalizeRelayInput(input)
   const startedAt = Date.now()
-  const initialProfile = modelAdapterProfile(normalized.model)
+  const responsesOnly = GPT_6_ASTRA_PATTERN.test(normalized.model)
+  const initialProfile = modelAdapterProfile(normalized.model, responsesOnly ? { wireApi: 'responses' } : null)
 
   if (!initialProfile.available) {
     return {
@@ -1338,7 +1339,7 @@ async function testRelay(input, options = {}) {
     const secondTest = initialProfile.wireApi === 'responses' ? testChatCompletionEndpoint : testResponsesEndpoint
     const first = await tryEndpoint(firstTest)
 
-    if (first.ok) {
+    if (first.ok || responsesOnly) {
       chat = first
     } else {
       const second = await tryEndpoint(secondTest)

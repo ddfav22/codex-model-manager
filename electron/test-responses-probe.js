@@ -30,6 +30,7 @@ async function main() {
       response.end(JSON.stringify(value))
     }
 
+    if (mode === 'responses-unavailable') return json(503, { error: { message: 'responses unavailable' } })
     if (mode === 'stream-only' && !body.stream && !body.tools) return json(400, { error: { message: 'stream must be true' } })
     const hasResult = body.input.some(item => item.type === 'function_call_output')
     const tool = { type: 'function_call', call_id: 'probe_call', name: 'codex_local_tool_probe', arguments: '{"ack":"OK"}' }
@@ -72,6 +73,21 @@ async function main() {
       assert.strictEqual(requests[0].body.stream, false)
       assert.ok(requests.some(item => item.body.stream === true && !item.body.tools), 'streaming is independently tested')
     }
+
+    mode = 'responses-unavailable'
+    requests = []
+    const unavailable = await manager.testRelay({
+      name: 'Responses only failure',
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      apiKey: 'test-only-fake-key',
+      model: 'gpt-6-astra',
+      wireApi: 'chat'
+    }, { timeoutMs: 3000 })
+
+    assert.strictEqual(unavailable.ok, false)
+    assert.strictEqual(unavailable.chatOk, false)
+    assert.ok(requests.length >= 1)
+    assert.ok(requests.every(item => item.url === '/v1/responses'), 'Astra must never probe Chat Completions')
   } finally {
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
@@ -91,7 +107,7 @@ async function main() {
 
   assert.strictEqual(parseResponsesProbePayload(await readResponsesProbeText(truncated, readResponseTextLimited)).completed, false)
   assert.strictEqual(parseResponsesProbePayload(JSON.stringify(payload([message('OK')], 'in_progress'))).completed, false)
-  console.log('Responses probe regressions passed: 5 relay scenarios, size limit, truncated SSE, pending JSON')
+  console.log('Responses probe regressions passed: 6 relay scenarios, size limit, truncated SSE, pending JSON')
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })

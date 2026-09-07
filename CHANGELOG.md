@@ -2,6 +2,13 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.111 - 2026-09-07
+
+### Native Responses-only GPT-6 Astra
+
+- GPT-6 Astra 的检测与运行时路由固定使用 `/v1/responses`，取消 `/v1/chat/completions` 探测和失败回退。
+- 原生 Responses 流式、函数调用与 `function_call_output` 续答仍分别验证，确保 Codex 工具链能力没有被降级。
+
 ## 1.2.110 - 2026-09-07
 
 ### Tool probe timeout isolation
