@@ -4910,14 +4910,6 @@ function restoreInitialBackup(options = {}) {
   const paths = getPaths(options)
   const initialBackup = readInitialBackup(paths)
 
-  if (!initialBackup.metadataExists) {
-    throw new Error('没有可用的首次备份')
-  }
-
-  if (!initialBackup.valid) {
-    throw new Error(initialBackup.error || '首次备份不可恢复，请重新创建首次快照。')
-  }
-
   // Stop the official client before touching its auth/index files when the
   // caller explicitly requests the guarded reset.  A failed stop leaves every
   // file untouched and surfaces a clear actionable error to the UI.
@@ -4931,15 +4923,21 @@ function restoreInitialBackup(options = {}) {
   let freshReset
 
   try {
-    // A first-run restore must be an actual Codex reset: put config.toml back
-    // exactly as it was captured, then clear the current login and all
-    // manager/index state.  The immutable initial auth snapshot is retained
-    // for audit/rollback but is intentionally never copied back into auth.json.
-    const nextConfig = initialBackup.configExists ? readText(initialBackup.path) : ''
+    // Prefer the immutable first-run snapshot.  If it is missing or corrupt,
+    // deleting the current config is the only honest way to return to an
+    // unauthenticated, client-generated state; never silently replace the
+    // snapshot with the already-managed configuration.
+    if (initialBackup.valid) {
+      const nextConfig = initialBackup.configExists ? readText(initialBackup.path) : ''
 
-    if (initialBackup.configExists) writeText(paths.configPath, nextConfig)
-    else fs.rmSync(paths.configPath, { force: true })
+      if (initialBackup.configExists) writeText(paths.configPath, nextConfig)
+      else fs.rmSync(paths.configPath, { force: true })
+    } else {
+      fs.rmSync(paths.configPath, { force: true })
+    }
     freshReset = { ...resetFreshCodexState(paths, options), stoppedProcessCount: Number(stopResult?.stopped) || 0 }
+    freshReset.configRestoreMode = initialBackup.valid ? 'snapshot' : 'deleted-config-fallback'
+    freshReset.initialBackupError = initialBackup.error || (initialBackup.metadataExists ? '首次备份不可恢复' : '没有可用的首次备份')
   } catch (error) {
     if (currentConfigExists) writeText(paths.configPath, current)
     else fs.rmSync(paths.configPath, { force: true })
@@ -5067,6 +5065,75 @@ async function deleteSession(idOrPath, options = {}) {
     globalStatePrune,
     projectRecordRemoved,
     configurationError
+  }
+}
+
+function normalizeSessionTitle(value) {
+  const title = String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
+
+  if (!title) throw new Error('对话名称不能为空')
+  if (title.length > 120) throw new Error('对话名称不能超过 120 个字符')
+
+  return title
+}
+
+async function renameSession(idOrPath, title, options = {}) {
+  const paths = getPaths(options)
+  const session = findSessionByIdOrPath(paths, idOrPath)
+
+  if (!session) throw new Error('未找到该对话')
+  if (!session.path.toLowerCase().endsWith('.jsonl')) throw new Error('只允许修改对话 JSONL 文件')
+  if (!fs.existsSync(session.path) || !fs.statSync(session.path).isFile()) throw new Error('对话路径不是文件')
+
+  const nextTitle = normalizeSessionTitle(title)
+  const stopResult = stopCodexClientsForMutation(options, '修改对话')
+  let rows
+  try {
+    rows = fs
+      .readFileSync(session.path, 'utf8')
+      .split(/\r?\n/)
+      .filter(line => line.trim())
+      .map(line => JSON.parse(line))
+  } catch (error) {
+    throw new Error(`对话 JSONL 无法安全解析，已取消修改：${error instanceof Error ? error.message : String(error)}`)
+  }
+  const metaIndex = rows.findIndex(item => item.type === 'session_meta' || item.payload?.type === 'session_meta')
+
+  if (metaIndex < 0) throw new Error('对话缺少可修改的元数据记录')
+
+  const metaRow = rows[metaIndex]
+  rows[metaIndex] = { ...metaRow, payload: { ...(metaRow.payload || {}), thread_name: nextTitle } }
+  const serialized = `${rows.map(row => JSON.stringify(row)).join('\n')}\n`
+  const backup = backupFile(session.path, 'rename-session')
+  const tempPath = `${session.path}.codex-manager-${process.pid}-${Date.now()}.tmp`
+
+  try {
+    fs.writeFileSync(tempPath, serialized, 'utf8')
+    fs.renameSync(tempPath, session.path)
+  } catch (error) {
+    try {
+      fs.rmSync(tempPath, { force: true })
+    } catch {
+      // Preserve the original file if temporary cleanup fails.
+    }
+    throw error
+  }
+
+  sessionMetaCache.delete(path.resolve(session.path).toLowerCase())
+  const indexRefresh = await refreshConversationIndexAfterDelete(
+    paths,
+    { scope: session.location === 'archived' ? 'archived' : 'active' },
+    { ...options, refreshConversationIndex: options.refreshConversationIndex !== false }
+  )
+
+  return {
+    status: readStatus(options),
+    id: session.id,
+    path: session.path,
+    title: nextTitle,
+    backupPath: backup.backupPath,
+    stopResult,
+    indexRefresh
   }
 }
 
@@ -7384,6 +7451,7 @@ module.exports = {
   deleteSkill,
   deleteProject,
   deleteSession,
+  renameSession,
   importSession,
   addProject,
   restoreDefaultProvider,

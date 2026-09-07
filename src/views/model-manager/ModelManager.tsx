@@ -115,6 +115,8 @@ const ModelManager = () => {
   const [taskRecoveries, setTaskRecoveries] = useState<Record<string, CodexTaskRecoveryProgress>>({})
   const [taskRecoveryOpen, setTaskRecoveryOpen] = useState(false)
   const [taskRecoveryId, setTaskRecoveryId] = useState('')
+  const [editingSession, setEditingSession] = useState<CodexSession>()
+  const [sessionTitleDraft, setSessionTitleDraft] = useState('')
 
   const [updateState, setUpdateState] = useState<AppUpdateState>({
     stage: 'idle',
@@ -143,7 +145,7 @@ const ModelManager = () => {
   const issues = status?.diagnostics.issues || []
   const editingProvider = form.id ? status?.providers.find(provider => provider.id === form.id) : undefined
   const displayedApiKey = form.apiKey || (apiKeyVisible ? savedApiKey : '')
-  const initialBackupReady = Boolean(status?.initialBackup.exists && status.initialBackup.valid !== false)
+  const initialBackupReady = Boolean(status && (status.initialBackup.metadataExists || status.diagnostics.configExists))
 
   const sessionCounts = useMemo(
     () => ({
@@ -842,7 +844,7 @@ const ModelManager = () => {
   const restoreInitialBackup = () =>
     setConfirmDialog({
       title: '恢复初始 Codex 状态',
-      body: '将把 config.toml 按本工具首次快照原样恢复，并清除当前由本工具创建的登录、NewAPI 渠道、模型目录、别名和客户端项目索引状态。首次快照中的 API 登录不会复制回当前 auth.json。\n\n默认保留 sessions、archived_sessions 和本地项目文件夹；恢复后需要重新登录或重新配置渠道，并手动重启 Codex。此操作会改变当前配置，请先确认。',
+      body: '优先按本工具首次快照恢复 config.toml；如果首次快照损坏或不存在，则删除当前 config.toml，让 Codex 下次启动回到无登录、无渠道的原始状态。随后会清理本工具生成的登录、模型、别名和客户端索引状态。\n\n默认保留 sessions、archived_sessions 和本地项目文件夹；恢复后需要重新登录或重新配置渠道，并手动重启 Codex。此操作会改变当前配置，请先确认。',
       confirmText: '恢复初始状态',
       action: async () => {
         const result = await requireBridge().restoreInitialBackup()
@@ -864,9 +866,13 @@ const ModelManager = () => {
           environmentErrors.length ? `${environmentErrors.length} 个环境变量未能从系统移除` : ''
         ].filter(Boolean)
 
+        const fallbackText = reset?.configRestoreMode === 'deleted-config-fallback'
+          ? '首次快照不可用，已删除 config.toml 并回到无登录原始状态'
+          : '初始 config.toml 已按首次快照恢复'
+
         setMessage({
           type: environmentErrors.length || result.restart?.ok === false || !listRefreshed ? 'warning' : 'success',
-          text: `初始 config.toml 已原样恢复；${details.join('，') || '已清除本工具状态'}。${restartText}${
+          text: `${fallbackText}；${details.join('，') || '已清除本工具状态'}。${restartText}${
             listRefreshed ? '' : '；管理器列表刷新失败，请点击“重新扫描”'
           }。`
         })
@@ -954,6 +960,32 @@ const ModelManager = () => {
           }${listRefreshed ? '' : '；管理器列表刷新失败，请点击“重新扫描”'}。`
         })
       }
+    })
+
+  const openSessionEditor = (session: CodexSession) => {
+    setEditingSession(session)
+    setSessionTitleDraft(session.title || '')
+  }
+
+  const renameCurrentSession = () =>
+    run(async () => {
+      if (!editingSession) return
+      const title = sessionTitleDraft.trim()
+
+      if (!title) throw new Error('对话名称不能为空')
+
+      const result = await requireBridge().renameSession(editingSession.path, title)
+
+      await refreshAfterConversationMutation(result.status)
+
+      setEditingSession(undefined)
+      setMessage({
+        type: result.indexRefresh?.ok === false ? 'warning' : 'success',
+        text:
+          result.indexRefresh?.ok === false
+            ? '对话名称已写入本地记录，但客户端索引刷新失败，请重启 Codex 后检查。'
+            : '对话名称和客户端索引已更新。'
+      })
     })
 
   const deleteFilteredConversationData = (mode: ConversationDeleteMode = 'records') => {
@@ -1537,6 +1569,7 @@ const ModelManager = () => {
                 recovering={taskRecoveries[session.id]?.status === 'running'}
                 onOpen={openPath}
                 onRecover={openTaskRecovery}
+                onEdit={openSessionEditor}
                 onDelete={deleteSession}
               />
               {index < filteredSessions.length - 1 && <Divider />}
@@ -1854,18 +1887,12 @@ const ModelManager = () => {
                   label={status?.diagnostics.codexInstalled ? 'Codex 客户端已安装' : '未发现 Codex 客户端'}
                 />
                 <Chip
-                  color={
-                    status?.initialBackup.valid === false
-                      ? 'error'
-                      : status?.initialBackup.exists
-                        ? 'success'
-                        : 'warning'
-                  }
+                  color={status?.initialBackup.valid === false ? 'warning' : status?.initialBackup.exists ? 'success' : 'warning'}
                   size='small'
                   variant='tonal'
                   label={
                     status?.initialBackup.valid === false
-                      ? '首次备份不可恢复'
+                      ? '备份不可用，将删除配置恢复'
                       : status?.initialBackup.exists
                         ? '首次备份可用'
                         : '未创建首次备份'
@@ -1873,8 +1900,8 @@ const ModelManager = () => {
                 />
               </Stack>
               {status?.initialBackup.valid === false && (
-                <Alert severity='error' variant='outlined' sx={{ mt: -1 }}>
-                  首次快照文件缺失或校验失败，已禁用恢复按钮，避免用当前配置覆盖“初始状态”。
+                <Alert severity='warning' variant='outlined' sx={{ mt: -1 }}>
+                  首次快照文件缺失或校验失败。点击恢复后会删除当前 config.toml，并让 Codex 下次启动回到无登录原始状态。
                   {status.initialBackup.error ? ` ${cleanErrorMessage(status.initialBackup.error)}` : ''}
                 </Alert>
               )}
@@ -2483,6 +2510,41 @@ const ModelManager = () => {
             onClick={importFromGithub}
           >
             导入
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(editingSession)}
+        onClose={() => !busy && setEditingSession(undefined)}
+        fullWidth
+        maxWidth='sm'
+      >
+        <DialogTitle>修改对话名称</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            sx={{ mt: 2 }}
+            label='对话名称'
+            value={sessionTitleDraft}
+            disabled={busy}
+            inputProps={{ maxLength: 120 }}
+            onChange={event => setSessionTitleDraft(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && !event.nativeEvent.isComposing) renameCurrentSession()
+            }}
+          />
+          <Typography variant='caption' color='text.secondary'>
+            将同时修改本地 JSONL 元数据，并请求 Codex 刷新对话索引；原文件会保留可回滚备份。
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 6, pb: 5 }}>
+          <Button variant='outlined' color='secondary' disabled={busy} onClick={() => setEditingSession(undefined)}>
+            取消
+          </Button>
+          <Button variant='contained' disabled={busy || !sessionTitleDraft.trim()} onClick={renameCurrentSession}>
+            保存名称
           </Button>
         </DialogActions>
       </Dialog>

@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('codexManager', {
   removeRelay: id => ipcRenderer.invoke('codex:removeRelay', id),
   openPath: targetPath => ipcRenderer.invoke('codex:openPath', targetPath),
   deleteSession: idOrPath => ipcRenderer.invoke('codex:deleteSession', idOrPath),
+  renameSession: (idOrPath, title) => ipcRenderer.invoke('codex:renameSession', idOrPath, title),
   deleteConversationData: filters =>
     ipcRenderer.invoke('codex:deleteConversationData', { ...filters, confirmed: true }),
   importConversationData: kind => ipcRenderer.invoke('codex:importConversationData', kind),

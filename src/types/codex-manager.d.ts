@@ -181,6 +181,8 @@ export type FreshCodexReset = {
   clearedEnvironmentNames: string[]
   environmentErrors?: Array<{ name: string; error: string }>
   stoppedProcessCount?: number
+  configRestoreMode?: 'snapshot' | 'deleted-config-fallback'
+  initialBackupError?: string
 }
 
 export type CodexDiagnostics = {
@@ -553,6 +555,15 @@ declare global {
         globalStatePrune?: ConversationGlobalStatePruneResult
         projectRecordRemoved?: boolean
         configurationError?: string
+      }>
+      renameSession: (idOrPath: string, title: string) => Promise<{
+        status: CodexStatus
+        id: string
+        path: string
+        title: string
+        backupPath?: string
+        stopResult?: CodexClientStopResult
+        indexRefresh?: ConversationIndexRepair | { ok: false; error: string }
       }>
       deleteConversationData: (filters: ConversationDeleteFilters) => Promise<ConversationDeleteResult>
       importConversationData: (kind: ConversationTransferKind) => Promise<ConversationImportResult | null>

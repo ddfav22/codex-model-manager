@@ -5,14 +5,6 @@ import type { CodexSession, CodexStatus, RelayInput, RelayProvider } from '@/typ
 
 export type Section = 'channels' | 'conversations' | 'skills' | 'agents'
 export type Message = { type: 'success' | 'error' | 'info' | 'warning'; text: string }
-export type OnlineSkill = {
-  id: string
-  displayName: string
-  description: string
-  version: string
-  sourceUrl: string
-  archiveUrl: string
-}
 export type ConfirmState = {
   title: string
   body: string
@@ -70,28 +62,6 @@ export const menuItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: 'conversations', label: '对话管理', icon: 'ri-chat-history-line' },
   { id: 'skills', label: 'Skill 管理', icon: 'ri-tools-line' },
   { id: 'agents', label: 'Agent 管理', icon: 'ri-robot-2-line' }
-]
-
-// The catalog is intentionally small and signed by the GitHub repository owner through the
-// public repository URL. Installation still goes through the desktop bridge, which validates
-// the downloaded archive and SKILL.md before replacing an existing copy.
-export const onlineSkillCatalog: OnlineSkill[] = [
-  {
-    id: 'security-pentest',
-    displayName: '安全渗透测试',
-    description: '在明确授权范围内执行 Web 安全评估、证据采集、漏洞验证和 HTML 报告。',
-    version: '1.1.0',
-    sourceUrl: 'https://github.com/ddfav22/security-pentest-skill',
-    archiveUrl: 'https://github.com/ddfav22/security-pentest-skill/archive/refs/heads/main.zip'
-  },
-  {
-    id: 'web-recon',
-    displayName: 'Web 信息收集',
-    description: '在明确授权范围内进行资产发现、主站关系归类和证据化 recon；自动规范表达但不扩大授权。',
-    version: '1.0.0',
-    sourceUrl: 'https://github.com/ddfav22/web-recon-skill',
-    archiveUrl: 'https://github.com/ddfav22/web-recon-skill/archive/refs/heads/main.zip'
-  }
 ]
 
 export const getBridge = () => window.codexManager
