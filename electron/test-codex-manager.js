@@ -1719,7 +1719,7 @@ async function main() {
 
     assert.strictEqual(appliedMulti.status.currentProvider, 'multi-relay')
     assert.strictEqual(appliedMulti.status.currentModel, 'gpt-compat-chat')
-    assert.match(fs.readFileSync(options.configPath, 'utf8'), /model = "gpt-5\.6-sol"/)
+    assert.match(fs.readFileSync(options.configPath, 'utf8'), /model = "gpt-compat-chat"/)
     const multiConfig = manager._internal.parseConfig(fs.readFileSync(options.configPath, 'utf8'))
 
     assert.strictEqual(multiConfig.model_provider, 'openai')
