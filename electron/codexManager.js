@@ -3178,27 +3178,19 @@ function buildModelAliasAssignments(nativeModels, externalModels) {
 
       return priority || String(left.slug).localeCompare(String(right.slug))
     })
-  const freeSlots = new Map(slots.map(slot => [slot.slug.toLowerCase(), slot]))
-  const assignments = new Map()
-
-  for (const model of externalModels) {
-    const exact = freeSlots.get(model.toLowerCase())
-
-    if (!exact) continue
-    assignments.set(model, exact)
-    freeSlots.delete(exact.slug.toLowerCase())
-  }
-
-  const remainingSlots = [...freeSlots.values()]
-
-  for (const model of externalModels) {
-    if (assignments.has(model) || !remainingSlots.length) continue
-    assignments.set(model, remainingSlots.shift())
-  }
-
-  return externalModels
-    .filter(model => assignments.has(model))
-    .map(model => ({ model, nativeModel: assignments.get(model) }))
+  // Keep the upstream identifier as the Codex catalog slug. Native Codex
+  // slots are used only as capability templates; they must never rename the
+  // model because that makes switching appear successful while routing to a
+  // different model.
+  return externalModels.map((model, index) => ({
+    model,
+    nativeModel: {
+      ...(slots[index] || fallbackModelCatalogEntry(model, index)),
+      slug: model,
+      visibility: 'list',
+      priority: index
+    }
+  }))
 }
 
 function readModelAliases(filePath) {

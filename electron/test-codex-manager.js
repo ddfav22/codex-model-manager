@@ -893,7 +893,7 @@ async function main() {
   })
   const emptyCatalogModel = JSON.parse(fs.readFileSync(emptyCatalogPath, 'utf8')).models[0]
 
-  assert.strictEqual(emptyCatalogModel.slug, 'gpt-5.6-sol')
+  assert.strictEqual(emptyCatalogModel.slug, 'gpt-compat-chat')
   assert.strictEqual(emptyCatalogModel.display_name, 'gpt-compat-chat')
   assert.strictEqual(emptyCatalogModel.minimal_client_version, '0.0.1')
   assert.match(emptyCatalogModel.description, /gpt-chat/)
@@ -944,7 +944,7 @@ async function main() {
     JSON.parse(fs.readFileSync(modelsCachePath, 'utf8'))
       .models.filter(model => model.visibility === 'list')
       .map(model => model.slug),
-    ['gpt-5.6-sol']
+    ['gpt-5-mini']
   )
   const appliedCatalog = JSON.parse(fs.readFileSync(modelsCachePath, 'utf8'))
   const appliedCatalogModel = appliedCatalog.models.find(
@@ -952,7 +952,7 @@ async function main() {
   )
 
   assert.ok(appliedCatalog.models.some(model => model.slug === 'codex-auto-review'))
-  assert.ok(appliedCatalog.models.some(model => model.slug === 'gpt-5-mini' && model.visibility === 'hide'))
+  assert.ok(appliedCatalog.models.some(model => model.slug === 'gpt-5-mini' && model.visibility === 'list'))
   assert.match(appliedCatalogModel.base_instructions, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
   assert.match(appliedCatalogModel.base_instructions, /agent based on GPT-5 mini/)
   assert.match(appliedCatalogModel.base_instructions, /selected_upstream_model_id="gpt-5-mini"/)
@@ -966,9 +966,9 @@ async function main() {
 
   assert.deepStrictEqual(
     expandedCatalog.models.filter(model => model.visibility === 'list').map(model => model.slug),
-    ['gpt-5.6-sol']
+    ['gpt-5-mini']
   )
-  assert.ok(expandedCatalog.models.some(model => model.slug === 'gpt-5-mini' && model.visibility === 'hide'))
+  assert.ok(expandedCatalog.models.some(model => model.slug === 'gpt-5-mini' && model.visibility === 'list'))
   assert.ok(!expandedCatalog.models.some(model => model.manager_actual_model === 'legacy-provider-model'))
   assert.ok(expandedCatalog.models.some(model => model.slug === 'codex-auto-review' && model.visibility === 'hide'))
 
