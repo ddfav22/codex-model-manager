@@ -1742,7 +1742,7 @@ async function main() {
     assert.strictEqual(multiRuntime.apiKey, 'AIza-test-key')
     assert.deepStrictEqual(multiRuntime.models, ['gpt-compat-chat'])
     assert.deepStrictEqual(multiRuntime.allModels, ['gpt-compat-chat'])
-    assert.deepStrictEqual(multiRuntime.modelAliases, { 'gpt-5.6-sol': 'gpt-compat-chat' })
+    assert.deepStrictEqual(multiRuntime.modelAliases, { 'gpt-compat-chat': 'gpt-compat-chat' })
     assert.strictEqual(multiRuntime.modelCapabilities['claude-sonnet-5'], undefined)
     assert.strictEqual(multiRuntime.modelCapabilities['gpt-compat-chat'].available, true)
     assert.deepStrictEqual(multiRuntime.modelWireApis, { 'gpt-compat-chat': 'chat' })
