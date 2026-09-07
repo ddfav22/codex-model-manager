@@ -2297,7 +2297,7 @@ async function testChatCompletionEndpoint(normalized, signal) {
   )
 }
 
-async function testResponsesEndpoint(normalized, signal, stream = !GPT_6_ASTRA_PATTERN.test(normalized.model)) {
+async function testResponsesEndpoint(normalized, signal, stream = true) {
   const { response, text, parsed, attempts } = await postResponsesProbe(normalized, signal, {
     input: [
       {

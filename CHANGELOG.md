@@ -2,6 +2,20 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.113 - 2026-09-07
+
+### Responses streaming-only relay compatibility
+
+- 基础 Responses 健康检测固定使用 SSE，因为部分 NewAPI 渠道的非流式 Responses 请求会挂起。
+- GPT-6 Astra 仍然完全禁止 Chat Completions 回退；原生工具探测继续单独报告真实上游能力。
+
+## 1.2.112 - 2026-09-07
+
+### NewAPI streaming compatibility
+
+- 修复部分 NewAPI/Codex 渠道的 Responses 非流式请求挂起问题：基础健康检测恢复使用可提前结束的 SSE 流。
+- GPT-6 Astra 继续固定走 Responses-only；Chat Completions 不再参与检测或回退。
+
 ## 1.2.111 - 2026-09-07
 
 ### Native Responses-only GPT-6 Astra

@@ -65,12 +65,12 @@ async function main() {
         model: 'gpt-6-astra'
       }, { timeoutMs: 3000 })
 
-      assert.strictEqual(result.chatOk, true, `${scenario}: ${result.message}`)
+      assert.strictEqual(result.chatOk, scenario !== 'stream-failed', `${scenario}: ${result.message}`)
       assert.strictEqual(result.ok, !['json-only', 'stream-failed'].includes(scenario), `${scenario}: ${result.message}`)
       assert.strictEqual(result.streamOk, !['json-only', 'stream-failed'].includes(scenario), scenario)
-      assert.strictEqual(result.agentToolOk, true, scenario)
+      assert.strictEqual(result.agentToolOk, scenario !== 'stream-failed', scenario)
       assert.ok(requests.every(item => item.url === '/v1/responses'), 'Responses success must not fall back to Chat')
-      assert.strictEqual(requests[0].body.stream, false)
+      assert.strictEqual(requests[0].body.stream, true)
       assert.ok(requests.some(item => item.body.stream === true && !item.body.tools), 'streaming is independently tested')
     }
 
