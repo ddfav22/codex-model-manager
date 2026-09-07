@@ -1763,8 +1763,8 @@ async function main() {
     assert.match(generatedChatGptModel.base_instructions, /respond in your own words/)
     assert.doesNotMatch(generatedChatGptModel.base_instructions, /based on GPT-5\./)
     assert.match(generatedChatGptModel.model_messages?.instructions_template, /ORIGINAL_CODEX_CAPABILITY_MARKER/)
-    assert.strictEqual(generatedChatGptModel.shell_type, 'shell_command')
-    assert.strictEqual(generatedChatGptModel.tool_mode, 'code_mode')
+    assert.strictEqual(generatedChatGptModel.shell_type, 'disabled')
+    assert.strictEqual(generatedChatGptModel.tool_mode, 'code_mode_only')
     assert.deepStrictEqual(
       generatedChatGptModel.supported_reasoning_levels.map(item => item.effort),
       ['low', 'medium', 'high']
