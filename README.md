@@ -1,6 +1,6 @@
 # Codex Model Manager for Windows
 
-一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.106**。
+一个面向 Windows 的 Codex 渠道、API Key、模型目录与本地协议适配管理器。当前版本：**1.2.107**。
 
 项目目标是在切换 OpenAI Responses、Chat Completions 和兼容 NewAPI 渠道时，尽量保留 Codex 桌面端原有的项目、历史任务、本地工具与 Agent Loop。
 
@@ -20,6 +20,7 @@
 - 原生 Responses 的 refusal、空输出、incomplete、工具调用和连接错误均原样交给 Codex；管理器不会监视任务终态、自动写入“继续”、创建额外回合或在后台恢复任务。
 - 管理器自己的设置、日志和更新文件只写入客户端目录下的 `data`，发布包不携带开发机数据。
 - 提供中文错误提示、启动进度、关闭行为选择和 GitHub Release 在线更新。
+- 主界面聚焦模型切换；在线插件市场已移除，避免无关远程资源影响启动和安全边界。
 
 ## 系统要求
 
