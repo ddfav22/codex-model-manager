@@ -51,6 +51,15 @@ function capabilityForModel(channel, model) {
 
 function canonicalModelFor(channel, requestedModel) {
   const requested = String(requestedModel || '').trim()
+  const knownModels = [
+    ...(Array.isArray(channel?.models) ? channel.models : []),
+    ...(Array.isArray(channel?.allModels) ? channel.allModels : [])
+  ].map(model => String(model || '').trim())
+
+  // A refreshed NewAPI catalog is authoritative. Do not let a stale alias
+  // file rewrite a real upstream model (e.g. Sol into Luna) during compaction.
+  if (knownModels.some(model => model.toLowerCase() === requested.toLowerCase())) return requested
+
   const aliases = channel?.modelAliases && typeof channel.modelAliases === 'object' ? channel.modelAliases : {}
   const direct = aliases[requested]
 

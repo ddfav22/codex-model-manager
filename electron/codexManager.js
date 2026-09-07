@@ -1316,7 +1316,7 @@ async function testRelay(input, options = {}) {
   }
 
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs || 90000)
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || (responsesOnly ? 180000 : 90000))
 
   try {
     const chatStartedAt = Date.now()

@@ -1686,6 +1686,13 @@ async function main() {
     canonicalModelFor({ modelAliases: { 'gpt-native-slot': 'gpt-5.6' } }, 'gpt-native-slot'),
     'gpt-5.6'
   )
+  assert.strictEqual(
+    canonicalModelFor(
+      { models: ['gpt-5.6-sol'], modelAliases: { 'gpt-5.6-sol': 'gpt-5.6-luna' } },
+      'gpt-5.6-sol'
+    ),
+    'gpt-5.6-sol'
+  )
   assert.strictEqual(normalizeReasoningEffort('ultra', ['low', 'high']), 'high')
 
   const crossModelInput = [
