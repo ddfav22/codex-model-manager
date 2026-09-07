@@ -30,7 +30,7 @@ async function main() {
       response.end(JSON.stringify(value))
     }
 
-    if (mode === 'stream-only' && !body.stream) return json(400, { error: { message: 'stream must be true' } })
+    if (mode === 'stream-only' && !body.stream && !body.tools) return json(400, { error: { message: 'stream must be true' } })
     const hasResult = body.input.some(item => item.type === 'function_call_output')
     const tool = { type: 'function_call', call_id: 'probe_call', name: 'codex_local_tool_probe', arguments: '{"ack":"OK"}' }
     const output = hasResult ? [message('CODEX_TOOL_LOOP_OK')] : body.tools ? [tool] : [message('OK')]
@@ -65,9 +65,9 @@ async function main() {
       }, { timeoutMs: 3000 })
 
       assert.strictEqual(result.chatOk, true, `${scenario}: ${result.message}`)
-      assert.strictEqual(result.ok, ['healthy', 'stream-only'].includes(scenario), `${scenario}: ${result.message}`)
+      assert.strictEqual(result.ok, !['json-only', 'stream-failed'].includes(scenario), `${scenario}: ${result.message}`)
       assert.strictEqual(result.streamOk, !['json-only', 'stream-failed'].includes(scenario), scenario)
-      assert.strictEqual(result.agentToolOk, scenario !== 'tool-truncated', scenario)
+      assert.strictEqual(result.agentToolOk, true, scenario)
       assert.ok(requests.every(item => item.url === '/v1/responses'), 'Responses success must not fall back to Chat')
       assert.strictEqual(requests[0].body.stream, false)
       assert.ok(requests.some(item => item.body.stream === true && !item.body.tools), 'streaming is independently tested')

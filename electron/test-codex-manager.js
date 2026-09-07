@@ -1621,9 +1621,9 @@ async function main() {
     assert.strictEqual(gpt56Ready.actualModel, 'gpt-5.6-sol-build')
     assert.strictEqual(gpt56TransientFailures, 1)
     assert.strictEqual(gpt56ProbeBodies.length, 4)
+    assert.deepStrictEqual(gpt56ProbeBodies.map(body => body.stream), [true, true, false, false])
     for (const body of gpt56ProbeBodies) {
-      assert.strictEqual(body.stream, true)
-      assert.strictEqual(body.max_output_tokens, DEFAULT_RESPONSES_PROBE_MAX_OUTPUT_TOKENS)
+      assert.strictEqual(body.max_output_tokens, body.stream ? DEFAULT_RESPONSES_PROBE_MAX_OUTPUT_TOKENS : 1024)
       assert.deepStrictEqual(body.reasoning, { effort: 'low' })
     }
     assert.deepStrictEqual(testedModels, [

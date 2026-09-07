@@ -2575,7 +2575,10 @@ async function testResponsesAgentToolEndpoint(normalized, signal) {
     ],
     tool_choice: 'auto',
     parallel_tool_calls: false,
-    ...responsesProbeRuntimeOptions(normalized.model)
+    // Tool capability is validated from the complete JSON response.  A
+    // number of relays keep tool SSE connections open after emitting the
+    // function call, which used to make "检测全部" time out.
+    ...responsesProbeRuntimeOptions(normalized.model, { stream: false, maxOutputTokens: 512 })
   })
   const toolCall = first.parsed.items.find(item => item?.type === 'function_call' && item?.name === toolName)
 
@@ -2628,7 +2631,7 @@ async function testResponsesAgentToolEndpoint(normalized, signal) {
       }
     ],
     tool_choice: 'none',
-    ...responsesProbeRuntimeOptions(normalized.model)
+    ...responsesProbeRuntimeOptions(normalized.model, { stream: false, maxOutputTokens: 512 })
   })
   const completed = second.response.ok && second.parsed.completed && second.parsed.outputText.includes(completionMarker)
 
