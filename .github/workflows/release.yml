@@ -41,9 +41,17 @@ jobs:
       - name: Build compatible lightweight patch
         shell: pwsh
         run: |
-          $previousTag = git tag --list "v*.*.*" --sort=-v:refname |
-            Where-Object { $_ -ne $env:GITHUB_REF_NAME -and $_ -match '^v\d+\.\d+\.\d+$' } |
-            Select-Object -First 1
+          $packageVersion = node -p "require('./package.json').version"
+          $previousTag = $null
+          foreach ($candidate in (git tag --list "v*.*.*" --sort=-v:refname)) {
+            if ($candidate -eq $env:GITHUB_REF_NAME -or $candidate -notmatch '^v\d+\.\d+\.\d+$') { continue }
+            $candidateVersion = $candidate.Substring(1)
+            $candidatePackage = (git show "$candidate`:package.json" 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue).version
+            if ($candidatePackage -and $candidatePackage -eq $candidateVersion -and $candidatePackage -ne $packageVersion) {
+              $previousTag = $candidate
+              break
+            }
+          }
           if (-not $previousTag) { throw "Previous release tag not found" }
           npm run dist:patch -- --from $previousTag.Substring(1)
       - name: Publish GitHub Release
