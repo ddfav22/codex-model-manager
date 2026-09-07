@@ -117,6 +117,7 @@ const ModelManager = () => {
   const [taskRecoveryId, setTaskRecoveryId] = useState('')
   const [editingSession, setEditingSession] = useState<CodexSession>()
   const [sessionTitleDraft, setSessionTitleDraft] = useState('')
+  const [initialBackupWarningDismissed, setInitialBackupWarningDismissed] = useState(false)
 
   const [updateState, setUpdateState] = useState<AppUpdateState>({
     stage: 'idle',
@@ -1899,8 +1900,8 @@ const ModelManager = () => {
                   }
                 />
               </Stack>
-              {status?.initialBackup.valid === false && (
-                <Alert severity='warning' variant='outlined' sx={{ mt: -1 }}>
+              {status?.initialBackup.valid === false && !initialBackupWarningDismissed && (
+                <Alert severity='warning' variant='outlined' sx={{ mt: -1 }} onClose={() => setInitialBackupWarningDismissed(true)}>
                   首次快照文件缺失或校验失败。点击恢复后会删除当前 config.toml，并让 Codex 下次启动回到无登录原始状态。
                   {status.initialBackup.error ? ` ${cleanErrorMessage(status.initialBackup.error)}` : ''}
                 </Alert>

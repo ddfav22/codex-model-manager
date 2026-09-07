@@ -241,6 +241,18 @@ export const ChannelRow = ({
             {refreshing ? '刷新中' : provider.keySource === 'newapi' ? '刷新 Key/模型' : '刷新模型'}
           </Button>
         )}
+        {provider.managed && adapterUnavailable && (
+          <Button
+            size='small'
+            variant='outlined'
+            color='warning'
+            disabled={busy || testing || selectingKey || refreshing}
+            startIcon={refreshing ? <CircularProgress size={13} color='inherit' /> : <i className='ri-tools-line' />}
+            onClick={() => onRefresh(provider.id)}
+          >
+            {refreshing ? '修复中' : '修复适配'}
+          </Button>
+        )}
         {Boolean(provider.baseUrl) && (
           <Button
             size='small'
