@@ -216,8 +216,20 @@ function fixture(name) {
   assert.match(invalid.error, /config 快照文件缺失/)
   assert.strictEqual(fs.existsSync(snapshotPath), false)
   assert.strictEqual(fs.readFileSync(paths.initialBackupMetaPath, 'utf8'), metadataBefore)
-  assert.throws(() => manager.restoreInitialBackup(options), /首次备份不可恢复/)
-  assert.strictEqual(fs.readFileSync(options.configPath, 'utf8'), managedConfig)
+  const restored = manager.restoreInitialBackup(options)
+  assert.strictEqual(restored.freshReset.configRestoreMode, 'deleted-config-fallback')
+  assert.strictEqual(fs.existsSync(options.configPath), false)
+}
+
+// A missing first-run snapshot still has a deterministic escape hatch: remove
+// the managed config and return to Codex's unauthenticated first-start state.
+{
+  const options = fixture('missing-initial-backup-fallback')
+  fs.writeFileSync(options.configPath, 'model_provider = "managed"\n', 'utf8')
+
+  const restored = manager.restoreInitialBackup(options)
+  assert.strictEqual(restored.freshReset.configRestoreMode, 'deleted-config-fallback')
+  assert.strictEqual(fs.existsSync(options.configPath), false)
 }
 
 {
@@ -235,8 +247,10 @@ function fixture(name) {
   const invalid = manager._internal.ensureInitialBackup(paths, initialConfig)
   assert.strictEqual(invalid.valid, false)
   assert.match(invalid.error, /auth 快照文件缺失/)
-  assert.throws(() => manager.restoreInitialBackup(options), /auth 快照文件缺失/)
-  assert.strictEqual(fs.readFileSync(options.authPath, 'utf8'), currentAuth)
+  const restored = manager.restoreInitialBackup(options)
+  assert.strictEqual(restored.freshReset.configRestoreMode, 'deleted-config-fallback')
+  assert.strictEqual(fs.existsSync(options.configPath), false)
+  assert.strictEqual(fs.existsSync(options.authPath), false)
 }
 
 // If an error occurs after config.toml has been removed, rollback must retain

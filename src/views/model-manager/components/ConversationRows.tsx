@@ -17,6 +17,7 @@ export const SessionRow = ({
   recovering,
   onOpen,
   onRecover,
+  onEdit,
   onDelete
 }: {
   session: CodexSession
@@ -24,6 +25,7 @@ export const SessionRow = ({
   recovering: boolean
   onOpen: (targetPath: string) => void
   onRecover: (session: CodexSession) => void
+  onEdit: (session: CodexSession) => void
   onDelete: (session: CodexSession) => void
 }) => (
   <Box
@@ -86,6 +88,17 @@ export const SessionRow = ({
           onClick={() => onOpen(session.path)}
         >
           <i className='ri-folder-open-line' />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title='修改对话名称'>
+        <IconButton
+          size='small'
+          aria-label='修改对话名称'
+          title={session.title || session.id}
+          disabled={busy}
+          onClick={() => onEdit(session)}
+        >
+          <i className='ri-edit-2-line' />
         </IconButton>
       </Tooltip>
       <Tooltip title='永久删除本条对话（不可恢复）'>

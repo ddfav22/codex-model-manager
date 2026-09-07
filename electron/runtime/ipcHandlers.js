@@ -65,6 +65,11 @@ function registerIpcHandlers({
         refreshConversationIndex: true,
         pruneStateIndexOnFailure: true
       }),
+    'codex:renameSession': (_event, idOrPath, title) =>
+      manager.renameSession(idOrPath, title, {
+        stopClientsOnBusy: true,
+        refreshConversationIndex: true
+      }),
     'codex:deleteProject': (_event, projectPath) => manager.deleteProject(projectPath),
     'codex:deleteSkill': (_event, identifier) => manager.deleteSkill(identifier),
     'codex:importSkillFromGithub': (_event, url) => manager.importSkillFromGithub(url),
