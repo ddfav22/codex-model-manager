@@ -464,6 +464,7 @@ function createAppUpdater(options = {}) {
 
       if (!response?.ok) {
         if (response?.status === 404) throw new Error('暂未找到公开发布版本，请稍后再试。')
+        if (response?.status === 403) throw new Error('GitHub 更新源拒绝了请求。这不是 NewAPI 账号权限；请检查网络代理、GitHub 访问限制后重试。')
         throw new Error(`检查更新失败（HTTP ${response?.status || 0}）。`)
       }
       const release = await response.json()

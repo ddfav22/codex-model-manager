@@ -463,6 +463,17 @@ async function main() {
   assert.strictEqual(networkFailureResult.message, '网络请求失败。请检查网络、接口地址和代理设置。')
   assert.doesNotMatch(networkFailureResult.message, /fetch failed|ENOTFOUND/i)
 
+  const forbiddenUpdater = createAppUpdater({
+    currentVersion: '1.2.113',
+    currentExecutablePath: path.join(tempRoot, 'forbidden', 'ChatGPT Model Manager.exe'),
+    repository,
+    updatesRoot: path.join(tempRoot, 'forbidden-updates'),
+    fetchFn: async () => mockResponse({ status: 403 })
+  })
+  const forbiddenResult = await forbiddenUpdater.check({ manual: true })
+  assert.strictEqual(forbiddenResult.stage, 'error')
+  assert.match(forbiddenResult.message, /GitHub 更新源拒绝/)
+
   const badRoot = path.join(tempRoot, 'bad')
   const badUpdater = createAppUpdater({
     currentVersion: '1.2.52',
