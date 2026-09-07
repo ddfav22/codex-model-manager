@@ -22,6 +22,8 @@ assert.match(modelManager, /result\.indexDelete\?\.ok === false/)
 assert.match(modelManager, /globalStatePrune\?\.changed/)
 assert.match(modelManager, /position:\s*'fixed'/)
 assert.match(modelManager, /aria-label='当前筛选结果统计'/)
+assert.doesNotMatch(modelManager, /在线插件商店/)
+assert.doesNotMatch(modelManager, /installOnlineSkill/)
 
 assert.match(conversationRows, /aria-label='永久删除对话'/)
 assert.match(conversationRows, /aria-label='移除项目记录'/)
