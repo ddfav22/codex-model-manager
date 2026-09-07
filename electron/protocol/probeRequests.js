@@ -1,5 +1,6 @@
 const DEFAULT_RESPONSES_PROBE_MAX_OUTPUT_TOKENS = 1024
 const GPT_56_MODEL_PATTERN = /^gpt-5\.6(?:-|$)/i
+const GPT_6_ASTRA_PATTERN = /^gpt-6-astra(?:-|$)/i
 const RESPONSES_PROBE_MAX_ATTEMPTS = 3
 const TRANSIENT_HTTP_STATUSES = new Set([429, 502, 503, 504])
 const TRANSIENT_RESPONSES_CODES = new Set([
@@ -15,14 +16,14 @@ function responsesProbeRuntimeOptions(model, options = {}) {
   const maxOutputTokens = Math.max(DEFAULT_RESPONSES_PROBE_MAX_OUTPUT_TOKENS, Number(options.maxOutputTokens) || 0)
   const runtime = {
     max_output_tokens: maxOutputTokens,
-    stream: true
+    stream: options.stream === undefined ? true : Boolean(options.stream)
   }
 
   // GPT-5.6 defaults to medium reasoning. Tiny compatibility probes can
   // otherwise consume their entire output budget before emitting final text.
   // Low still exercises the Responses reasoning/tool path without turning a
   // health check into a long or expensive generation.
-  if (GPT_56_MODEL_PATTERN.test(String(model || '').trim())) {
+  if (GPT_56_MODEL_PATTERN.test(String(model || '').trim()) || GPT_6_ASTRA_PATTERN.test(String(model || '').trim())) {
     runtime.reasoning = { effort: 'low' }
   }
 
@@ -48,6 +49,7 @@ function isTransientResponsesProbeFailure(parsed, httpStatus = 0) {
 
 module.exports = {
   DEFAULT_RESPONSES_PROBE_MAX_OUTPUT_TOKENS,
+  GPT_6_ASTRA_PATTERN,
   RESPONSES_PROBE_MAX_ATTEMPTS,
   isTransientResponsesProbeFailure,
   responsesProbeRuntimeOptions

@@ -57,7 +57,7 @@ function parseResponsesProbePayload(text) {
   const completed =
     terminalEvent?.type === 'response.completed'
       ? terminalEvent
-      : jsonIsResponse && !jsonFailed
+      : jsonIsResponse && !jsonFailed && (!json.status || json.status === 'completed')
         ? { response: json }
         : null
   const errorEvent = [...events].reverse().find(event => event?.type === 'error')
@@ -115,6 +115,7 @@ function parseResponsesProbePayload(text) {
     items,
     outputText: outputText || '',
     completed: Boolean(outputText && hasSuccessfulTerminal && !failure),
+    successfulTerminal: hasSuccessfulTerminal && !failure,
     sawDone,
     terminalType: terminalEvent?.type || (json?.status ? `response.${json.status}` : ''),
     failure,

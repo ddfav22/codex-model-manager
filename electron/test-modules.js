@@ -25,6 +25,7 @@ const {
 } = require('./protocolProxy')
 const { RECOVERY_DECISION, parseAgentRecoveryDecision } = require('./protocol/agentRecoveryDecision')
 const { emulatedToolSyntaxStart } = require('./protocol/emulatedToolSyntax')
+const { responsesProbeRuntimeOptions } = require('./protocol/probeRequests')
 const {
   annotateDiagnostic,
   codexRequestContext,
@@ -137,6 +138,9 @@ function rawHttpRequest(port, requestText) {
 }
 
 async function main() {
+  assert.strictEqual(responsesProbeRuntimeOptions('gpt-6-astra').stream, true)
+  assert.strictEqual(responsesProbeRuntimeOptions('gpt-6-astra', { stream: false, maxOutputTokens: 128 }).stream, false)
+  assert.strictEqual(responsesProbeRuntimeOptions('gpt-6-astra', { stream: false, maxOutputTokens: 128 }).max_output_tokens, 1024)
   for (const prefix of ['`', '``', '```', '```j', '```js', '```jso', '```json', '```json\n']) {
     assert.strictEqual(
       emulatedToolSyntaxStart(`visible\n${prefix}`, { includePartial: true }),

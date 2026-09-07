@@ -2,6 +2,14 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.109 - 2026-09-07
+
+### GPT-6 Astra Responses probe compatibility
+
+- 修复 GPT-6 Astra/部分 NewAPI 渠道的健康检测误报：基础 Responses 检测支持非流式 JSON，并独立验证真实 SSE 流。
+- Responses 探测在收到终止事件后立即结束，不再等待上游不关闭的 SSE 连接导致检测超时。
+- 工具调用检测继续单独报告，避免把普通聊天可用误报为工具链可用；新增 JSON、流式、截断和连接大小限制回归测试。
+
 ## 1.2.108 - 2026-09-07
 
 ### Real conversation editing and leaner runtime

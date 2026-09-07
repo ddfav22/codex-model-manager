@@ -7,9 +7,11 @@ const toml = require('smol-toml')
 const { DEFAULT_PROTOCOL_PROXY_PORT } = require('./protocol/constants')
 const { modelIdentityInstruction, modelIdentityLabel } = require('./protocol/modelRouting')
 const { parseResponsesProbePayload } = require('./protocol/probeParsing')
+const { readResponsesProbeText } = require('./protocol/probeStream')
 const { internalToolResultTranscript } = require('./protocol/internalToolTranscript')
 const {
   RESPONSES_PROBE_MAX_ATTEMPTS,
+  GPT_6_ASTRA_PATTERN,
   isTransientResponsesProbeFailure,
   responsesProbeRuntimeOptions
 } = require('./protocol/probeRequests')
@@ -1378,7 +1380,9 @@ async function testRelay(input, options = {}) {
     const streamStartedAt = Date.now()
     const stream =
       chat.wireApi === 'responses'
-        ? { ok: true, status: chat.status, actualModel: chat.actualModel || '', message: '' }
+        ? chat.streamVerified
+          ? { ok: true, status: chat.status, actualModel: chat.actualModel || '', message: '' }
+          : await tryEndpoint(testResponsesStreamingEndpoint)
         : await tryEndpoint(testChatStreamingEndpoint)
     const streamLatencyMs = Date.now() - streamStartedAt
     const agentToolStartedAt = Date.now()
@@ -2292,7 +2296,7 @@ async function testChatCompletionEndpoint(normalized, signal) {
   )
 }
 
-async function testResponsesEndpoint(normalized, signal) {
+async function testResponsesEndpoint(normalized, signal, stream = !GPT_6_ASTRA_PATTERN.test(normalized.model)) {
   const { response, text, parsed, attempts } = await postResponsesProbe(normalized, signal, {
     input: [
       {
@@ -2300,19 +2304,36 @@ async function testResponsesEndpoint(normalized, signal) {
         content: [{ type: 'input_text', text: 'Reply with OK.' }]
       }
     ],
-    ...responsesProbeRuntimeOptions(normalized.model)
+    // Astra's basic health check is independent of the streaming/tool checks.
+    ...responsesProbeRuntimeOptions(normalized.model, { stream })
   })
+
+  // Some Codex-backed relays require stream=true even for basic requests.
+  if (!stream && [400, 404, 405, 422].includes(response.status)) {
+    return testResponsesEndpoint(normalized, signal, true)
+  }
 
   return {
     ok: response.ok && parsed.completed,
     wireApi: 'responses',
     status: response.status,
     actualModel: parsed.actualModel,
+    streamVerified: parsed.completed && parsed.events.length > 0,
     message: !response.ok
       ? summarizeRelayError(text, response.status)
       : parsed.completed
         ? ''
         : responsesProbeFailureMessage(parsed, '接口返回成功，但不是有效的 OpenAI Responses 聊天响应', attempts)
+  }
+}
+
+async function testResponsesStreamingEndpoint(normalized, signal) {
+  const result = await testResponsesEndpoint(normalized, signal, true)
+
+  return {
+    ...result,
+    ok: result.ok && result.streamVerified,
+    message: result.message || (result.streamVerified ? '' : 'Responses 接口没有返回完整 SSE 响应流')
   }
 }
 
@@ -2349,7 +2370,7 @@ async function postResponsesProbe(normalized, signal, body) {
       body: JSON.stringify({ model: normalized.model, store: false, ...body }),
       signal
     })
-    const text = await readResponseTextLimited(response)
+    const text = await readResponsesProbeText(response, readResponseTextLimited)
     const parsed = parseResponsesProbePayload(text)
 
     lastResult = { response, text, parsed, attempts: attempt }
@@ -2558,7 +2579,7 @@ async function testResponsesAgentToolEndpoint(normalized, signal) {
   })
   const toolCall = first.parsed.items.find(item => item?.type === 'function_call' && item?.name === toolName)
 
-  if (!first.response.ok || !toolCall) {
+  if (!first.response.ok || !first.parsed.successfulTerminal || !toolCall) {
     return {
       ok: false,
       status: first.response.status,
@@ -2609,7 +2630,7 @@ async function testResponsesAgentToolEndpoint(normalized, signal) {
     tool_choice: 'none',
     ...responsesProbeRuntimeOptions(normalized.model)
   })
-  const completed = second.response.ok && second.parsed.outputText.includes(completionMarker)
+  const completed = second.response.ok && second.parsed.completed && second.parsed.outputText.includes(completionMarker)
 
   return {
     ok: completed,
