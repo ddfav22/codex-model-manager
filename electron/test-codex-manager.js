@@ -1750,7 +1750,7 @@ async function main() {
       JSON.parse(fs.readFileSync(modelsCachePath, 'utf8'))
         .models.filter(model => model.visibility === 'list')
         .map(model => model.slug),
-      ['gpt-5.6-sol']
+      ['gpt-compat-chat']
     )
     const generatedChatGptModel = JSON.parse(fs.readFileSync(modelsCachePath, 'utf8')).models.find(
       model => model.manager_actual_model === 'gpt-compat-chat' && model.visibility === 'list'
