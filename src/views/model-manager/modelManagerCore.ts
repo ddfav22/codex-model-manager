@@ -130,6 +130,7 @@ export const modelReady = (provider: RelayProvider, model: string) => {
 
   return (
     !provider.managed ||
+    (provider.keySource === 'newapi' && capability?.available !== false) ||
     (capability?.available === true &&
       test?.ok === true &&
       test.chatOk === true &&
@@ -146,6 +147,8 @@ export const modelSummary = (provider: RelayProvider) => {
 
   const supported = models.filter(model => modelCapability(provider, model)?.available !== false).length
   const passed = models.filter(model => modelReady(provider, model)).length
+
+  if (provider.keySource === 'newapi') return `${models.length} 个模型，${supported} 个可直接使用；完整检测为可选项`
 
   return `${models.length} 个模型，${supported} 个已适配，${passed} 个已通过完整检测`
 }

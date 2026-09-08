@@ -4584,7 +4584,13 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
     throw new Error(`${model}：${selectedProfile.reason}`)
   }
 
-  if (channel.managed && id !== 'openai' && !options.skipChannelTest && !relayTestReady(testForModel(channel, model))) {
+  if (
+    channel.managed &&
+    channel.keySource !== 'newapi' &&
+    id !== 'openai' &&
+    !options.skipChannelTest &&
+    !relayTestReady(testForModel(channel, model))
+  ) {
     throw new Error('请先让该模型通过聊天、流式响应和工具续答测试，再启用。')
   }
 

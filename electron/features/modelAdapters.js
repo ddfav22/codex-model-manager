@@ -139,6 +139,12 @@ function supportedModelsForProvider(provider) {
 
     if (!profile.available) return false
 
+    // NewAPI's /v1/models response is the source of truth for availability.
+    // Connectivity tests are diagnostics and may fail transiently because of
+    // upstream capacity, permissions, or an endpoint-specific probe shape.
+    // Do not hide a model that the selected NewAPI key explicitly advertises.
+    if (provider?.keySource === 'newapi') return true
+
     return provider?.managed ? relayTestReady(test) : true
   })
 }

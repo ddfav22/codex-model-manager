@@ -2,6 +2,13 @@
 
 本项目遵循 `主版本.次版本.修订版本` 的递增方式。这里只记录适合公开发布的信息；本机路径、测试凭据和内部部署记录不会进入仓库。
 
+## 1.2.125 - 2026-09-08
+
+### NewAPI models can be used before optional diagnostics
+
+- NewAPI models returned by `/v1/models` are immediately selectable and usable when their model family is supported.
+- Chat, streaming, and tool checks remain available as diagnostics and no longer block activation for NewAPI channels.
+
 ## 1.2.113 - 2026-09-07
 
 ### Responses streaming-only relay compatibility

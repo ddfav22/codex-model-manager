@@ -41,6 +41,24 @@ assert.strictEqual(adapters.isChatGptModel('dall-e-3'), false)
 assert.strictEqual(adapters.isChatGptModel('grok-4.5'), false)
 assert.deepStrictEqual(adapters.filterChatGptModels(['grok-4.5', 'gpt-5.6', 'claude-sonnet-5']), ['gpt-5.6'])
 assert.strictEqual(adapters.preferredSupportedModel(['grok-4.5', 'claude-sonnet-5']), '')
+assert.deepStrictEqual(
+  adapters.supportedModelsForProvider({
+    managed: true,
+    keySource: 'newapi',
+    models: ['gpt-6-astra', 'gpt-5.6-sol'],
+    modelTests: {}
+  }),
+  ['gpt-6-astra', 'gpt-5.6-sol']
+)
+assert.deepStrictEqual(
+  adapters.supportedModelsForProvider({
+    managed: true,
+    keySource: 'manual',
+    models: ['gpt-5.6-sol'],
+    modelTests: {}
+  }),
+  []
+)
 const normalizedNewApi = manager._internal.normalizeRelayInput({
   name: 'NewAPI',
   baseUrl: 'https://example.test/v1',
