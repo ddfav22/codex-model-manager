@@ -73,4 +73,49 @@ assert.strictEqual(protocolProxy.inferredWireApiForModel('gpt-5.6'), 'responses'
 assert.strictEqual(protocolProxy.inferredWireApiForModel('grok-4.5'), '')
 assert.strictEqual('shouldForceGrokAgentLoopEmulation' in protocolProxy, false)
 
+const directRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-newapi-direct-'))
+const directHome = path.join(directRoot, '.codex')
+const directState = path.join(directHome, 'codex-model-manager')
+const directOptions = {
+  codexHome: directHome,
+  stateDir: directState,
+  configPath: path.join(directHome, 'config.toml'),
+  authPath: path.join(directHome, 'auth.json'),
+  modelsCachePath: path.join(directHome, 'models_cache.json'),
+  skipEnvWrite: true,
+  dryRunRestart: true,
+  skipBundledModelCapture: true,
+  skipChannelTest: false
+}
+fs.mkdirSync(directHome, { recursive: true })
+fs.writeFileSync(directOptions.configPath, '[features]\nshell_tool = true\n', 'utf8')
+fs.writeFileSync(directOptions.authPath, '{"auth_mode":"chatgpt"}\n', 'utf8')
+fs.writeFileSync(directOptions.modelsCachePath, '{"models":[{"slug":"gpt-5.6-sol","visibility":"list"}]}\n', 'utf8')
+manager._internal.ensureInitialBackup(manager.getPaths(directOptions), fs.readFileSync(directOptions.configPath, 'utf8'))
+manager.saveRelay(
+  {
+    name: 'NewAPI Direct',
+    baseUrl: 'https://ainiubi.org/v1',
+    apiKey: 'sk-direct-test',
+    keySource: 'newapi',
+    model: 'gpt-6-astra',
+    models: ['gpt-6-astra'],
+    wireApi: 'responses'
+  },
+  directOptions
+)
+process.env.CODEX_MM_NEWAPI_DIRECT_API_KEY = 'sk-direct-test'
+const directApplied = manager.applyRelay('newapi-direct', 'gpt-6-astra', directOptions)
+const directConfig = manager._internal.parseConfig(fs.readFileSync(directOptions.configPath, 'utf8'))
+assert.strictEqual(directConfig.openai_base_url, 'https://ainiubi.org/v1')
+assert.strictEqual(directConfig.model_catalog_json, manager.getPaths(directOptions).directModelsPath)
+assert.strictEqual(directConfig.model, 'gpt-6-astra')
+assert.strictEqual(directConfig.mcp_servers?.chatgpt_model_manager_image, undefined)
+assert.strictEqual(directApplied.status.currentModel, 'gpt-6-astra')
+assert.strictEqual(JSON.parse(fs.readFileSync(directOptions.authPath, 'utf8')).OPENAI_API_KEY, 'sk-direct-test')
+const directRefresh = manager.refreshManagedProviderProxyBaseUrl({ ...directOptions, proxyBaseUrl: 'http://127.0.0.1:59999' })
+assert.strictEqual(directRefresh.baseUrl, 'https://ainiubi.org/v1')
+assert.strictEqual(manager._internal.parseConfig(fs.readFileSync(directOptions.configPath, 'utf8')).openai_base_url, 'https://ainiubi.org/v1')
+delete process.env.CODEX_MM_NEWAPI_DIRECT_API_KEY
+
 console.log('chatgpt-only/restore/rolling-backup tests passed')

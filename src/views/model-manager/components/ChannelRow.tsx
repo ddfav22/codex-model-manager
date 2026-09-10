@@ -58,11 +58,12 @@ export const ChannelRow = ({
   onRemove: (id: string) => void
 }) => {
   const models = providerModels(provider)
+  const directNewApi = provider.keySource === 'newapi'
   const firstSupportedModel = models.find(model => modelCapability(provider, model)?.available !== false) || ''
-  const activeModel = selectedModel || provider.model || firstSupportedModel || models[0] || ''
+  const activeModel = [selectedModel, provider.model, firstSupportedModel, models[0]].find(model => models.includes(model)) || ''
   const selectedTest = activeModel ? modelTest(provider, activeModel) : null
   const selectedCapability = activeModel ? modelCapability(provider, activeModel) : null
-  const adapterUnavailable = provider.managed && selectedCapability?.available === false
+  const adapterUnavailable = provider.managed && !directNewApi && selectedCapability?.available === false
   const needsTest = provider.managed && !adapterUnavailable && !modelReady(provider, activeModel)
   const isCurrentSelection = provider.active && provider.model === activeModel
   const onlineKeys = provider.newApi?.keys || []
@@ -117,7 +118,7 @@ export const ChannelRow = ({
             selectingKey
               ? '正在读取模型；仍可继续选择其他 Key，以最后一次选择为准'
               : pendingApply
-                ? 'Key 已更换，测试后应用；仍可再次更换'
+                ? 'Key 已更换，选择模型后应用'
                 : onlineKeys.length < 2
                   ? '当前平台只有一个可用 Key'
                   : '随时可更换 Key'
@@ -145,9 +146,9 @@ export const ChannelRow = ({
             inputProps={{ 'aria-label': '选择启用模型' }}
           >
             {models.map(model => (
-              <MenuItem key={model} value={model} disabled={modelCapability(provider, model)?.available === false}>
+              <MenuItem key={model} value={model} disabled={!directNewApi && modelCapability(provider, model)?.available === false}>
                 {model}
-                {modelCapability(provider, model)?.available === false ? '（适配未完成，暂不可用）' : ''}
+                {!directNewApi && modelCapability(provider, model)?.available === false ? '（适配未完成，暂不可用）' : ''}
               </MenuItem>
             ))}
           </TextField>
@@ -158,7 +159,7 @@ export const ChannelRow = ({
         )}
         {models.length > 1 && (
           <Typography variant='caption' color='text.secondary' noWrap>
-            {selectedTest?.ok
+            {directNewApi ? '使用平台原始模型 ID 直连，无需检测' : selectedTest?.ok
               ? `${selectedTest.actualModel ? `实际：${selectedTest.actualModel} · ` : ''}${selectedTest.latencyMs} ms · ${
                   selectedTest.toolTransport === 'prompt-emulated' ? '兼容工具链' : '原生工具链'
                 }`
@@ -191,6 +192,8 @@ export const ChannelRow = ({
             label='测试中'
             icon={<CircularProgress size={12} color='inherit' />}
           />
+        ) : directNewApi ? (
+          <Chip color='info' size='small' variant='tonal' label='直连平台' />
         ) : provider.managed ? (
           <Chip
             color={
@@ -215,7 +218,7 @@ export const ChannelRow = ({
         ) : (
           <Chip size='small' variant='outlined' label='只读' />
         )}
-        {provider.testStatus?.latencyMs ? (
+        {!directNewApi && provider.testStatus?.latencyMs ? (
           <Typography variant='caption' color='text.secondary' noWrap>
             {provider.testStatus.actualModel ? `实际：${provider.testStatus.actualModel} · ` : ''}
             {provider.testStatus.latencyMs} ms
@@ -253,7 +256,7 @@ export const ChannelRow = ({
             {refreshing ? '修复中' : '修复适配'}
           </Button>
         )}
-        {Boolean(provider.baseUrl) && (
+        {!directNewApi && Boolean(provider.baseUrl) && (
           <Button
             size='small'
             variant='outlined'

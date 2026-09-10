@@ -501,11 +501,11 @@ const ModelManager = () => {
         const supported = models.filter(model => modelCapability(provider, model)?.available !== false)
 
         const preferred =
-          provider.model && modelCapability(provider, provider.model)?.available !== false
+          models.includes(provider.model) && (provider.keySource === 'newapi' || modelCapability(provider, provider.model)?.available !== false)
             ? provider.model
             : supported[0] || models[0] || ''
 
-        if (!selected || !models.includes(selected) || modelCapability(provider, selected)?.available === false) {
+        if (!selected || !models.includes(selected) || (provider.keySource !== 'newapi' && modelCapability(provider, selected)?.available === false)) {
           next[provider.id] = preferred
         }
       })
@@ -617,7 +617,7 @@ const ModelManager = () => {
       setAddOpen(false)
       setMessage({
         type: 'success',
-        text: `在线平台已同步，共发现 ${usableCount} 个可用 Key；每个 Key 的 /v1/models 模型会全部列出，完整检测通过的模型才同步到 Codex。`
+        text: `在线平台已同步，共发现 ${usableCount} 个可用 Key；选择平台返回的模型后即可直接启用，无需检测。`
       })
     })
 
@@ -657,7 +657,7 @@ const ModelManager = () => {
           if (isActive) setPendingApply(current => ({ ...current, [id]: true }))
           setMessage({
             type: 'success',
-            text: `已读取该 Key 的全部 ${result.models.length} 个模型；请点击“检测全部”，通过完整检测的模型会一起进入 Codex 内部切换列表。`
+            text: `已读取该 Key 的 ${result.models.length} 个模型；选择模型并应用后，Codex 将直接连接平台。`
           })
         } catch (error) {
           if (keySelectionQueue.current[id]) continue
@@ -698,7 +698,7 @@ const ModelManager = () => {
       setMessage({
         type: 'success',
         text: result.refreshedKeys
-          ? `在线平台刷新完成：${result.tokens.length} 个 Key，当前 Key 有 ${result.modelCount || 0} 个实际模型。`
+          ? `在线平台刷新完成：${result.tokens.length} 个 Key，当前 Key 有 ${result.modelCount || 0} 个模型，可直接选择并应用。`
           : `当前 Key 的模型刷新完成：读取到 ${result.modelCount || 0} 个实际模型，请重新测试后同步。`
       })
     } catch (error) {
@@ -1675,7 +1675,7 @@ const ModelManager = () => {
 
   const helpText: Record<Section, string> = {
     channels:
-      '本地渠道和在线渠道分区显示。在线渠道启用后仍可更换 Key；模型以该 Key 的 /v1/models 实际结果为准。“检测全部”会逐个验证当前 Key 的 ChatGPT/OpenAI 模型；通过普通聊天、流式响应、工具调用和工具结果续答的模型会一起进入 Codex 内部切换列表。其他模型会显示“仅支持 ChatGPT/OpenAI 模型，暂不可用”。Codex 内部下拉框使用原生模型槽位别名映射到实际模型，并按模型分别适配推理强度、推理摘要和速度服务等级。',
+      'NewAPI 渠道按当前 Key 的 /v1/models 结果显示 ChatGPT/OpenAI 模型。选择模型并应用后，Codex 直接连接平台地址，使用原始模型 ID，无需检测。更换 Key 或刷新模型后，再次应用即可生效。',
     conversations:
       '未归档包含正在使用和导入的对话，已归档来自 archived_sessions。统一导入支持对话 JSONL 或项目文件夹；统一导出支持会话 JSONL 或完整项目 ZIP。可以按项目或关键词筛选。默认“删除筛选内容”只删除对话文件和项目记录，不会删除磁盘项目文件夹；只有明确点击“清理项目文件夹”才会尝试删除目录。删除后会刷新列表并报告客户端索引同步结果；如 Codex 仍显示旧任务，请点击“修复客户端索引”并重启。',
     skills:

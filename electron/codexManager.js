@@ -3,6 +3,7 @@ const os = require('os')
 const path = require('path')
 const readline = require('readline')
 const { execFile, execFileSync, spawn } = require('child_process')
+const { Agent: UndiciAgent } = require('undici')
 const toml = require('smol-toml')
 const { DEFAULT_PROTOCOL_PROXY_PORT } = require('./protocol/constants')
 const { modelIdentityInstruction, modelIdentityLabel } = require('./protocol/modelRouting')
@@ -63,6 +64,10 @@ const CHANNELS_FILENAME = 'channels.json'
 const NEWAPI_FILENAME = 'newapi.json'
 const NEWAPI_CHANNEL_DISPLAY_NAME = 'NewAPI 渠道'
 const DEFAULT_NEWAPI_BASE_URL = 'https://ainiubi.org'
+// Some self-hosted NewAPI instances use a self-signed certificate (especially
+// when accessed by an IP address). Keep this exception scoped to NewAPI
+// administration/model discovery; ordinary upstream requests remain verified.
+const NEWAPI_INSECURE_AGENT = new UndiciAgent({ connect: { rejectUnauthorized: false } })
 const INITIAL_BACKUP_FILENAME = 'initial-backup.json'
 const MODELS_CACHE_FILENAME = 'models_cache.json'
 const NATIVE_MODELS_FILENAME = 'native-models.json'
@@ -144,6 +149,7 @@ function getPaths(overrides = {}) {
     configPath: overrides.configPath || path.join(codexHome, 'config.toml'),
     authPath: overrides.authPath || path.join(codexHome, 'auth.json'),
     modelsCachePath: overrides.modelsCachePath || path.join(codexHome, MODELS_CACHE_FILENAME),
+    directModelsPath: overrides.directModelsPath || path.join(stateDir, 'newapi_models.json'),
     nativeModelsPath: overrides.nativeModelsPath || path.join(stateDir, NATIVE_MODELS_FILENAME),
     modelAliasesPath: overrides.modelAliasesPath || path.join(stateDir, MODEL_ALIASES_FILENAME),
     channelsPath: overrides.channelsPath || path.join(stateDir, CHANNELS_FILENAME),
@@ -961,6 +967,60 @@ function refreshManagedProviderProxyBaseUrl(options = {}) {
 
   if (!activeChannel) {
     return { updated: false, reason: 'not-managed-provider', providerId: currentProvider }
+  }
+
+  // NewAPI is a direct OpenAI-compatible provider. Keep the configured base
+  // URL intact so Codex sends the selected upstream model ID straight to the
+  // platform instead of routing it through the local compatibility proxy.
+  if (activeChannel.keySource === 'newapi') {
+    const directBaseUrl = String(activeChannel.baseUrl || '').replace(/\/+$/, '')
+    const configuredBaseUrl = currentProvider === 'openai' ? parsed.openai_base_url || '' : ''
+    const apiKey = selectedNewApiKey(activeChannel) || readUserEnvVar(activeChannel.envKey)
+    const listedModels = modelListFromProvider(activeChannel)
+    const currentModel = String(parsed.model || '').trim()
+    const selectedModel =
+      listedModels.find(model => model.toLowerCase() === currentModel.toLowerCase()) ||
+      activeChannel.model ||
+      listedModels[0] ||
+      ''
+    const before = protectedStateSnapshot(paths, current)
+
+    if (!directBaseUrl) return { updated: false, reason: 'missing-direct-base-url', providerId: activeChannel.id }
+
+    try {
+      let next = removeManagedProviderBlocks(current, channels)
+      next = setRootKey(next, 'model_provider', 'openai')
+      next = setRootKey(next, 'openai_base_url', directBaseUrl)
+      next = setRootKey(next, 'model_catalog_json', paths.directModelsPath)
+      if (selectedModel) next = setRootKey(next, 'model', selectedModel)
+      next = removeRootKey(next, 'preferred_auth_method')
+      next = removeManagedImageMcp(next)
+      // Migration/startup can reach this path before applyRelay has built the
+      // dedicated catalog. Always materialize it so Codex can load the model.
+      if (listedModels.length && (!fs.existsSync(paths.directModelsPath) || fs.statSync(paths.directModelsPath).size === 0)) {
+        writeChannelModelCatalog(paths.directModelsPath, listedModels, [], {
+          channelId: activeChannel.id,
+          modelAliasesPath: paths.modelAliasesPath,
+          modelTests: activeChannel.modelTests
+        })
+      }
+      if (apiKey) writeApiKeyAuth(paths.authPath, apiKey, { forceApiKeyMode: true })
+      next = preserveProjectBlocks(current, next)
+      parseConfig(next)
+      writeText(paths.configPath, next)
+      assertNoProtectedStateLoss(before, protectedStateSnapshot(paths, next))
+    } catch (error) {
+      writeText(paths.configPath, current)
+      throw error
+    }
+
+    return {
+      updated: normalizeBaseUrl(configuredBaseUrl) !== normalizeBaseUrl(directBaseUrl),
+      reason: 'newapi-direct-provider',
+      providerId: activeChannel.id,
+      codexProviderId: 'openai',
+      baseUrl: directBaseUrl
+    }
   }
 
   const localBaseUrl = `${protocolProxyBaseUrl(options)}/v1/${encodeURIComponent(activeChannel.id)}`
@@ -1793,7 +1853,8 @@ async function newApiLogin(input, options = {}) {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ username, password }),
-        signal: controller.signal
+        signal: controller.signal,
+        dispatcher: NEWAPI_INSECURE_AGENT
       })
     )
     const data = result.data
@@ -1827,13 +1888,13 @@ async function newApiLogin(input, options = {}) {
 
 async function newApiRequest(baseUrl, auth, pathName, options = {}) {
   try {
-    return await fetchJson(`${baseUrl}${pathName}`, {
+    return await fetchJson(`${baseUrl}${pathName}`, newApiFetchOptions({
       ...options,
       headers: authHeaders(auth, {
         'content-type': 'application/json',
         ...(options.headers || {})
       })
-    })
+    }))
   } catch (error) {
     throw new Error(`${pathName}：${error instanceof Error ? error.message : String(error)}`)
   }
@@ -1900,10 +1961,10 @@ async function listNewApiKeyModels(relayBaseUrl, apiKey, userHeader) {
   if (!apiKey) return []
 
   try {
-    const data = await fetchJson(`${relayBaseUrl}/models`, {
+    const data = await fetchJson(`${relayBaseUrl}/models`, newApiFetchOptions({
       method: 'GET',
       headers: relayHeaders(apiKey, withNewApiUserHeader({}, userHeader))
-    })
+    }))
 
     return collectModelIds(data)
   } catch {
@@ -2326,6 +2387,10 @@ async function testResponsesEndpoint(normalized, signal, stream = true) {
         ? ''
         : responsesProbeFailureMessage(parsed, '接口返回成功，但不是有效的 OpenAI Responses 聊天响应', attempts)
   }
+}
+
+function newApiFetchOptions(options = {}) {
+  return { ...options, dispatcher: NEWAPI_INSECURE_AGENT }
 }
 
 async function testResponsesStreamingEndpoint(normalized, signal) {
@@ -4344,7 +4409,9 @@ function readStatus(options = {}) {
   const activeManagedChannel = managedChannelFromConfig(parsed, managedChannels)
   const aliasState = readModelAliases(paths.modelAliasesPath)
   const currentModel =
-    activeManagedChannel && aliasState.channelId === activeManagedChannel.id
+    activeManagedChannel?.keySource === 'newapi'
+      ? currentCodexModel
+      : activeManagedChannel && aliasState.channelId === activeManagedChannel.id
       ? aliasState.aliases[currentCodexModel] || currentCodexModel
       : currentCodexModel
   const newApi = publicNewApiState(parseJsonFile(paths.newApiPath, {}))
@@ -4383,7 +4450,9 @@ function readProviderState(options = {}) {
   const aliasState = readModelAliases(paths.modelAliasesPath)
   const activeManagedChannel = managedChannelFromConfig(parsed, managedChannels)
   const currentModel =
-    activeManagedChannel && aliasState.channelId === activeManagedChannel.id
+    activeManagedChannel?.keySource === 'newapi'
+      ? parsed.model || ''
+      : activeManagedChannel && aliasState.channelId === activeManagedChannel.id
       ? aliasState.aliases[parsed.model] || parsed.model || ''
       : parsed.model || ''
   const configProviders = configProvidersFromParsed(parsed, currentProvider, currentModel)
@@ -4607,9 +4676,12 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
   const authSnapshot = channel.managed ? backupAuth(paths.authPath) : null
   const modelsCacheSnapshot = channel.managed ? backupFile(paths.modelsCachePath, 'models-change') : null
   const modelAliasesSnapshot = channel.managed ? backupFile(paths.modelAliasesPath, 'model-aliases-change') : null
+  const directModelsSnapshot = channel.keySource === 'newapi' ? backupFile(paths.directModelsPath, 'newapi-models-change') : null
   let authLogin = null
   let modelCatalogMs = 0
   let modelCatalogResult = null
+  const directNewApi = channel.keySource === 'newapi'
+  const modelCatalogPath = directNewApi ? paths.directModelsPath : paths.modelsCachePath
 
   try {
     let next = current || ''
@@ -4617,19 +4689,21 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
     if (channel.managed) {
       if (channel.keySource === 'newapi') process.env[channel.envKey] = apiKey
 
-      next = setRootKey(next, 'model_catalog_json', paths.modelsCachePath)
+      next = setRootKey(next, 'model_catalog_json', modelCatalogPath)
       const managerApiKeys = providerState.providers
         .filter(provider => provider.managed)
         .flatMap(provider => [selectedNewApiKey(provider), provider.envKey ? readUserEnvVar(provider.envKey) : ''])
       reportActivationProgress(options, 'configuring-login', 32, '正在配置 API Key 登录')
       authLogin =
-        options.loginWithApiKey === true
+        directNewApi || options.loginWithApiKey === true
           ? loginFreshClientWithApiKey(paths, apiKey, {
               forceApiKeyMode: true,
               dryRunRestart: options.dryRunRestart
             })
           : reconcileAuthForCustomProvider(paths, [...managerApiKeys, apiKey])
-      const localBaseUrl = `${protocolProxyBaseUrl(options)}/v1/${encodeURIComponent(channel.id)}`
+      const localBaseUrl = directNewApi
+        ? channel.baseUrl
+        : `${protocolProxyBaseUrl(options)}/v1/${encodeURIComponent(channel.id)}`
 
       // Keep Codex's built-in provider identity stable. Desktop task history is
       // associated with the provider recorded in each session; changing this to
@@ -4639,7 +4713,8 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
       next = setRootKey(next, 'model_provider', 'openai')
       next = setRootKey(next, 'openai_base_url', localBaseUrl)
       next = removeRootKey(next, 'preferred_auth_method')
-      next = configureManagedImageMcp(next, channel.id, options)
+      if (directNewApi) next = removeManagedImageMcp(next)
+      else next = configureManagedImageMcp(next, channel.id, options)
     } else {
       next = setRootKey(next, 'model_provider', channel.id)
       next = removeRootKey(next, 'openai_base_url')
@@ -4661,7 +4736,7 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
 
       const catalogModels = options.skipChannelTest ? models : supportedModelsForProvider(channel)
 
-      modelCatalogResult = writeChannelModelCatalog(paths.modelsCachePath, catalogModels, templateCatalogPaths, {
+      modelCatalogResult = writeChannelModelCatalog(modelCatalogPath, catalogModels, templateCatalogPaths, {
         channelId: channel.id,
         modelAliasesPath: paths.modelAliasesPath,
         modelTests: channel.modelTests
@@ -4678,12 +4753,24 @@ function applyRelay(id, modelOrOptions = {}, maybeOptions = {}) {
     parseConfig(next)
     writeText(paths.configPath, next)
     assertNoProtectedStateLoss(before, protectedStateSnapshot(paths, next))
+    if (channel.managed) {
+      const channels = parseJsonFile(paths.channelsPath, [])
+      saveChannels(
+        paths.channelsPath,
+        channels.map(item =>
+          item.id === channel.id
+            ? { ...item, model, updatedAt: new Date().toISOString() }
+            : item
+        )
+      )
+    }
     reportActivationProgress(options, 'configuration-written', 52, '渠道、登录和模型配置已写入')
   } catch (error) {
     writeText(paths.configPath, current)
     restoreAuthSnapshot(authSnapshot, paths.authPath)
     restoreFileSnapshot(modelsCacheSnapshot, paths.modelsCachePath)
     restoreFileSnapshot(modelAliasesSnapshot, paths.modelAliasesPath)
+    restoreFileSnapshot(directModelsSnapshot, paths.directModelsPath)
     throw error
   }
 
@@ -4874,6 +4961,7 @@ function migrateManagedProviderAuth(options = {}) {
   const activeChannel = managedChannelFromConfig(parsed, channels)
 
   if (!activeChannel) return { action: 'not-managed-provider' }
+  if (activeChannel.keySource === 'newapi') return { action: 'newapi-direct-auth' }
 
   const managerApiKeys = channels
     .filter(channel => channel.managed)

@@ -111,7 +111,9 @@ export const uniqueModels = (values: Array<string | undefined>) => {
 }
 
 export const providerModels = (provider: RelayProvider) => {
-  const models = uniqueModels([...(provider.models || []), provider.model])
+  const models = uniqueModels(
+    provider.keySource === 'newapi' ? provider.models || [] : [...(provider.models || []), provider.model]
+  )
 
   // NewAPI is ChatGPT-only in the desktop workflow.  Keep legacy models in
   // the on-disk channel for migration/rollback, but never offer them in the
@@ -130,7 +132,7 @@ export const modelReady = (provider: RelayProvider, model: string) => {
 
   return (
     !provider.managed ||
-    (provider.keySource === 'newapi' && capability?.available !== false) ||
+    (provider.keySource === 'newapi' && providerModels(provider).includes(model)) ||
     (capability?.available === true &&
       test?.ok === true &&
       test.chatOk === true &&
@@ -148,7 +150,7 @@ export const modelSummary = (provider: RelayProvider) => {
   const supported = models.filter(model => modelCapability(provider, model)?.available !== false).length
   const passed = models.filter(model => modelReady(provider, model)).length
 
-  if (provider.keySource === 'newapi') return `${models.length} 个模型，${supported} 个可直接使用；完整检测为可选项`
+  if (provider.keySource === 'newapi') return `${models.length} 个模型，可直接连接平台`
 
   return `${models.length} 个模型，${supported} 个已适配，${passed} 个已通过完整检测`
 }

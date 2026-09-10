@@ -341,6 +341,36 @@ async function initializeProtocolRuntime() {
     action: authMigration?.action || '',
     durationMs: Date.now() - authMigrationStartedAt
   })
+  let activeProvider = null
+  try {
+    activeProvider = manager.readStatus().providers.find(provider => provider.active) || null
+  } catch (error) {
+    logEvent('warn', 'provider.status.readFailed', { message: error instanceof Error ? error.message : String(error) })
+  }
+
+  // NewAPI uses Codex's native OpenAI provider with the platform URL directly.
+  // Do not allocate a loopback proxy for this path; the proxy remains reserved
+  // for legacy manually managed compatibility channels.
+  if (activeProvider?.keySource === 'newapi') {
+    const directStartedAt = Date.now()
+    const directConfig = manager.refreshManagedProviderProxyBaseUrl()
+    writeRuntimeDiagnostic(
+      {
+        startedAt: new Date().toISOString(),
+        protocolProxy: null,
+        proxyConfigMigration: directConfig,
+        lastProxyRequest: null
+      },
+      { lightweight: true }
+    )
+    logEvent('info', 'provider.directRuntime.complete', {
+      providerId: activeProvider.id,
+      baseUrl: directConfig?.baseUrl || activeProvider.baseUrl || '',
+      durationMs: Date.now() - directStartedAt
+    })
+    return { authMigration, proxyConfigMigration: directConfig, direct: true, durationMs: Date.now() - runtimeStartedAt }
+  }
+
   const proxyStartedAt = Date.now()
 
   protocolProxy = await createProtocolProxy({
